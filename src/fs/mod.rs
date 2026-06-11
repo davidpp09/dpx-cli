@@ -173,6 +173,31 @@ pub fn parse_plan(text: &str) -> Option<Vec<(bool, String)>> {
     None
 }
 
+/// Convierte un plan parseado (lista de pares hecho/texto) a formato Markdown
+/// para persistencia entre sesiones.
+pub fn plan_to_markdown(plan: &[(bool, String)]) -> String {
+    let mut md = String::from("# Plan pendiente\n\n```dpx:plan\n");
+    for (done, text) in plan {
+        let marker = if *done { "[x]" } else { "[ ]" };
+        md.push_str(&format!("{marker} {text}\n"));
+    }
+    md.push_str("```\n");
+    md
+}
+
+/// Extrae el último plan de una lista de turnos de sesión (el más reciente
+/// bloque `dpx:plan` emitido por el asistente).
+pub fn extract_last_plan(turns: &[crate::session::Turn]) -> Option<Vec<(bool, String)>> {
+    for turn in turns.iter().rev() {
+        if turn.role == "assistant" {
+            if let Some(plan) = parse_plan(&turn.text) {
+                return Some(plan);
+            }
+        }
+    }
+    None
+}
+
 /// Tiempo máximo de ejecución de un comando (`dpx:run` y búsquedas). Un proceso
 /// que no termina (servidor, watch) se corta y se le explica al modelo.
 pub const RUN_TIMEOUT_SECS: u64 = 180;
@@ -1038,6 +1063,42 @@ mod tests {
 
         fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn plan_to_markdown_redondea_correctamente() {
+        let plan = vec![
+            (true, "Migrar a jakarta.*".to_string()),
+            (false, "Añadir validación".to_string()),
+            (false, "Escribir tests".to_string()),
+        ];
+        let md = plan_to_markdown(&plan);
+        assert!(md.contains("[x] Migrar a jakarta.*"));
+        assert!(md.contains("[ ] Añadir validación"));
+        assert!(md.contains("[ ] Escribir tests"));
+        assert!(md.contains("```dpx:plan"));
+    }
+
+    #[test]
+    fn extract_last_plan_encuentra_el_mas_reciente() {
+        let turns = vec![
+            crate::session::Turn { role: "assistant", text: "```dpx:plan\n[x] Tarea 1\n```".into() },
+            crate::session::Turn { role: "user", text: "ok".into() },
+            crate::session::Turn { role: "assistant", text: "```dpx:plan\n[ ] Tarea 2\n```".into() },
+        ];
+        let plan = extract_last_plan(&turns).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert!(!plan[0].0);
+        assert_eq!(plan[0].1, "Tarea 2");
+    }
+
+    #[test]
+    fn extract_last_plan_sin_plan_devuelve_none() {
+        let turns = vec![
+            crate::session::Turn { role: "assistant", text: "texto normal".into() },
+            crate::session::Turn { role: "user", text: "hola".into() },
+        ];
+        assert!(extract_last_plan(&turns).is_none());
+    }
 }
 
 /// Extrae el marcador `dpx:delete path=<ruta>`
@@ -1077,13 +1138,11 @@ pub fn parse_deletes(text: &str) -> Vec<String> {
 /// Extrae el marcador `dpx:search pattern=<patron>`
 pub fn parse_search_marker(s: &str) -> Option<String> {
     let rest = s.trim().strip_prefix("dpx:search")?;
-    // split_once para permitir espacios en el patr�n si no tiene comillas, o usar trim_matches
     let pat = rest.split_whitespace().find_map(|tok| tok.strip_prefix("pattern="));
     if let Some(p) = pat {
         let cleaned = p.trim_matches('"').to_string();
         if !cleaned.is_empty() { return Some(cleaned); }
     }
-    // Fallback: si el patr�n tiene espacios y comillas
     if let Some(idx) = rest.find("pattern=\"") {
         let start = idx + 9;
         if let Some(end) = rest[start..].find('"') {
@@ -1093,7 +1152,7 @@ pub fn parse_search_marker(s: &str) -> Option<String> {
     None
 }
 
-/// Extrae las peticiones de b�squeda `dpx:search pattern=...`
+/// Extrae las peticiones de búsqueda `dpx:search pattern=...`
 pub fn parse_searches(text: &str) -> Vec<String> {
     let mut searches = Vec::new();
     let mut lines = text.lines().peekable();
@@ -1139,6 +1198,5 @@ pub fn search_in_project(cwd: &Path, pattern: &str) -> String {
     };
 
     let out = run_command(cwd, &cmd);
-    cap_tail(&out, 100) // Limitar a 100 líneas para no inundar el contexto
+    cap_tail(&out, 100)
 }
-

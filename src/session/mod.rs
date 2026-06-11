@@ -78,6 +78,29 @@ impl ProjectStore {
         Ok(())
     }
 
+    /// Lee el plan pendiente de la sesión anterior, si existe.
+    pub fn read_plan(&self) -> Option<String> {
+        fs::read_to_string(self.root.join("plan.md")).ok()
+    }
+
+    /// Guarda el plan pendiente para retomarlo en la siguiente sesión.
+    pub fn write_plan(&self, markdown: &str) -> Result<()> {
+        let path = self.root.join("plan.md");
+        fs::write(&path, markdown)
+            .with_context(|| format!("No se pudo escribir {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Borra el plan pendiente (no hay plan activo en esta sesión).
+    pub fn remove_plan(&self) -> Result<()> {
+        let path = self.root.join("plan.md");
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("No se pudo borrar {}", path.display()))?;
+        }
+        Ok(())
+    }
+
     /// Comandos que el usuario marcó como "permitir siempre" en este proyecto
     /// (`.dpx/allowed_commands`, uno por línea, coincidencia exacta).
     pub fn allowed_commands(&self) -> Vec<String> {

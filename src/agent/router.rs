@@ -140,8 +140,8 @@ impl Brain {
 
 /// Model IDs de DeepSeek: `pro` razona (cerebro principal), `flash` es 12x más
 /// barato para tareas mecánicas (resúmenes, verificación).
-const DEEPSEEK_PRO: &str = "deepseek-v4-pro";
-const DEEPSEEK_FLASH: &str = "deepseek-v4-flash";
+const DEEPSEEK_PRO: &str = "deepseek-reasoner";
+const DEEPSEEK_FLASH: &str = "deepseek-chat";
 
 /// Body extra para activar el "thinking" de DeepSeek con el effort dado.
 /// La API solo acepta `"high"` o `"max"` (cf. docs: `xhigh`→`max`, `low/medium`→`high`).

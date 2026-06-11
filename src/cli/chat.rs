@@ -32,6 +32,12 @@ pub async fn run(focus: Option<String>, mode: Mode, brain: Brain, persona: Perso
         None => startup_flow(&cwd, &store),
     };
 
+    // Plan pendiente de la sesión anterior (`.dpx/plan.md`): se muestra como
+    // checklist y se inyecta junto con la memoria para que el mentor lo
+    // continúe. Si el usuario rechazó retomar la memoria, también se respeta
+    // aquí (prior = None ⇒ el plan no se inyecta esta sesión).
+    let prior = resume_plan(&store, prior);
+
     // Estado mutable de la sesión (los comandos pueden cambiarlo en caliente).
     let mut focus_id = focus_id;
     let mut mode = mode;
@@ -935,6 +941,52 @@ fn persona_label(persona: Persona) -> &'static str {
 }
 
 /// Cierre limpio: genera y persiste el contexto del proyecto.
+/// Si hay un plan pendiente guardado y la memoria se está retomando, lo
+/// muestra como checklist y lo añade al contexto que se inyecta al modelo,
+/// con la instrucción de continuarlo.
+fn resume_plan(store: &ProjectStore, prior: Option<String>) -> Option<String> {
+    let prior = prior?;
+    let Some(plan_md) = store.read_plan() else {
+        return Some(prior);
+    };
+    if let Some(items) = crate::fs::parse_plan(&plan_md) {
+        ui::checklist(&items);
+        println!("  {}", ui::dim("plan pendiente de la sesión anterior · lo retomamos"));
+    }
+    Some(format!(
+        "{prior}\n\n{plan_md}\nEste plan quedó pendiente de la sesión anterior: re-emítelo \
+         (actualizado) con un bloque dpx:plan en tu primera respuesta y continúa desde la \
+         primera tarea sin hacer."
+    ))
+}
+
+/// Cierre del ciclo del plan: si la sesión emitió un `dpx:plan` con tareas
+/// pendientes, se guarda en `.dpx/plan.md` para retomarlo; si quedó completo,
+/// se limpia. Si la sesión no emitió plan, se conserva el que ya hubiera.
+fn persist_plan(store: &ProjectStore, turns: &[Turn]) {
+    match crate::fs::extract_last_plan(turns) {
+        Some(plan) if plan.iter().any(|(done, _)| !done) => {
+            let pending = plan.iter().filter(|(done, _)| !done).count();
+            match store.write_plan(&crate::fs::plan_to_markdown(&plan)) {
+                Ok(()) => println!(
+                    "{}",
+                    ui::dim(&format!(
+                        "plan pendiente guardado en .dpx/plan.md · {pending} tareas por hacer"
+                    ))
+                ),
+                Err(e) => eprintln!("{} no pude guardar el plan: {e}", ui::accent("⏺")),
+            }
+        }
+        Some(_) => {
+            // Plan completado: ciclo cerrado, fuera el archivo.
+            if let Err(e) = store.remove_plan() {
+                eprintln!("{} no pude limpiar el plan: {e}", ui::accent("⏺"));
+            }
+        }
+        None => {}
+    }
+}
+
 async fn close_session(
     router: &ModelRouter,
     store: &ProjectStore,
@@ -945,6 +997,10 @@ async fn close_session(
         println!("\n{}", ui::dim("sesión vacía: no hay nada que recordar. Hasta luego."));
         return;
     }
+
+    // El plan se persiste aparte del resumen (y antes: si el modelo del
+    // resumen falla, el plan no se pierde).
+    persist_plan(store, turns);
 
     let spinner = ui::Spinner::start("Guardando memoria…");
     let summary = session::summarize(router, turns, prior).await;
@@ -1687,6 +1743,59 @@ mod tests {
         let inputs = fake.inputs.borrow();
         assert_eq!(inputs.len(), 2);
         assert!(inputs[1].contains("rechazó ejecutar"));
+    }
+
+    // ----- ciclo del plan persistente (.dpx/plan.md) -----
+
+    fn turn_with_plan(marks: &str) -> Vec<Turn> {
+        // marks: una letra por tarea, 'x' hecha / 'o' pendiente.
+        let mut body = String::from("va el plan:\n```dpx:plan\n");
+        for (i, m) in marks.chars().enumerate() {
+            let mark = if m == 'x' { "[x]" } else { "[ ]" };
+            body.push_str(&format!("{mark} tarea {i}\n"));
+        }
+        body.push_str("```\n");
+        vec![Turn { role: "assistant", text: body }]
+    }
+
+    #[test]
+    fn plan_con_pendientes_se_guarda_al_cerrar() {
+        let dir = tmp("plan-save");
+        let store = ProjectStore::init(&dir).unwrap();
+        persist_plan(&store, &turn_with_plan("xo"));
+        let saved = store.read_plan().expect("debió guardar .dpx/plan.md");
+        assert!(saved.contains("[x] tarea 0"));
+        assert!(saved.contains("[ ] tarea 1"));
+    }
+
+    #[test]
+    fn plan_completo_se_limpia_y_sin_plan_se_conserva() {
+        let dir = tmp("plan-clear");
+        let store = ProjectStore::init(&dir).unwrap();
+        store.write_plan("# Plan pendiente\n\n```dpx:plan\n[ ] vieja\n```\n").unwrap();
+        // Sesión sin plan: el archivo anterior se conserva.
+        persist_plan(&store, &[Turn { role: "assistant", text: "sin plan".into() }]);
+        assert!(store.read_plan().is_some());
+        // Sesión con el plan completado: se limpia.
+        persist_plan(&store, &turn_with_plan("xx"));
+        assert!(store.read_plan().is_none());
+    }
+
+    #[test]
+    fn resume_plan_inyecta_y_respeta_el_rechazo_de_memoria() {
+        let dir = tmp("plan-resume");
+        let store = ProjectStore::init(&dir).unwrap();
+        store.write_plan("# Plan pendiente\n\n```dpx:plan\n[ ] seguir\n```\n").unwrap();
+        // Con memoria retomada: el plan viaja en el contexto inyectado.
+        let prior = resume_plan(&store, Some("contexto previo".into())).unwrap();
+        assert!(prior.contains("contexto previo"));
+        assert!(prior.contains("[ ] seguir"));
+        assert!(prior.contains("re-emítelo"));
+        // Memoria rechazada (None): el plan NO se inyecta.
+        assert!(resume_plan(&store, None).is_none());
+        // Sin plan guardado: el contexto pasa intacto.
+        store.remove_plan().unwrap();
+        assert_eq!(resume_plan(&store, Some("solo".into())).unwrap(), "solo");
     }
 
     // ----- tool calls nativas (function calling) -----
