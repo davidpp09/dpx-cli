@@ -473,13 +473,12 @@ pub fn diagnostic_panel(hint: &str, suggestions: &[String]) {
     }
 }
 
-/// Presupuesto blando de contexto para la barra de `/status` (tokens).
-pub const CONTEXT_BUDGET: usize = 128_000;
-
-/// Barra de uso del contexto de la sesión (estimación aproximada por caracteres).
-pub fn context_meter(used_tokens: usize) -> String {
+/// Barra de uso del contexto de la sesión (estimación aproximada por
+/// caracteres), contra el presupuesto del cerebro ACTIVO.
+pub fn context_meter(used_tokens: usize, budget: usize) -> String {
     const CELLS: usize = 16;
-    let frac = (used_tokens as f64 / CONTEXT_BUDGET as f64).clamp(0.0, 1.0);
+    let budget = budget.max(1);
+    let frac = (used_tokens as f64 / budget as f64).clamp(0.0, 1.0);
     let filled = (frac * CELLS as f64).round() as usize;
     let bar = format!("{}{}", accent(&"█".repeat(filled)), dim(&"░".repeat(CELLS - filled)));
     let pct = (frac * 100.0).round() as usize;
@@ -488,7 +487,7 @@ pub fn context_meter(used_tokens: usize) -> String {
     } else {
         format!("~{used_tokens}")
     };
-    format!("{bar} {pct}% · {used}/{}k tok", CONTEXT_BUDGET / 1000)
+    format!("{bar} {pct}% · {used}/{}k tok", budget / 1000)
 }
 
 /// Convierte un error de proveedor (a veces un JSON enorme) en un mensaje corto
@@ -499,14 +498,14 @@ pub fn friendly_error(err: &str) -> String {
         || err.contains("Too Many Requests")
         || err.contains("quota")
     {
-        return "límite de cuota del modelo alcanzado (free tier). Cambia de cerebro: \
-                /brain groq · /brain mistral · /brain deepseek (o espera al reset)."
+        return "límite de cuota del modelo alcanzado. Cambia de cerebro: \
+                /brain deepseek · /brain kimi · /brain qwen (o espera al reset)."
             .to_string();
     }
     if err.contains("402") || err.contains("Insufficient Balance") || err.contains("Payment Required")
     {
         return "este modelo no tiene saldo. Cambia de cerebro: \
-                /brain gemini · /brain groq · /brain mistral."
+                /brain kimi · /brain qwen."
             .to_string();
     }
     if err.contains("401") || err.contains("Unauthorized") || err.contains("invalid_api_key") {
@@ -635,6 +634,7 @@ pub fn status_panel(
     turns: usize,
     dpx_active: bool,
     context_tokens: usize,
+    context_budget: usize,
 ) {
     println!("\n{}", accent("⏺ dpx · estado"));
     let row = |k: &str, v: &str| println!("  {}   {v}", dim(&format!("{k:<8}")));
@@ -652,7 +652,11 @@ pub fn status_panel(
     let memoria = if dpx_active { "memoria .dpx activa" } else { "sin memoria .dpx" };
     let plural = if turns == 1 { "turno" } else { "turnos" };
     println!("\n  {}   {turns} {plural} · {memoria}", dim(&format!("{:<8}", "sesión")));
-    println!("  {}   {}", dim(&format!("{:<8}", "contexto")), context_meter(context_tokens));
+    println!(
+        "  {}   {}",
+        dim(&format!("{:<8}", "contexto")),
+        context_meter(context_tokens, context_budget)
+    );
 }
 
 /// Lista de cerebros con su superpoder (comando `/models`).
@@ -662,7 +666,7 @@ pub fn models_list(brains: &[BrainRow]) {
     print_brain_rows(brains);
     println!(
         "\n{}",
-        dim("● activo · ✓/✗ = API key en tu .env · solo DeepSeek va fino en agéntico")
+        dim("● activo · ✓/✗ = API key en tu .env · los tres soportan tool-calling nativo")
     );
 }
 
@@ -678,7 +682,7 @@ pub fn print_help() {
         ("/context", "muestra la memoria guardada del proyecto"),
         ("/focus [id]", "cambia de enfoque (sin id: lista los disponibles)"),
         ("/mode [pro|hack]", "cambia la actitud del mentor"),
-        ("/brain [modelo]", "cambia el cerebro: deepseek|gemini|groq|mistral"),
+        ("/brain [modelo]", "cambia el cerebro: deepseek|kimi|qwen"),
         ("/mentor", "persona mentor: enseña y te deja escribir"),
         ("/code", "persona code: agente autónomo que hace e itera"),
         ("/salir", "termina y guarda el contexto"),

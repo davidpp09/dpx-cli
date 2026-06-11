@@ -12,7 +12,7 @@ use rig_core::agent::Agent;
 use rig_core::client::{CompletionClient, ProviderClient};
 use rig_core::completion::{AssistantContent, Message, Prompt};
 use rig_core::message::ToolCall;
-use rig_core::providers::{deepseek, gemini, groq, mistral};
+use rig_core::providers::{deepseek, moonshot, openrouter};
 use rig_core::streaming::{StreamedAssistantContent, StreamingCompletion};
 
 use crate::focus::Mode;
@@ -24,37 +24,37 @@ pub struct ChatReply {
     pub calls: Vec<ToolCall>,
 }
 
-/// Proveedor que hace de cerebro mentor.
+/// Proveedor que hace de cerebro mentor. Los tres del plan anti-suscripción:
+/// DeepSeek (principal), Kimi y Qwen — todos fuertes en tool-calling nativo.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum Brain {
-    /// DeepSeek v4 Pro: el más fuerte en código/razonamiento (requiere saldo).
+    /// DeepSeek (razonador): el cerebro principal, fuerte en código y agéntico.
     Deepseek,
-    /// Gemini 2.5 Flash: capaz y con free tier. Default actual.
-    Gemini,
-    /// Groq (Llama 3.3 70B): respuestas muy rápidas.
-    Groq,
-    /// Mistral Large: salida estructurada y multilingüe.
-    Mistral,
+    /// Kimi K2.5 (Moonshot): agéntico sólido y contexto largo.
+    Kimi,
+    /// Qwen3 Coder (vía OpenRouter): especializado en código, muy barato.
+    Qwen,
 }
+
+/// Model ID de Qwen en OpenRouter (no hay constante en rig-core para este).
+const QWEN_CODER: &str = "qwen/qwen3-coder";
 
 impl Brain {
     /// ID de modelo a usar en cada proveedor (cf. constantes de `rig-core`).
     fn model_id(self) -> &'static str {
         match self {
             Brain::Deepseek => DEEPSEEK_PRO,
-            Brain::Gemini => "gemini-2.5-flash",
-            Brain::Groq => "llama-3.3-70b-versatile",
-            Brain::Mistral => "mistral-large-latest",
+            Brain::Kimi => moonshot::KIMI_K2_5,
+            Brain::Qwen => QWEN_CODER,
         }
     }
 
     /// Nombre legible y completo del cerebro (para banners y `/status`).
     pub fn label(self) -> &'static str {
         match self {
-            Brain::Deepseek => "DeepSeek v4 Pro",
-            Brain::Gemini => "Gemini 2.5 Flash",
-            Brain::Groq => "Groq · Llama 3.3 70B",
-            Brain::Mistral => "Mistral Large",
+            Brain::Deepseek => "DeepSeek Reasoner",
+            Brain::Kimi => "Kimi K2.5",
+            Brain::Qwen => "Qwen3 Coder",
         }
     }
 
@@ -62,19 +62,29 @@ impl Brain {
     pub fn name(self) -> &'static str {
         match self {
             Brain::Deepseek => "deepseek",
-            Brain::Gemini => "gemini",
-            Brain::Groq => "groq",
-            Brain::Mistral => "mistral",
+            Brain::Kimi => "kimi",
+            Brain::Qwen => "qwen",
         }
     }
 
     /// Superpoder del modelo en una frase (para que sepas a cuál cambiar y por qué).
     pub fn capability(self) -> &'static str {
         match self {
-            Brain::Deepseek => "agéntico fuerte · código",
-            Brain::Gemini => "contexto largo · free 20/día",
-            Brain::Groq => "rápido · flojo en agéntico",
-            Brain::Mistral => "salida estructurada",
+            Brain::Deepseek => "principal · razona · agéntico fuerte",
+            Brain::Kimi => "agéntico · contexto largo",
+            Brain::Qwen => "código · barato (vía OpenRouter)",
+        }
+    }
+
+    /// Ventana de contexto utilizable del modelo (tokens). Gobierna la barra
+    /// de `/status` y el umbral de compactación automática: con Kimi o Qwen
+    /// no tiene sentido compactar a los 128k de DeepSeek — cada cerebro
+    /// aprovecha su ventana real.
+    pub fn context_budget(self) -> usize {
+        match self {
+            Brain::Deepseek => 128_000,
+            Brain::Kimi => 256_000,
+            Brain::Qwen => 256_000,
         }
     }
 
@@ -82,9 +92,8 @@ impl Brain {
     pub fn env_var(self) -> &'static str {
         match self {
             Brain::Deepseek => "DEEPSEEK_API_KEY",
-            Brain::Gemini => "GEMINI_API_KEY",
-            Brain::Groq => "GROQ_API_KEY",
-            Brain::Mistral => "MISTRAL_API_KEY",
+            Brain::Kimi => "MOONSHOT_API_KEY",
+            Brain::Qwen => "OPENROUTER_API_KEY",
         }
     }
 
@@ -94,17 +103,16 @@ impl Brain {
     }
 
     /// Todos los cerebros, en orden de utilidad para dpx (agéntico primero).
-    pub fn all() -> [Brain; 4] {
-        [Brain::Deepseek, Brain::Groq, Brain::Mistral, Brain::Gemini]
+    pub fn all() -> [Brain; 3] {
+        [Brain::Deepseek, Brain::Kimi, Brain::Qwen]
     }
 
     /// Parsea el nombre de un cerebro (para el comando `/brain`).
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "deepseek" => Some(Brain::Deepseek),
-            "gemini" => Some(Brain::Gemini),
-            "groq" => Some(Brain::Groq),
-            "mistral" => Some(Brain::Mistral),
+            "kimi" | "moonshot" => Some(Brain::Kimi),
+            "qwen" => Some(Brain::Qwen),
             _ => None,
         }
     }
@@ -119,20 +127,15 @@ impl Brain {
                     .map_err(|e| anyhow!("No pude iniciar DeepSeek (¿falta DEEPSEEK_API_KEY?): {e}"))?;
                 Mentor::Deepseek(agent(c.agent(self.model_id()), preamble, temperature, extra))
             }
-            Brain::Gemini => {
-                let c = gemini::Client::from_env()
-                    .map_err(|e| anyhow!("No pude iniciar Gemini (¿falta GEMINI_API_KEY?): {e}"))?;
-                Mentor::Gemini(agent(c.agent(self.model_id()), preamble, temperature, extra))
+            Brain::Kimi => {
+                let c = moonshot::Client::from_env()
+                    .map_err(|e| anyhow!("No pude iniciar Kimi (¿falta MOONSHOT_API_KEY?): {e}"))?;
+                Mentor::Kimi(agent(c.agent(self.model_id()), preamble, temperature, extra))
             }
-            Brain::Groq => {
-                let c = groq::Client::from_env()
-                    .map_err(|e| anyhow!("No pude iniciar Groq (¿falta GROQ_API_KEY?): {e}"))?;
-                Mentor::Groq(agent(c.agent(self.model_id()), preamble, temperature, extra))
-            }
-            Brain::Mistral => {
-                let c = mistral::Client::from_env()
-                    .map_err(|e| anyhow!("No pude iniciar Mistral (¿falta MISTRAL_API_KEY?): {e}"))?;
-                Mentor::Mistral(agent(c.agent(self.model_id()), preamble, temperature, extra))
+            Brain::Qwen => {
+                let c = openrouter::Client::from_env()
+                    .map_err(|e| anyhow!("No pude iniciar Qwen (¿falta OPENROUTER_API_KEY?): {e}"))?;
+                Mentor::Qwen(agent(c.agent(self.model_id()), preamble, temperature, extra))
             }
         })
     }
@@ -184,9 +187,8 @@ fn agent<M: rig_core::completion::CompletionModel>(
 /// Agente envuelto por proveedor, para despacho dinámico.
 pub enum Mentor {
     Deepseek(Agent<deepseek::CompletionModel>),
-    Gemini(Agent<gemini::CompletionModel>),
-    Groq(Agent<groq::CompletionModel>),
-    Mistral(Agent<mistral::CompletionModel>),
+    Kimi(Agent<moonshot::CompletionModel>),
+    Qwen(Agent<openrouter::CompletionModel>),
 }
 
 /// Reintentos ante errores transitorios del proveedor (saturación).
@@ -294,9 +296,8 @@ impl Mentor {
     ) -> Result<ChatReply> {
         match self {
             Mentor::Deepseek(a) => stream_dispatch!(a, input, history, on_delta),
-            Mentor::Gemini(a) => stream_dispatch!(a, input, history, on_delta),
-            Mentor::Groq(a) => stream_dispatch!(a, input, history, on_delta),
-            Mentor::Mistral(a) => stream_dispatch!(a, input, history, on_delta),
+            Mentor::Kimi(a) => stream_dispatch!(a, input, history, on_delta),
+            Mentor::Qwen(a) => stream_dispatch!(a, input, history, on_delta),
         }
     }
 
@@ -306,9 +307,8 @@ impl Mentor {
         loop {
             let r = match self {
                 Mentor::Deepseek(a) => a.prompt(content).await,
-                Mentor::Gemini(a) => a.prompt(content).await,
-                Mentor::Groq(a) => a.prompt(content).await,
-                Mentor::Mistral(a) => a.prompt(content).await,
+                Mentor::Kimi(a) => a.prompt(content).await,
+                Mentor::Qwen(a) => a.prompt(content).await,
             };
             match r {
                 Ok(s) => return Ok(s),

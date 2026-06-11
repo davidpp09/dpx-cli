@@ -787,7 +787,7 @@ fn is_reserved_word(word: &str) -> bool {
     let w = word.to_ascii_lowercase();
     matches!(
         w.as_str(),
-        "dpx" | "pro" | "hack" | "deepseek" | "gemini" | "groq" | "mistral"
+        "dpx" | "pro" | "hack" | "deepseek" | "kimi" | "qwen"
     ) || focus::catalog().iter().any(|f| f.id == w)
 }
 

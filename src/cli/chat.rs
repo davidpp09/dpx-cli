@@ -163,7 +163,7 @@ pub async fn run(focus: Option<String>, mode: Mode, brain: Brain, persona: Perso
                 }
 
                 // Compactación automática al acercarse al límite de contexto.
-                if estimate_tokens(&history) > COMPACT_THRESHOLD_TOKENS {
+                if estimate_tokens(&history) > compact_threshold(brain) {
                     println!(
                         "\n{}",
                         ui::dim("el contexto se acerca al límite · compactando automáticamente")
@@ -284,9 +284,12 @@ enum TurnOutcome {
     ModelFailed(String),
 }
 
-/// Umbral de compactación automática: al superar este estimado de tokens, el
-/// historial se resume con el modelo barato para no chocar con el límite.
-const COMPACT_THRESHOLD_TOKENS: usize = ui::CONTEXT_BUDGET * 3 / 4;
+/// Umbral de compactación automática: al superar el 75% de la ventana del
+/// cerebro ACTIVO, el historial se resume con el modelo barato. Depende del
+/// cerebro: Kimi/Qwen (256k) aguantan el doble que DeepSeek antes de compactar.
+fn compact_threshold(brain: Brain) -> usize {
+    brain.context_budget() * 3 / 4
+}
 
 /// Mensajes recientes que se conservan intactos al compactar (los últimos
 /// intercambios suelen ser a los que el usuario se refiere con "eso", "ahí").
@@ -447,32 +450,44 @@ async fn run_turn(
             ui::checklist(&plan);
         }
 
-        // 2. Cambios propuestos en esta ronda (escrituras, ediciones quirúrgicas y
-        //    borrados): confirmar y aplicar YA, guardando el resultado de cada uno
-        //    para informárselo al modelo (que no asuma que algo se aplicó si el
-        //    usuario lo rechazó o falló).
-        let writes = crate::fs::parse_writes(&reply);
-        let mut report = process_writes(cwd, &writes, &mut *ask);
-
-        let edits = crate::fs::parse_edits(&reply);
-        report.absorb(process_edits(cwd, &edits, &mut *ask));
-
-        let deletes = crate::fs::parse_deletes(&reply);
-        report.absorb(process_deletes(cwd, &deletes, &mut *ask));
-
-        // Intentos de acción malformados (marcador fuera de bloque, dpx:edit sin
-        // SEARCH/REPLACE completo): en vez de ignorarlos en silencio, se le avisa
-        // al modelo para que los re-emita bien.
+        // CUARENTENA: una respuesta con bloques dpx malformados no es de fiar —
+        // un fence roto puede convertir texto en "comandos" fantasma (pasó en
+        // vivo: un ejemplo de `mvn` dentro de un edit roto casi se ejecuta).
+        // Si hay CUALQUIER bloque malformado, NINGÚN bloque de texto de esta
+        // respuesta se ejecuta; el modelo re-emite. Las tool calls nativas no
+        // se ven afectadas (llegan validadas por el API, sin parseo de fences).
+        let mut report = ActionReport::default();
         let malformed = crate::fs::detect_malformed_actions(&reply);
-        if !malformed.is_empty() {
+        let quarantined = !malformed.is_empty();
+        if quarantined {
             println!(
                 "\n{}",
-                ui::dim("⚠ detecté bloques dpx malformados · le pido al modelo que los corrija")
+                ui::dim("⚠ bloques dpx malformados · cuarentena: ningún bloque de texto de esta respuesta se ejecuta")
+            );
+            report.followup(
+                "[CUARENTENA: tu respuesta contenía bloques dpx:* malformados, así que NINGUNA \
+                 acción en bloques de texto de esa respuesta se ejecutó (ni siquiera las bien \
+                 formadas). Re-emite TODAS tus acciones pendientes, preferiblemente como tool \
+                 calls nativas (inmunes a este problema).]"
+                    .to_string(),
             );
             for warning in malformed {
                 report.followup(warning);
             }
         }
+
+        // 2. Cambios propuestos en esta ronda (escrituras, ediciones quirúrgicas y
+        //    borrados): confirmar y aplicar YA, guardando el resultado de cada uno
+        //    para informárselo al modelo (que no asuma que algo se aplicó si el
+        //    usuario lo rechazó o falló).
+        let writes = if quarantined { Vec::new() } else { crate::fs::parse_writes(&reply) };
+        report.absorb(process_writes(cwd, &writes, &mut *ask));
+
+        let edits = if quarantined { Vec::new() } else { crate::fs::parse_edits(&reply) };
+        report.absorb(process_edits(cwd, &edits, &mut *ask));
+
+        let deletes = if quarantined { Vec::new() } else { crate::fs::parse_deletes(&reply) };
+        report.absorb(process_deletes(cwd, &deletes, &mut *ask));
 
         // 2b. Tool calls nativas (function calling): la vía estructurada y
         //     preferida. Se atienden SIEMPRE y cada una deja su tool result en
@@ -512,16 +527,19 @@ async fn run_turn(
             };
         }
 
-        // 3. Lecturas, búsquedas y ejecuciones
+        // 3. Lecturas, búsquedas y ejecuciones (también en cuarentena si aplica:
+        //    el `mvn` fantasma de un fence roto era justamente un run parseado).
         let mut reads = Vec::new();
-        for r in crate::fs::parse_reads(&reply) {
-            if !reads.contains(&r) {
-                reads.push(r);
+        if !quarantined {
+            for r in crate::fs::parse_reads(&reply) {
+                if !reads.contains(&r) {
+                    reads.push(r);
+                }
             }
         }
-        
-        let searches = crate::fs::parse_searches(&reply);
-        let mut runs = crate::fs::parse_runs(&reply);
+
+        let searches = if quarantined { Vec::new() } else { crate::fs::parse_searches(&reply) };
+        let mut runs = if quarantined { Vec::new() } else { crate::fs::parse_runs(&reply) };
 
         // Verificación de build automática: si escribimos código fuente y hay un
         // proyecto Maven/Gradle/Cargo, dpx propone compilar y realimenta los
@@ -814,6 +832,7 @@ fn handle_command(
             turn_count,
             prior.is_some(),
             estimate_tokens(history),
+            brain.context_budget(),
         ),
 
         "models" | "model" => ui::models_list(&brain_rows(*brain)),
@@ -884,7 +903,7 @@ fn handle_command(
             }
             None => println!(
                 "{} (actual: {})",
-                ui::dim("uso: /brain deepseek|gemini|groq|mistral"),
+                ui::dim("uso: /brain deepseek|kimi|qwen"),
                 router.brain_label()
             ),
         },
@@ -1086,8 +1105,29 @@ fn process_writes(
             ui::dim(&format!("({} líneas{extra})", w.line_count())),
         );
 
-        let accepted = write_all || {
-            let current = crate::fs::current_content(cwd, &w.path);
+        // Guard anti-truncado: un write que ENCOGE drásticamente un archivo
+        // grande suele ser la salida del modelo cortada a mitad (se quedó sin
+        // tokens), no un cambio intencional. Y reescribir COMPLETO un archivo
+        // grande (aunque no encoja) viola la doctrina de edit_file y corre el
+        // mismo riesgo. Ambos avisan y preguntan SIEMPRE (ni `a=todos` salta).
+        let current = crate::fs::current_content(cwd, &w.path);
+        let shrink = shrink_warning(current.as_deref(), &w.content);
+        let big_rewrite = shrink.is_none() && big_rewrite_warning(current.as_deref()).is_some();
+        if let Some((old, new)) = shrink {
+            println!(
+                "  {}",
+                ui::red(&format!(
+                    "⚠ posible truncado: el archivo pasaría de {old} a {new} líneas — revisa el final del diff"
+                ))
+            );
+        } else if big_rewrite {
+            println!(
+                "  {}",
+                ui::red("⚠ reescritura completa de un archivo grande — la doctrina dice edit_file para archivos existentes")
+            );
+        }
+
+        let accepted = (write_all && shrink.is_none() && !big_rewrite) || {
             ui::preview_diff(current.as_deref(), &w.content);
             match ask("¿escribir? [s/N/a=todos] ") {
                 Some(ans) => {
@@ -1114,12 +1154,48 @@ fn process_writes(
                     report.followup(format!("[ERROR al escribir {}: {e}]", w.path));
                 }
             }
+        } else if let Some((old, new)) = shrink {
+            println!("{}", ui::dim("omitido."));
+            report.followup(format!(
+                "[el usuario rechazó escribir {} — AVISO de dpx: tu contenido reduciría el \
+                 archivo de {old} a {new} líneas; casi seguro tu salida quedó TRUNCADA. NO \
+                 reescribas archivos grandes enteros: aplica cambios pequeños con edit_file/dpx:edit.]",
+                w.path
+            ));
+        } else if big_rewrite {
+            println!("{}", ui::dim("omitido."));
+            report.followup(format!(
+                "[el usuario rechazó escribir {} — AVISO de dpx: propusiste reescribir COMPLETO \
+                 un archivo existente grande; la regla es edit_file/dpx:edit para archivos que \
+                 ya existen. Re-propón el cambio como edits quirúrgicos pequeños.]",
+                w.path
+            ));
         } else {
             println!("{}", ui::dim("omitido."));
             report.followup(format!("[el usuario rechazó escribir {}]", w.path));
         }
     }
     report
+}
+
+/// Detecta un write sospechoso de venir truncado: el archivo existe, es
+/// grande, y el contenido nuevo lo encoge más de un 40%. Devuelve
+/// `(líneas actuales, líneas propuestas)` cuando hay que avisar.
+fn shrink_warning(current: Option<&str>, new_content: &str) -> Option<(usize, usize)> {
+    /// Por debajo de esto un encogimiento es creíble (refactor, limpieza).
+    const MIN_LINES: usize = 80;
+    let old = current?.lines().count();
+    let new = new_content.lines().count();
+    (old >= MIN_LINES && new * 10 < old * 6).then_some((old, new))
+}
+
+/// Detecta la reescritura completa de un archivo existente grande (la
+/// doctrina dice `edit_file`): mismo riesgo de truncado, aunque no encoja.
+fn big_rewrite_warning(current: Option<&str>) -> Option<usize> {
+    /// El umbral de la doctrina de AGENTIC_SKILLS (~200 líneas).
+    const MIN_LINES: usize = 200;
+    let old = current?.lines().count();
+    (old >= MIN_LINES).then_some(old)
 }
 
 /// Procesa las ediciones quirúrgicas (`dpx:edit`): localiza el bloque SEARCH de
@@ -1743,6 +1819,109 @@ mod tests {
         let inputs = fake.inputs.borrow();
         assert_eq!(inputs.len(), 2);
         assert!(inputs[1].contains("rechazó ejecutar"));
+    }
+
+    // ----- guard anti-truncado en writes -----
+
+    #[test]
+    fn shrink_warning_solo_salta_en_encogimientos_sospechosos() {
+        let grande = "x\n".repeat(100);
+        // Archivo nuevo: sin aviso.
+        assert_eq!(shrink_warning(None, "hola"), None);
+        // Archivo chico que encoge: creíble, sin aviso.
+        assert_eq!(shrink_warning(Some("a\nb\nc\n"), "a\n"), None);
+        // Archivo grande a menos del 60%: aviso con las cifras.
+        assert_eq!(shrink_warning(Some(&grande), &"y\n".repeat(10)), Some((100, 10)));
+        // Archivo grande que apenas cambia: sin aviso.
+        assert_eq!(shrink_warning(Some(&grande), &"y\n".repeat(90)), None);
+    }
+
+    #[test]
+    fn write_truncado_rechazado_ensena_al_modelo_a_usar_edit() {
+        let dir = tmp("guard-trunc");
+        std::fs::write(dir.join("grande.rs"), "linea\n".repeat(200)).unwrap();
+        let writes = vec![crate::fs::FileWrite {
+            path: "grande.rs".into(),
+            content: "linea\n".repeat(20), // 200 → 20 líneas: truncado casi seguro
+        }];
+        let report = process_writes(&dir, &writes, &mut |_| Some("n".to_string()));
+        assert!(report.needs_followup);
+        assert!(report.notes[0].contains("TRUNCADA"));
+        assert!(report.notes[0].contains("edit_file"));
+        // El archivo no se tocó.
+        let contenido = std::fs::read_to_string(dir.join("grande.rs")).unwrap();
+        assert_eq!(contenido.lines().count(), 200);
+    }
+
+    #[test]
+    fn write_all_no_salta_el_guard_anti_truncado() {
+        let dir = tmp("guard-todos");
+        std::fs::write(dir.join("grande.rs"), "linea\n".repeat(200)).unwrap();
+        std::fs::write(dir.join("otro.rs"), "x\n").unwrap();
+        let writes = vec![
+            crate::fs::FileWrite { path: "otro.rs".into(), content: "y\n".into() },
+            crate::fs::FileWrite {
+                path: "grande.rs".into(),
+                content: "linea\n".repeat(20),
+            },
+        ];
+        // "a" en la primera activa write_all; el write sospechoso DEBE volver
+        // a preguntar igualmente (contestamos "n" la segunda vez).
+        let mut respuestas = vec!["a", "n"].into_iter();
+        let report = process_writes(&dir, &writes, &mut |_| {
+            respuestas.next().map(str::to_string)
+        });
+        assert!(respuestas.next().is_none(), "debió preguntar DOS veces (write_all no exime al guard)");
+        assert!(report.notes.iter().any(|n| n.contains("TRUNCADA")));
+        // El grande sigue intacto; el chico sí se escribió.
+        assert_eq!(std::fs::read_to_string(dir.join("grande.rs")).unwrap().lines().count(), 200);
+        assert_eq!(std::fs::read_to_string(dir.join("otro.rs")).unwrap(), "y\n");
+    }
+
+    #[test]
+    fn reescritura_grande_sin_encoger_tambien_avisa() {
+        let dir = tmp("guard-bigrw");
+        std::fs::write(dir.join("grande.rs"), "linea\n".repeat(250)).unwrap();
+        let writes = vec![crate::fs::FileWrite {
+            path: "grande.rs".into(),
+            content: "linea\n".repeat(240), // no encoge >40%, pero es rewrite completo
+        }];
+        let report = process_writes(&dir, &writes, &mut |_| Some("n".to_string()));
+        assert!(report.needs_followup);
+        assert!(report.notes[0].contains("edits quirúrgicos"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("grande.rs")).unwrap().lines().count(),
+            250
+        );
+        // Y `a=todos` tampoco lo salta: con write_all activo debe preguntar igual.
+        std::fs::write(dir.join("chico.rs"), "x\n").unwrap();
+        let writes = vec![
+            crate::fs::FileWrite { path: "chico.rs".into(), content: "y\n".into() },
+            crate::fs::FileWrite { path: "grande.rs".into(), content: "linea\n".repeat(240) },
+        ];
+        let mut respuestas = vec!["a", "n"].into_iter();
+        process_writes(&dir, &writes, &mut |_| respuestas.next().map(str::to_string));
+        assert!(respuestas.next().is_none(), "debió preguntar dos veces");
+    }
+
+    #[tokio::test]
+    async fn cuarentena_un_bloque_roto_anula_todos_los_bloques_de_texto() {
+        let dir = tmp("turn-quarantine");
+        // Marcador dpx:edit suelto (fuera de bloque) = malformado; el dpx:write
+        // está BIEN formado, pero la cuarentena también lo anula.
+        let reply = "voy a editar\ndpx:edit path=a.rs\n```dpx:write path=ok.txt\nhola\n```\n";
+        let fake = FakeMentor::new(vec![
+            FakeMentor::ok(reply),
+            FakeMentor::ok("re-emito como tool calls"),
+        ]);
+        let (out, _) = fake_turn(&fake, &dir, "s").await;
+        assert!(matches!(out, TurnOutcome::Reply(_)));
+        // El write bien formado NO se aplicó (ni se preguntó).
+        assert!(!dir.join("ok.txt").exists());
+        // El modelo recibe la cuarentena y una ronda para corregir.
+        let inputs = fake.inputs.borrow();
+        assert_eq!(inputs.len(), 2);
+        assert!(inputs[1].contains("CUARENTENA"));
     }
 
     // ----- ciclo del plan persistente (.dpx/plan.md) -----
