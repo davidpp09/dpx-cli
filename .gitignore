@@ -1,0 +1,12 @@
+/target
+
+# Artefactos de otras herramientas (no son de dpx)
+.claude/
+.antigravitycli/
+
+# Secretos: nunca commitear las API keys
+.env
+.env.*
+
+# Contexto de proyecto generado por dpx al correrlo aquí
+.dpx/
