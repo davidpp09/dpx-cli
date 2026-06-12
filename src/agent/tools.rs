@@ -18,6 +18,7 @@ pub enum DpxCall {
     Edit { path: String, search: String, replace: String },
     Delete { path: String },
     Run { command: String },
+    WebSearch { query: String },
 }
 
 /// Las definiciones que se anuncian al modelo en cada petición.
@@ -88,6 +89,15 @@ pub fn definitions() -> Vec<ToolDefinition> {
             json!({ "command": { "type": "string", "description": "Comando a ejecutar, p.ej. mvn -q compile" } }),
             &["command"],
         ),
+        def(
+            "web_search",
+            "Busca en Internet (DuckDuckGo) y devuelve los primeros resultados con título, \
+             URL y fragmento. Úsala para consultar documentación actual, stackoverflow, \
+             versiones recientes de librerías, errores conocidos o cualquier info que no \
+             tengas en tu entrenamiento. Gratuita, sin API key.",
+            json!({ "query": { "type": "string", "description": "Consulta de búsqueda, p.ej. 'rust axum 0.8 middleware' o 'java 21 virtual threads best practices'" } }),
+            &["query"],
+        ),
     ]
 }
 
@@ -111,9 +121,10 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
         }),
         "delete_file" => Ok(DpxCall::Delete { path: arg("path")? }),
         "run_command" => Ok(DpxCall::Run { command: arg("command")? }),
+        "web_search" => Ok(DpxCall::WebSearch { query: arg("query")? }),
         other => Err(format!(
             "herramienta desconocida: `{other}`. Las disponibles son: read_file, search_project, \
-             write_file, edit_file, delete_file, run_command."
+             write_file, edit_file, delete_file, run_command, web_search."
         )),
     }
 }
@@ -125,7 +136,7 @@ mod tests {
     #[test]
     fn definiciones_completas_y_con_schema() {
         let defs = definitions();
-        assert_eq!(defs.len(), 6);
+        assert_eq!(defs.len(), 7);
         for d in &defs {
             assert!(!d.description.is_empty());
             assert_eq!(d.parameters["type"], "object");

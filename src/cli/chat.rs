@@ -498,7 +498,7 @@ async fn run_turn(
         let mut cancelled_at: Option<usize> = None;
         for (i, call) in calls.iter().enumerate() {
             let outcome =
-                run_tool_call(cwd, store, &mut *ask, call, &mut s_writes, &mut s_edits);
+                run_tool_call(cwd, store, &mut *ask, call, &mut s_writes, &mut s_edits).await;
             let (text, cancelled) = match outcome {
                 ToolOutcome::Done(t) => (t, false),
                 ToolOutcome::Cancelled(t) => (t, true),
@@ -650,11 +650,12 @@ enum ToolOutcome {
     Cancelled(String),
 }
 
-/// Atiende UNA tool call: lecturas/búsquedas libres, escrituras/ediciones/
-/// borrados con diff + confirmación (la misma maquinaria que los bloques de
-/// texto) y comandos con el sandbox de `confirm_run`. Las escrituras y
-/// ediciones se acumulan en `writes`/`edits` para el auto-build.
-fn run_tool_call(
+/// Atiende UNA tool call: lecturas/búsquedas libres (incluida la web),
+/// escrituras/ediciones/borrados con diff + confirmación (la misma maquinaria
+/// que los bloques de texto) y comandos con el sandbox de `confirm_run`. Las
+/// escrituras y ediciones se acumulan en `writes`/`edits` para el auto-build.
+/// Async por `web_search` (HTTP).
+async fn run_tool_call(
     cwd: &Path,
     store: &ProjectStore,
     ask: &mut dyn FnMut(&str) -> Option<String>,
@@ -677,6 +678,13 @@ fn run_tool_call(
         Ok(DpxCall::Search { pattern }) => {
             println!("{}", ui::accent(&format!("  ⎁ buscando: {pattern}")));
             ToolOutcome::Done(crate::fs::search_in_project(cwd, &pattern))
+        }
+        Ok(DpxCall::WebSearch { query }) => {
+            println!("{}", ui::accent(&format!("  ⌕ buscando en la web: {query}")));
+            ToolOutcome::Done(match crate::agent::search::web_search(&query).await {
+                Ok(results) => results,
+                Err(e) => format!("[web_search falló: {e}]"),
+            })
         }
         Ok(DpxCall::Write { path, content }) => {
             let w = crate::fs::FileWrite { path, content };
@@ -760,25 +768,13 @@ fn build_mentor(
     // Le damos el árbol del proyecto para que sepa qué archivos puede pedir leer.
     let cwd = env::current_dir().unwrap_or_default();
     preamble.push_str(
-        "\n\n# Herramientas del Agente\n\
-         Tienes herramientas NATIVAS (function calling): `read_file`, `search_project`, \
-         `write_file`, `edit_file`, `delete_file` y `run_command`. PREFIÉRELAS SIEMPRE: \
-         emite tool calls, no describas las acciones en prosa. Solo si no puedes usarlas, \
-         existe el formato alternativo de bloques de texto:\n\
-         - Leer: ```dpx:read path=ruta/al/archivo```\n\
-         - Buscar en todo el proyecto: ```dpx:search pattern=\"término a buscar\"```\n\
-         - Escribir/Sobrescribir: ```dpx:write path=ruta/al/archivo```\n\
-         - Editar un fragmento (cambios puntuales): ```dpx:edit path=ruta/al/archivo``` con SEARCH/REPLACE\n\
-         - Borrar un archivo: ```dpx:delete path=ruta/al/archivo```\n\
-         - Ejecutar comando: ```dpx:run\nmvn compile\n``` (que termine solo: nada de servidores ni watch, hay timeout)\n\n\
-         Seguridad de dpx:run: los comandos destructivos (borrados recursivos/forzados, \
-         `git reset --hard`, `git push --force`, matar procesos, publicar a registros) exigen \
-         una confirmación reforzada del usuario, y los que tocan el sistema (formatear, registro \
-         de Windows, apagar) están PROHIBIDOS y dpx los bloquea: no los propongas; prefiere \
-         siempre la alternativa más segura y acotada al proyecto.\n\n\
+        "\n\n# Herramientas: tool calls nativas PRIMERO\n\
+         Tienes herramientas NATIVAS (function calling): emite tool calls, no describas \
+         acciones en prosa ni uses los bloques dpx:* de texto salvo que el function calling \
+         no esté disponible.\n\n\
          # Árbol del proyecto actual\n\
-         Estos son los archivos que existen AHORA en el proyecto. Léelos con `dpx:read` \
-         o bórralos con `dpx:delete` cuando los necesites (no le pidas al usuario que lo haga):\n\n```\n",
+         Estos son los archivos que existen AHORA en el proyecto. Léelos con `read_file` \
+         o bórralos con `delete_file` cuando los necesites (no le pidas al usuario que lo haga):\n\n```\n",
     );
     preamble.push_str(&crate::fs::project_tree(&cwd));
     preamble.push_str("```\n");

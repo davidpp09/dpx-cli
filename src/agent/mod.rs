@@ -7,6 +7,7 @@
 
 mod router;
 pub mod diagnostic;
+pub mod search;
 pub mod tools;
 
 pub use router::{Brain, ChatReply, Mentor, ModelRouter};

@@ -791,9 +791,9 @@ fn take_block(s: &mut String) -> String {
 pub fn apply_edit(current: &str, edit: &FileEdit) -> Result<String> {
     let Some(idx) = current.find(&edit.search) else {
         return Err(anyhow!(
-            "no encontré el bloque SEARCH en `{}`: el texto no coincide con el archivo actual \
-             (¿cambió el archivo o la indentación es distinta?)",
-            edit.path
+            "no encontré el bloque SEARCH en `{}`: el texto no coincide con el archivo actual.{}",
+            edit.path,
+            search_hint(current, &edit.search)
         ));
     };
     let mut out = String::with_capacity(current.len() + edit.replace.len());
@@ -801,6 +801,44 @@ pub fn apply_edit(current: &str, edit: &FileEdit) -> Result<String> {
     out.push_str(&edit.replace);
     out.push_str(&current[idx + edit.search.len()..]);
     Ok(out)
+}
+
+/// Pista para un SEARCH fallido, pensada para que el MODELO se autocorrija en
+/// vez de reintentar a ciegas: localiza en el archivo la zona más parecida
+/// (anclando por la primera línea con contenido del search, comparada
+/// ignorando espacios) y la devuelve VERBATIM para copiarla tal cual. La
+/// causa nº 1 de estos fallos son diferencias invisibles: indentación,
+/// escapes `\"` y los `\` de continuación en string literals.
+fn search_hint(current: &str, search: &str) -> String {
+    fn normalize(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+    let Some(anchor) = search.lines().find(|l| !l.trim().is_empty()) else {
+        return String::new();
+    };
+    let anchor_norm = normalize(anchor);
+    let lines: Vec<&str> = current.lines().collect();
+    let hit = lines.iter().position(|l| {
+        let ln = normalize(l);
+        ln == anchor_norm
+            || (anchor_norm.chars().count() > 12
+                && (ln.contains(&anchor_norm) || anchor_norm.contains(&ln) && !ln.is_empty()))
+    });
+    match hit {
+        Some(i) => {
+            let span = search.lines().count().clamp(3, 10);
+            let end = (i + span).min(lines.len());
+            let excerpt = lines[i..end].join("\n");
+            format!(
+                " La zona más parecida del archivo es esta — tu SEARCH difiere de ella en algo \
+                 (espacios, `\\` de continuación o escapes). Copia este texto EXACTAMENTE:\n\
+                 ---\n{excerpt}\n---"
+            )
+        }
+        None => " Ni siquiera la primera línea de tu SEARCH aparece en el archivo (¿archivo o \
+                 sección equivocada?). Relee el archivo fresco antes de reintentar."
+            .to_string(),
+    }
 }
 
 /// Resuelve la ruta destino DENTRO del proyecto, rechazando rutas absolutas o
@@ -973,6 +1011,34 @@ mod tests {
     fn apply_edit_falla_si_no_encuentra() {
         let edit = FileEdit { path: "x".into(), search: "no está".into(), replace: "y".into() };
         assert!(apply_edit("contenido real", &edit).is_err());
+    }
+
+    #[test]
+    fn search_fallido_da_pista_con_el_texto_real() {
+        // La primera línea del search existe (con otra indentación), pero la
+        // segunda no coincide: la pista debe traer el texto REAL del archivo
+        // desde esa ancla, para que el modelo lo copie.
+        let current =
+            "fn x() {\n        let valor = calcular_total(precios); // exacto\n        valor + 1\n}\n";
+        let edit = FileEdit {
+            path: "x".into(),
+            search: "let valor = calcular_total(precios); // exacto\n    return valor;".into(),
+            replace: "y".into(),
+        };
+        let err = apply_edit(current, &edit).unwrap_err().to_string();
+        assert!(err.contains("Copia este texto EXACTAMENTE"));
+        assert!(err.contains("        let valor = calcular_total(precios); // exacto"));
+    }
+
+    #[test]
+    fn search_sin_relacion_pide_releer() {
+        let edit = FileEdit {
+            path: "x".into(),
+            search: "esta línea no existe en ninguna forma".into(),
+            replace: "y".into(),
+        };
+        let err = apply_edit("contenido\ncompletamente distinto\n", &edit).unwrap_err().to_string();
+        assert!(err.contains("Relee el archivo fresco"));
     }
 
     #[test]
