@@ -19,6 +19,10 @@ pub enum DpxCall {
     Delete { path: String },
     Run { command: String },
     WebSearch { query: String },
+    GitStatus,
+    GitDiff { path: Option<String> },
+    GitLog { n: Option<usize> },
+    GitCommit { message: String },
 }
 
 /// Las definiciones que se anuncian al modelo en cada petición.
@@ -98,6 +102,35 @@ pub fn definitions() -> Vec<ToolDefinition> {
             json!({ "query": { "type": "string", "description": "Consulta de búsqueda, p.ej. 'rust axum 0.8 middleware' o 'java 21 virtual threads best practices'" } }),
             &["query"],
         ),
+        def(
+            "git_status",
+            "Muestra el estado de git: archivos modificados, staged y untracked. Solo lectura, \
+             sin confirmación.",
+            json!({}),
+            &[],
+        ),
+        def(
+            "git_diff",
+            "Muestra el diff del working tree (cambios sin commit). Opcionalmente, \
+             de un archivo específico. Solo lectura, sin confirmación.",
+            json!({ "path": { "type": "string", "description": "Archivo opcional: diff de un solo archivo" } }),
+            &[],
+        ),
+        def(
+            "git_log",
+            "Muestra los últimos N commits (por defecto 10), una línea cada uno. Solo lectura, \
+             sin confirmación.",
+            json!({ "n": { "type": "integer", "description": "Cantidad de commits a mostrar (por defecto 10)" } }),
+            &[],
+        ),
+        def(
+            "git_commit",
+            "Crea un commit con todos los cambios (git add -A + git commit). MUTA el repositorio: \
+             requiere confirmación del usuario (o modo auto). Usa un mensaje descriptivo en \
+             español.",
+            json!({ "message": { "type": "string", "description": "Mensaje del commit" } }),
+            &["message"],
+        ),
     ]
 }
 
@@ -122,9 +155,20 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
         "delete_file" => Ok(DpxCall::Delete { path: arg("path")? }),
         "run_command" => Ok(DpxCall::Run { command: arg("command")? }),
         "web_search" => Ok(DpxCall::WebSearch { query: arg("query")? }),
+        "git_status" => Ok(DpxCall::GitStatus),
+        "git_diff" => {
+            let path = args.get("path").and_then(Value::as_str).map(str::to_string);
+            Ok(DpxCall::GitDiff { path })
+        }
+        "git_log" => {
+            let n = args.get("n").and_then(Value::as_u64).map(|v| v as usize);
+            Ok(DpxCall::GitLog { n })
+        }
+        "git_commit" => Ok(DpxCall::GitCommit { message: arg("message")? }),
         other => Err(format!(
             "herramienta desconocida: `{other}`. Las disponibles son: read_file, search_project, \
-             write_file, edit_file, delete_file, run_command, web_search."
+             write_file, edit_file, delete_file, run_command, web_search, git_status, git_diff, \
+             git_log, git_commit."
         )),
     }
 }
@@ -136,7 +180,7 @@ mod tests {
     #[test]
     fn definiciones_completas_y_con_schema() {
         let defs = definitions();
-        assert_eq!(defs.len(), 7);
+        assert_eq!(defs.len(), 11);
         for d in &defs {
             assert!(!d.description.is_empty());
             assert_eq!(d.parameters["type"], "object");

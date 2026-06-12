@@ -897,6 +897,33 @@ async fn run_tool_call(
             let report = process_deletes(cwd, &[path], ask);
             ToolOutcome::Done(report.notes.join("\n"))
         }
+        Ok(DpxCall::GitStatus) => ToolOutcome::Done(run_git(cwd, &["status", "--short"])),
+        Ok(DpxCall::GitDiff { path }) => {
+            let mut args = vec!["diff"];
+            if let Some(p) = &path {
+                args.push(p);
+            }
+            ToolOutcome::Done(run_git(cwd, &args))
+        }
+        Ok(DpxCall::GitLog { n }) => {
+            let count = format!("-{}", n.unwrap_or(10).min(50));
+            ToolOutcome::Done(run_git(cwd, &["log", "--oneline", &count]))
+        }
+        Ok(DpxCall::GitCommit { message }) => {
+            // git_commit MUTA el repo: confirma (o auto). El mensaje se pasa
+            // como arg ÚNICO (run_git no parte por espacios), así que mensajes
+            // con espacios funcionan bien.
+            println!("\n{} {}", ui::accent("⏺ commit:"), ui::accent(&message));
+            let ok = auto || matches!(ask("¿crear commit? [s/N] "), Some(a) if is_yes(&a));
+            if !ok {
+                println!("{}", ui::dim("omitido."));
+                ToolOutcome::Done("[el usuario rechazó crear el commit]".to_string())
+            } else {
+                let add = run_git(cwd, &["add", "-A"]);
+                let commit = run_git(cwd, &["commit", "-m", &message]);
+                ToolOutcome::Done(format!("git add -A:\n{add}\ngit commit:\n{commit}"))
+            }
+        }
         Ok(DpxCall::Run { command }) => match confirm_run(ask, store, cwd, &command, auto) {
             RunDecision::Blocked(reason) => ToolOutcome::Done(format!(
                 "[dpx BLOQUEÓ el comando `{command}`: {reason}. Está prohibido vía run_command; \
@@ -911,6 +938,29 @@ async fn run_tool_call(
                 if cancelled { ToolOutcome::Cancelled(out) } else { ToolOutcome::Done(out) }
             }
         },
+    }
+}
+
+/// Ejecuta `git` con los args dados (cada uno SIN partir por espacios — clave
+/// para que un mensaje de commit con espacios viaje como un solo argumento) en
+/// `cwd` y devuelve su salida (stdout + stderr si falla). Para las
+/// herramientas nativas git_*.
+fn run_git(cwd: &Path, args: &[&str]) -> String {
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(cwd);
+    cmd.args(args);
+    match cmd.output() {
+        Ok(out) => {
+            let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                text.push_str(&format!("\n[git salió con {}: {}]", out.status, err.trim()));
+            } else if text.trim().is_empty() {
+                text = "(sin salida)".to_string();
+            }
+            text
+        }
+        Err(e) => format!("[error al ejecutar git {}: {}]", args.join(" "), e),
     }
 }
 
@@ -2385,6 +2435,77 @@ mod tests {
         let out = truncate_log(&largo, 10);
         assert!(out.starts_with(&"ñ".repeat(10)));
         assert!(out.ends_with("[recortado]"));
+    }
+
+    // ----- herramientas git nativas -----
+
+    /// Inicializa un repo git de prueba con un commit inicial. `None` si no
+    /// hay git instalado (el test se salta solo).
+    fn git_repo(name: &str) -> Option<PathBuf> {
+        let dir = tmp(name);
+        let ok = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["init", "-q"])
+            .status()
+            .ok()?
+            .success();
+        if !ok {
+            return None;
+        }
+        // Identidad local para que el commit no falle en CI sin config global.
+        for args in [["config", "user.email", "t@t.t"], ["config", "user.name", "t"]] {
+            let _ = std::process::Command::new("git").current_dir(&dir).args(args).status();
+        }
+        std::fs::write(dir.join("a.txt"), "uno\n").unwrap();
+        let _ = std::process::Command::new("git").current_dir(&dir).args(["add", "-A"]).status();
+        let _ = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["commit", "-q", "-m", "init"])
+            .status();
+        Some(dir)
+    }
+
+    #[test]
+    fn git_status_y_diff_son_solo_lectura() {
+        let Some(dir) = git_repo("git-ro") else { return };
+        std::fs::write(dir.join("a.txt"), "uno\ndos\n").unwrap();
+        assert!(run_git(&dir, &["status", "--short"]).contains("a.txt"));
+        assert!(run_git(&dir, &["diff"]).contains("dos"));
+    }
+
+    #[test]
+    fn git_commit_con_mensaje_de_varias_palabras_funciona() {
+        // El bug original: split_whitespace partía el mensaje. Aquí el mensaje
+        // tiene espacios y dos puntos y DEBE quedar íntegro en el log.
+        let Some(dir) = git_repo("git-commit") else { return };
+        std::fs::write(dir.join("b.txt"), "nuevo\n").unwrap();
+        run_git(&dir, &["add", "-A"]);
+        run_git(&dir, &["commit", "-m", "feat: mensaje con varias palabras"]);
+        let log = run_git(&dir, &["log", "--oneline", "-1"]);
+        assert!(log.contains("feat: mensaje con varias palabras"), "log fue: {log}");
+    }
+
+    #[tokio::test]
+    async fn git_commit_rechazado_no_commitea() {
+        let Some(dir) = git_repo("git-no-commit") else { return };
+        std::fs::write(dir.join("c.txt"), "x\n").unwrap();
+        let fake = FakeMentor::new(vec![
+            FakeMentor::ok_with_calls(
+                "commiteo",
+                vec![test_call("c1", "git_commit", serde_json::json!({ "message": "no debería" }))],
+            ),
+            FakeMentor::ok("ok, no commiteo"),
+        ]);
+        // ask responde "n": el commit se rechaza.
+        let mut history = Vec::new();
+        let skin = ui::skin();
+        let store = ProjectStore::init(&dir).unwrap();
+        let mut ask = |_: &str| Some("n".to_string());
+        let _ = run_turn(&fake, &mut history, &dir, &skin, &mut ask, &store, "hola", false).await;
+        // El log NO debe tener el commit rechazado.
+        assert!(!run_git(&dir, &["log", "--oneline"]).contains("no debería"));
+        let serial = serde_json::to_string(&history).unwrap();
+        assert!(serial.contains("rechazó crear el commit"));
     }
 
     // ----- tool calls nativas (function calling) -----
