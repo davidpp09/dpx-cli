@@ -143,8 +143,14 @@ impl Brain {
 
 /// Model IDs de DeepSeek: `pro` razona (cerebro principal), `flash` es 12x más
 /// barato para tareas mecánicas (resúmenes, verificación).
-const DEEPSEEK_PRO: &str = "deepseek-reasoner";
-const DEEPSEEK_FLASH: &str = "deepseek-chat";
+///
+/// OJO (verificado en vivo 2026-06-12): los alias `deepseek-reasoner` /
+/// `deepseek-chat` se sirven SIEMPRE como `deepseek-v4-flash` en este endpoint
+/// — pedir `reasoner` NO da el modelo fuerte, lo degrada a flash en silencio.
+/// Hay que usar los IDs `v4` explícitos: `deepseek-v4-pro` SÍ devuelve el pro
+/// y SÍ soporta function calling + thinking. No los cambies a los alias.
+const DEEPSEEK_PRO: &str = "deepseek-v4-pro";
+const DEEPSEEK_FLASH: &str = "deepseek-v4-flash";
 
 /// Body extra para activar el "thinking" de DeepSeek con el effort dado.
 /// La API solo acepta `"high"` o `"max"` (cf. docs: `xhigh`→`max`, `low/medium`→`high`).

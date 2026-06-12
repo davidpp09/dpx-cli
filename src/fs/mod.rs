@@ -409,9 +409,53 @@ pub fn detect_build(cwd: &Path) -> Option<String> {
     None
 }
 
-/// Detecta el stack del proyecto mirando solo los archivos de la raíz.
+/// Detecta el stack del proyecto mirando los archivos de la raíz.
+///
+/// Primero intenta detección profunda (leyendo dependencias reales de los
+/// manifiestos: pom.xml, build.gradle, Cargo.toml, package.json, etc.).
+/// Si no reconoce nada, cae en detección por tipo de archivo de build.
 /// `None` si no se reconoce ninguno (mentor genérico, sin skills de dominio).
 pub fn detect_stack(cwd: &Path) -> Option<&'static str> {
+    detect_stack_deep(cwd).or_else(|| detect_stack_shallow(cwd))
+}
+
+/// Detección profunda: parsea manifiestos de dependencias reales.
+///
+/// Mantiene el mismo orden de prioridad que la shallow: JVM (Maven/Gradle)
+/// antes que Node.js, Rust y Python. Si un proyecto tiene pom.xml Y
+/// package.json (ej. frontend+backend mono-repo), JVM gana.
+fn detect_stack_deep(cwd: &Path) -> Option<&'static str> {
+    // JVM: Maven primero, Gradle después
+    if cwd.join("pom.xml").exists() {
+        if let Some(stack) = detect_maven_stack(cwd) {
+            return Some(stack);
+        }
+        // pom.xml sin Spring Boot → JVM genérico → spring-boot pack
+        return Some("spring-boot");
+    }
+    if cwd.join("build.gradle").exists() || cwd.join("build.gradle.kts").exists() {
+        if let Some(stack) = detect_gradle_stack(cwd) {
+            return Some(stack);
+        }
+        return Some("gradle");
+    }
+    // Node.js
+    if let Some(stack) = detect_npm_stack(cwd) {
+        return Some(stack);
+    }
+    // Rust
+    if cwd.join("Cargo.toml").exists() {
+        return Some("rust");
+    }
+    // Python
+    if let Some(stack) = detect_python_stack(cwd) {
+        return Some(stack);
+    }
+    None
+}
+
+/// Detección superficial por tipo de archivo de build (fallback).
+fn detect_stack_shallow(cwd: &Path) -> Option<&'static str> {
     if cwd.join("pom.xml").exists() || cwd.join("mvnw").exists() || cwd.join("mvnw.cmd").exists() {
         return Some("spring-boot");
     }
@@ -430,7 +474,81 @@ pub fn detect_stack(cwd: &Path) -> Option<&'static str> {
     None
 }
 
+/// Detecta stack desde pom.xml: busca Spring Boot, Quarkus, Micronaut.
+fn detect_maven_stack(cwd: &Path) -> Option<&'static str> {
+    let path = cwd.join("pom.xml");
+    if !path.exists() {
+        return None;
+    }
+    let data = fs::read_to_string(path).ok()?;
+    // Spring Boot: parent POM (más común) o starters o plugin
+    if data.contains("spring-boot-starter-parent")
+        || data.contains("spring-boot-starter-")
+        || data.contains("spring-boot-maven-plugin")
+    {
+        return Some("spring-boot");
+    }
+    // Quarkus / Micronaut → pack JVM (spring-boot) por ahora
+    if data.contains("quarkus-") || data.contains("micronaut-") {
+        return Some("spring-boot");
+    }
+    None // no deep match → que decida el fallback shallow
+}
+
+/// Detecta stack desde build.gradle[.kts]: Spring Boot Gradle plugin.
+fn detect_gradle_stack(cwd: &Path) -> Option<&'static str> {
+    for name in &["build.gradle", "build.gradle.kts"] {
+        let path = cwd.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let data = fs::read_to_string(path).ok()?;
+        if data.contains("org.springframework.boot")
+            || data.contains("spring-boot-gradle-plugin")
+            || data.contains("spring-boot-starter-")
+        {
+            return Some("spring-boot");
+        }
+    }
+    None
+}
+
+/// Detecta stack desde package.json: React, Next.js, Gatsby, etc.
+fn detect_npm_stack(cwd: &Path) -> Option<&'static str> {
+    let path = cwd.join("package.json");
+    if !path.exists() {
+        return None;
+    }
+    let data = fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&data).ok()?;
+
+    // Recoge nombres de dependencias de todos los grupos típicos
+    let mut deps: Vec<String> = Vec::new();
+    for key in &["dependencies", "devDependencies", "peerDependencies"] {
+        if let Some(map) = json.get(key).and_then(|v| v.as_object()) {
+            deps.extend(map.keys().map(|s| s.to_string()));
+        }
+    }
+
+    // React / Next / Gatsby → react
+    if deps.iter().any(|d| matches!(d.as_str(), "react" | "next" | "gatsby" | "react-native")) {
+        return Some("react");
+    }
+
+    // Cualquier otro proyecto npm → node
+    Some("node")
+}
+
+/// Detecta stack desde pyproject.toml / requirements.txt.
+fn detect_python_stack(cwd: &Path) -> Option<&'static str> {
+    if cwd.join("pyproject.toml").exists() || cwd.join("requirements.txt").exists() {
+        return Some("python");
+    }
+    None
+}
+
 /// ¿El `package.json` declara `react` entre sus dependencias?
+/// Usado por `detect_stack_shallow` como fallback rápido.
 fn package_json_has_react(cwd: &Path) -> bool {
     let Ok(data) = fs::read_to_string(cwd.join("package.json")) else {
         return false;
@@ -1127,6 +1245,146 @@ mod tests {
         fs::write(dir.join("pom.xml"), "<project/>").unwrap();
         assert_eq!(detect_stack(&dir), Some("spring-boot"));
 
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detect_maven_spring_boot_por_parent_pom() {
+        let dir = std::env::temp_dir().join(format!("dpx-mvn-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("pom.xml"),
+            r#"<project>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.2.0</version>
+  </parent>
+</project>"#,
+        )
+        .unwrap();
+        assert_eq!(detect_stack(&dir), Some("spring-boot"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detect_maven_spring_boot_por_plugin() {
+        let dir = std::env::temp_dir().join(format!("dpx-mvn-pl-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("pom.xml"),
+            r#"<project>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>"#,
+        )
+        .unwrap();
+        assert_eq!(detect_stack(&dir), Some("spring-boot"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detect_maven_simple_xml_sin_spring_cae_a_shallow() {
+        // Nombre único: este dir NO puede colisionar con el de otro test que
+        // corre en paralelo (mismo pid) — la causa del fallo flaky original.
+        let dir = std::env::temp_dir().join(format!("dpx-mvn-simple-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("pom.xml"),
+            r#"<project>
+  <groupId>com.test</groupId>
+  <artifactId>simple</artifactId>
+</project>"#,
+        )
+        .unwrap();
+        // shallow detecta pom.xml → spring-boot (fallback genérico para JVM)
+        assert_eq!(detect_stack(&dir), Some("spring-boot"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detect_gradle_spring_boot_por_plugin() {
+        let dir = std::env::temp_dir().join(format!("dpx-gradle-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("build.gradle"),
+            r#"plugins {
+  id 'org.springframework.boot' version '3.2.0'
+}
+dependencies {
+  implementation 'org.springframework.boot:spring-boot-starter-web'
+}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_stack(&dir), Some("spring-boot"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detect_gradle_sin_spring_cae_a_shallow() {
+        let dir = std::env::temp_dir().join(format!("dpx-gradle-2-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("build.gradle"), "apply plugin: 'java'").unwrap();
+        // shallow detecta build.gradle → gradle
+        assert_eq!(detect_stack(&dir), Some("gradle"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detect_npm_next_js_como_react() {
+        let dir = std::env::temp_dir().join(format!("dpx-next-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"dependencies":{"next":"^14","react":"^18"}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_stack(&dir), Some("react"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detect_npm_gatsby_como_react() {
+        let dir = std::env::temp_dir().join(format!("dpx-gatsby-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"dependencies":{"gatsby":"^5"}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_stack(&dir), Some("react"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detect_npm_react_por_devdeps() {
+        let dir = std::env::temp_dir().join(format!("dpx-rdep-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"devDependencies":{"react":"^18"}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_stack(&dir), Some("react"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detect_npm_peer_deps_reconocidas() {
+        let dir = std::env::temp_dir().join(format!("dpx-peer-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"peerDependencies":{"react":"^18"}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_stack(&dir), Some("react"));
         fs::remove_dir_all(&dir).unwrap();
     }
 
