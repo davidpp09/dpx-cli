@@ -139,7 +139,7 @@ Se activa con `--mode` (CLI) o `/mode pro|hack` en el REPL.
               ┌───────────────────────┬──────────────────────────┐
    PRO        │  "Te explico por qué   │  "Implemento, compilo,  │
    (metódico) │   conviene X sobre Y;  │   corrijo y te entrego  │
-              │   ahora escribilo vos" │   funcionando con tests" │
+              │   ahora escríbelo tú"  │   funcionando con tests" │
               ├───────────────────────┼──────────────────────────┤
    HACK       │  "En prod sería X,    │  "CRUD listo, H2 en RAM, │
    (rápido)   │   pero ahora simpli-  │   endpoints andando en   │
@@ -199,7 +199,7 @@ Cada Focus Pack inyecta conocimiento de dominio en el system prompt del modelo: 
 | `rust` | Sistemas y CLIs en Rust | `--focus rust` |
 | `gradle` | Proyecto JVM con Gradle (genérico) | `--focus gradle` |
 
-Si no pasás `--focus`, dpx **detecta el stack automáticamente** analizando los archivos del proyecto (`pom.xml`, `package.json`, `Cargo.toml`, etc.). Si no reconoce nada, arranca como mentor general.
+Si no pasas `--focus`, dpx **detecta el stack automáticamente** analizando los archivos del proyecto (`pom.xml`, `package.json`, `Cargo.toml`, etc.). Si no reconoce nada, arranca como mentor general.
 
 ---
 
@@ -240,7 +240,7 @@ Dentro de una sesión, el prompt entiende estos comandos slash:
 | `/update` | Recompila e instala dpx desde el repo actual |
 | `/salir` | Termina la sesión y guarda el contexto |
 
-También podés referenciar archivos con `@ruta/al/archivo.java` y el mentor los leerá (con autocompletado por Tab).
+También puedes referenciar archivos con `@ruta/al/archivo.java` y el mentor los leerá (con autocompletado por Tab).
 
 ---
 
@@ -401,4 +401,28 @@ Dentro del repo de dpx, el comando `/update` recompila e instala el binario sin 
 
 ## Licencia
 
-MIT
+MIT License — Copyright (c) 2025 DPX
+
+Se concede permiso, de forma gratuita, a cualquier persona que obtenga una copia de este software
+y los archivos de documentación asociados (el "Software"), para usar, copiar, modificar, fusionar,
+publicar, distribuir, sublicenciar y/o vender copias del Software sin restricción alguna, y para
+permitir a las personas a las que se les proporcione el Software que hagan lo mismo, sujeto a
+estas dos condiciones:
+
+1. El aviso de copyright anterior y este aviso de permiso deben incluirse en todas las copias
+   o partes sustanciales del Software.
+
+2. EL SOFTWARE SE PROPORCIONA "TAL CUAL", SIN GARANTÍA DE NINGÚN TIPO, EXPRESA O IMPLÍCITA,
+   INCLUYENDO PERO NO LIMITADO A GARANTÍAS DE COMERCIABILIDAD, IDONEIDAD PARA UN PROPÓSITO
+   PARTICULAR Y NO INFRACCIÓN. EN NINGÚN CASO LOS AUTORES O TITULARES DEL COPYRIGHT SERÁN
+   RESPONSABLES POR NINGUNA RECLAMACIÓN, DAÑO U OTRA RESPONSABILIDAD, YA SEA EN UNA ACCIÓN
+   DE CONTRATO, AGRAVIO O DE OTRO TIPO, QUE SURJA DE O EN CONEXIÓN CON EL SOFTWARE O EL USO
+   U OTRO TIPO DE ACCIONES EN EL SOFTWARE.
+
+**¿Qué significa esto en español?**
+
+- ✅ Puedes usar dpx en tu empresa, gratis, sin pedir permiso
+- ✅ Puedes modificarlo, mejorarlo y compartir tus cambios
+- ✅ Puedes integrarlo en un producto comercial que vendas
+- ❌ No puedes quitar el aviso de copyright ni hacerte pasar por el autor
+- ❌ Los autores no se hacen responsables si algo sale mal (el software se da "como está")
