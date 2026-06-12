@@ -31,7 +31,7 @@ use crate::ui;
 /// Comandos disponibles, para el autocompletado con Tab.
 pub const COMMANDS: &[&str] = &[
     "/help", "/status", "/models", "/clear", "/compact", "/context", "/focus", "/mode", "/brain",
-    "/mentor", "/code", "/salir",
+    "/mentor", "/code", "/auto", "/update", "/salir",
 ];
 
 const PROMPT: &str = " › ";

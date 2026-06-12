@@ -26,7 +26,7 @@ pub struct ChatReply {
 
 /// Proveedor que hace de cerebro mentor. Los tres del plan anti-suscripción:
 /// DeepSeek (principal), Kimi y Qwen — todos fuertes en tool-calling nativo.
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
 pub enum Brain {
     /// DeepSeek (razonador): el cerebro principal, fuerte en código y agéntico.
     Deepseek,
@@ -330,6 +330,12 @@ fn next_backoff<E: std::fmt::Display>(error: &E, attempt: &mut u32) -> Option<st
     *attempt += 1;
     // Backoff exponencial: 1s, 2s, 4s, 8s.
     Some(std::time::Duration::from_secs(1 << (*attempt - 1)))
+}
+
+/// ¿Un mensaje de error es transitorio? Versión pública para que el loop del
+/// turno decida si reintentar una ronda cortada a mitad (red caída) o rendirse.
+pub fn is_transient_error(error: &str) -> bool {
+    is_transient(&error)
 }
 
 /// ¿El error es transitorio (saturación / indisponibilidad pasajera)?

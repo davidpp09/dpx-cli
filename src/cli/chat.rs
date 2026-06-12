@@ -17,7 +17,13 @@ use crate::focus::{self, Mode, Persona};
 use crate::session::{self, ProjectStore, Turn};
 use crate::ui;
 
-pub async fn run(focus: Option<String>, mode: Mode, brain: Brain, persona: Persona) -> Result<()> {
+pub async fn run(
+    focus: Option<String>,
+    mode: Mode,
+    brain: Brain,
+    persona: Persona,
+    auto: bool,
+) -> Result<()> {
     let cwd = env::current_dir()?;
     let store = ProjectStore::init(&cwd)?;
     let skin = ui::skin();
@@ -43,6 +49,7 @@ pub async fn run(focus: Option<String>, mode: Mode, brain: Brain, persona: Perso
     let mut mode = mode;
     let mut brain = brain;
     let mut persona = persona;
+    let mut auto = auto;
     let mut router = ModelRouter::new(brain);
     let mut mentor = build_mentor(&router, focus_id.as_deref(), mode, persona, prior.as_deref())?;
 
@@ -73,6 +80,7 @@ pub async fn run(focus: Option<String>, mode: Mode, brain: Brain, persona: Perso
             mode_label(mode),
             router.brain_label(),
             persona_label(persona),
+            auto,
         );
 
         match ed.read_input(&bar) {
@@ -101,7 +109,8 @@ pub async fn run(focus: Option<String>, mode: Mode, brain: Brain, persona: Perso
                     }
                     handle_command(
                         cmd, &skin, &store, &prior, &mut router, &mut mentor, &mut focus_id,
-                        &mut mode, &mut brain, &mut persona, &mut history, &cwd, turns.len(),
+                        &mut mode, &mut brain, &mut persona, &mut auto, &mut history, &cwd,
+                        turns.len(),
                     );
                     continue;
                 }
@@ -115,7 +124,14 @@ pub async fn run(focus: Option<String>, mode: Mode, brain: Brain, persona: Perso
                 // se degrada al siguiente con API key y se reintenta UNA vez.
                 ui::clear_cancel();
                 let mut outcome = run_turn(
-                    &mentor, &mut history, &cwd, &skin, &mut |p| ed.confirm_line(p), &store, input,
+                    &mentor,
+                    &mut history,
+                    &cwd,
+                    &skin,
+                    &mut |p| ed.confirm_line(p),
+                    &store,
+                    input,
+                    auto,
                 )
                 .await;
                 if let TurnOutcome::ModelFailed(err) = &outcome {
@@ -144,6 +160,7 @@ pub async fn run(focus: Option<String>, mode: Mode, brain: Brain, persona: Perso
                                     &mut |p| ed.confirm_line(p),
                                     &store,
                                     input,
+                                    auto,
                                 )
                                 .await;
                             }
@@ -270,8 +287,18 @@ fn ask_continue() -> bool {
     !matches!(answer.trim().to_lowercase().as_str(), "n" | "no")
 }
 
-/// Máximo de rondas agénticas por turno (lee/escribe/ejecuta → itera). Evita bucles.
+/// Presupuesto inicial de rondas agénticas por turno (lee/escribe/ejecuta →
+/// itera). Al agotarse, el turno NO muere: se le pregunta al usuario si dpx
+/// sigue (checkpoint humano) y el presupuesto se amplía en bloques de este
+/// tamaño. En modo auto se amplía solo, hasta [`AUTO_MAX_ROUNDS`].
 const MAX_TURN_ROUNDS: usize = 8;
+
+/// Tope duro de rondas en modo auto (sin humano que frene, algo tiene que hacerlo).
+const AUTO_MAX_ROUNDS: usize = 32;
+
+/// Reintentos de ronda cuando la conexión se corta a MITAD de un turno (texto
+/// ya emitido): antes esto mataba el turno entero — la queja nº 1 del usuario.
+const MAX_STREAM_RETRIES: usize = 2;
 
 /// Resultado de un turno completo.
 enum TurnOutcome {
@@ -399,10 +426,13 @@ async fn run_turn(
     ask: &mut dyn FnMut(&str) -> Option<String>,
     store: &ProjectStore,
     user_input: &str,
+    auto: bool,
 ) -> TurnOutcome {
     let mut to_send = attach_files(cwd, user_input);
     let mut full = String::new();
     let mut round = 0usize;
+    let mut round_budget = MAX_TURN_ROUNDS;
+    let mut stream_retries = 0usize;
 
     loop {
         round += 1;
@@ -431,6 +461,24 @@ async fn run_turn(
             Err(e) => {
                 if full.trim().is_empty() {
                     return TurnOutcome::ModelFailed(e.to_string());
+                }
+                // La conexión murió a MITAD del turno con trabajo ya hecho.
+                // Si el error es transitorio, la ronda se reintenta avisando
+                // al modelo (su respuesta cortada NO quedó en el historial)
+                // en vez de matar el turno entero.
+                if crate::agent::is_transient_error(&e.to_string())
+                    && stream_retries < MAX_STREAM_RETRIES
+                {
+                    stream_retries += 1;
+                    println!(
+                        "{}",
+                        ui::dim("⚡ la conexión se cortó a mitad del turno · reintentando la ronda")
+                    );
+                    to_send = "[Tu respuesta anterior se cortó a mitad por un error de red y \
+                               NO quedó registrada: ninguna acción que pidieras en ella se \
+                               ejecutó. Continúa la tarea re-emitiendo desde donde ibas.]"
+                        .to_string();
+                    continue;
                 }
                 ui::panel("⚠ error del modelo", &ui::friendly_error(&e.to_string()));
                 return TurnOutcome::Reply(full);
@@ -481,10 +529,10 @@ async fn run_turn(
         //    para informárselo al modelo (que no asuma que algo se aplicó si el
         //    usuario lo rechazó o falló).
         let writes = if quarantined { Vec::new() } else { crate::fs::parse_writes(&reply) };
-        report.absorb(process_writes(cwd, &writes, &mut *ask));
+        report.absorb(process_writes(cwd, &writes, &mut *ask, auto));
 
         let edits = if quarantined { Vec::new() } else { crate::fs::parse_edits(&reply) };
-        report.absorb(process_edits(cwd, &edits, &mut *ask));
+        report.absorb(process_edits(cwd, &edits, &mut *ask, auto));
 
         let deletes = if quarantined { Vec::new() } else { crate::fs::parse_deletes(&reply) };
         report.absorb(process_deletes(cwd, &deletes, &mut *ask));
@@ -498,11 +546,23 @@ async fn run_turn(
         let mut cancelled_at: Option<usize> = None;
         for (i, call) in calls.iter().enumerate() {
             let outcome =
-                run_tool_call(cwd, store, &mut *ask, call, &mut s_writes, &mut s_edits).await;
+                run_tool_call(cwd, store, &mut *ask, call, &mut s_writes, &mut s_edits, auto)
+                    .await;
             let (text, cancelled) = match outcome {
                 ToolOutcome::Done(t) => (t, false),
                 ToolOutcome::Cancelled(t) => (t, true),
             };
+            // Caja negra: la tool call y su resultado quedan en la
+            // transcripción de la sesión (.dpx/sessions) para autopsias.
+            let _ = store.checkpoint(
+                "tool",
+                &format!(
+                    "{}({}) → {}",
+                    call.function.name,
+                    truncate_log(&call.function.arguments.to_string(), 160),
+                    truncate_log(&text, 300)
+                ),
+            );
             history.push(Message::tool_result(call.id.clone(), text));
             if cancelled {
                 cancelled_at = Some(i);
@@ -564,7 +624,22 @@ async fn run_turn(
 
         let has_requests =
             !reads.is_empty() || !searches.is_empty() || !runs.is_empty() || !calls.is_empty();
-        if (has_requests || report.needs_followup) && round < MAX_TURN_ROUNDS {
+        let wants_more = has_requests || report.needs_followup;
+
+        // Presupuesto de rondas agotado con la tarea aún VIVA: checkpoint en
+        // vez de muerte silenciosa (la causa nº 1 de turnos "muertos a la
+        // mitad"). En manual pregunta; en auto amplía solo hasta el tope duro.
+        if wants_more
+            && round >= round_budget
+            && !extend_rounds(&mut *ask, round, auto, &mut round_budget)
+        {
+            println!(
+                "{}",
+                ui::dim("⏸ turno detenido · el plan y la memoria quedan guardados para retomar")
+            );
+            break;
+        }
+        if wants_more {
             let mut ctx = String::new();
             if !report.notes.is_empty() {
                 ctx.push_str("\n--- resultado de los cambios propuestos ---\n");
@@ -590,7 +665,7 @@ async fn run_turn(
                 println!("\n{}", ui::dim("dpx verifica que el proyecto compile…"));
             }
             for cmd in &runs {
-                match confirm_run(&mut *ask, store, cwd, cmd) {
+                match confirm_run(&mut *ask, store, cwd, cmd, auto) {
                     RunDecision::Blocked(reason) => {
                         ctx.push_str(&format!(
                             "\n[dpx BLOQUEÓ el comando `{cmd}`: {reason}. Está prohibido vía dpx:run; \
@@ -643,6 +718,125 @@ async fn run_turn(
     }
 }
 
+/// Reinstala dpx desde el código del proyecto actual SIN cerrar la sesión —
+/// cierra el ciclo de automejora (dpx se edita, se prueba y se INSTALA).
+/// En Windows no se puede sobrescribir un exe en ejecución (os error 5), pero
+/// SÍ renombrarlo: se aparta el binario vivo y `cargo install` escribe el
+/// nuevo. Si la instalación falla, se restaura el binario original.
+fn self_update(cwd: &Path) {
+    // Solo dentro del repo de dpx: en otro proyecto Rust, `cargo install`
+    // instalaría ESE binario y dpx quedaría apartado sin reemplazo.
+    let manifest = std::fs::read_to_string(cwd.join("Cargo.toml")).unwrap_or_default();
+    if !manifest.contains("name = \"dpx-cli\"") {
+        println!(
+            "{}",
+            ui::dim("/update solo funciona dentro del repo de dpx (este proyecto no es dpx-cli)")
+        );
+        return;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("{} no pude localizar mi propio binario: {e}", ui::accent("⏺ error"));
+            return;
+        }
+    };
+    let parked = exe.with_extension("old.exe");
+    let _ = std::fs::remove_file(&parked);
+    if let Err(e) = std::fs::rename(&exe, &parked) {
+        eprintln!("{} no pude apartar el binario en uso: {e}", ui::accent("⏺ error"));
+        return;
+    }
+
+    println!("{}", ui::accent("⏺ recompilando e instalando dpx…"));
+    let t = std::time::Instant::now();
+    ui::clear_cancel();
+    let mut shown = 0usize;
+    let out = crate::fs::run_command_streaming(
+        cwd,
+        "cargo install --path . --force",
+        600, // un build release desde cero tarda más que el timeout normal
+        &mut |line| {
+            shown += 1;
+            if shown <= 12 {
+                println!("{}", ui::dim(&format!("  │ {line}")));
+            }
+        },
+        &|| ui::cancel_requested(),
+    );
+    ui::action_time(t.elapsed());
+
+    if out.output.contains("exit code: 0") {
+        println!(
+            "{} {}",
+            ui::accent("✓ dpx actualizado."),
+            ui::dim("esta sesión sigue con el binario viejo · sal con /salir y vuelve a abrir dpx")
+        );
+    } else {
+        // Rollback: que `dpx` siga existiendo en el PATH pase lo que pase.
+        let _ = std::fs::remove_file(&exe);
+        if let Err(e) = std::fs::rename(&parked, &exe) {
+            eprintln!(
+                "{} la instalación falló Y no pude restaurar el binario ({e}): ejecuta a mano `cargo install --path . --force`",
+                ui::accent("⏺ error")
+            );
+            return;
+        }
+        println!(
+            "{}",
+            ui::dim("la instalación falló (¿no compila?) · binario anterior restaurado, dpx sigue funcionando")
+        );
+    }
+}
+
+/// Checkpoint al agotar el presupuesto de rondas: en manual pregunta al
+/// usuario (Enter o `s` = seguir, `n` = parar); en modo auto amplía solo
+/// hasta [`AUTO_MAX_ROUNDS`]. Si se continúa, amplía el presupuesto en otro
+/// bloque de [`MAX_TURN_ROUNDS`].
+fn extend_rounds(
+    ask: &mut dyn FnMut(&str) -> Option<String>,
+    round: usize,
+    auto: bool,
+    budget: &mut usize,
+) -> bool {
+    if auto {
+        if round >= AUTO_MAX_ROUNDS {
+            println!(
+                "\n{}",
+                ui::dim(&format!(
+                    "⏸ tope del modo auto ({AUTO_MAX_ROUNDS} rondas) · revisa el avance y relanza la tarea"
+                ))
+            );
+            return false;
+        }
+        println!(
+            "\n{}",
+            ui::dim(&format!("auto ⚡ {round} rondas y la tarea sigue · ampliando presupuesto"))
+        );
+        *budget += MAX_TURN_ROUNDS;
+        return true;
+    }
+    println!();
+    let go = match ask(&format!("⏸ {round} rondas y dpx sigue trabajando · ¿continuar? [S/n] ")) {
+        Some(ans) => !matches!(ans.trim().to_lowercase().as_str(), "n" | "no"),
+        None => false,
+    };
+    if go {
+        *budget += MAX_TURN_ROUNDS;
+    }
+    go
+}
+
+/// Recorta un texto para la transcripción (una tool call con un archivo
+/// entero de resultado no debe inflar el jsonl).
+fn truncate_log(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max_chars).collect();
+    format!("{cut}… [recortado]")
+}
+
 /// Resultado de atender una tool call nativa: el texto que va al historial
 /// como tool result, y si la ejecución se canceló (aborta el turno).
 enum ToolOutcome {
@@ -662,6 +856,7 @@ async fn run_tool_call(
     call: &rig_core::message::ToolCall,
     writes: &mut Vec<crate::fs::FileWrite>,
     edits: &mut Vec<crate::fs::FileEdit>,
+    auto: bool,
 ) -> ToolOutcome {
     match tools::parse_call(&call.function.name, &call.function.arguments) {
         Err(e) => {
@@ -688,13 +883,13 @@ async fn run_tool_call(
         }
         Ok(DpxCall::Write { path, content }) => {
             let w = crate::fs::FileWrite { path, content };
-            let report = process_writes(cwd, std::slice::from_ref(&w), ask);
+            let report = process_writes(cwd, std::slice::from_ref(&w), ask, auto);
             writes.push(w);
             ToolOutcome::Done(report.notes.join("\n"))
         }
         Ok(DpxCall::Edit { path, search, replace }) => {
             let e = crate::fs::FileEdit { path, search, replace };
-            let report = process_edits(cwd, std::slice::from_ref(&e), ask);
+            let report = process_edits(cwd, std::slice::from_ref(&e), ask, auto);
             edits.push(e);
             ToolOutcome::Done(report.notes.join("\n"))
         }
@@ -702,7 +897,7 @@ async fn run_tool_call(
             let report = process_deletes(cwd, &[path], ask);
             ToolOutcome::Done(report.notes.join("\n"))
         }
-        Ok(DpxCall::Run { command }) => match confirm_run(ask, store, cwd, &command) {
+        Ok(DpxCall::Run { command }) => match confirm_run(ask, store, cwd, &command, auto) {
             RunDecision::Blocked(reason) => ToolOutcome::Done(format!(
                 "[dpx BLOQUEÓ el comando `{command}`: {reason}. Está prohibido vía run_command; \
                  NO lo vuelvas a proponer, busca otra forma o pídele al usuario que lo haga a mano.]"
@@ -806,6 +1001,7 @@ fn handle_command(
     mode: &mut Mode,
     brain: &mut Brain,
     persona: &mut Persona,
+    auto: &mut bool,
     history: &mut Vec<Message>,
     cwd: &Path,
     turn_count: usize,
@@ -832,6 +1028,29 @@ fn handle_command(
         ),
 
         "models" | "model" => ui::models_list(&brain_rows(*brain)),
+
+        // Modo autónomo: cambios y comandos SEGUROS sin preguntar. Las puertas
+        // duras (peligrosos, prohibidos, guards anti-truncado, borrados) se
+        // mantienen SIEMPRE, con o sin auto.
+        "auto" => {
+            *auto = match arg {
+                Some("on") => true,
+                Some("off") => false,
+                _ => !*auto,
+            };
+            if *auto {
+                println!(
+                    "{} {}",
+                    ui::accent("⏺ auto ⚡ ACTIVADO"),
+                    ui::dim("· escrituras/ediciones y comandos seguros sin preguntar · /auto off para volver")
+                );
+            } else {
+                println!("{}", ui::accent("⏺ auto desactivado · cada cambio vuelve a confirmarse"));
+            }
+        }
+
+        // dpx se reinstala a sí mismo desde este repo (cierra el ciclo de automejora).
+        "update" => self_update(cwd),
 
         "clear" => {
             history.clear();
@@ -1076,6 +1295,7 @@ fn process_writes(
     cwd: &std::path::Path,
     writes: &[crate::fs::FileWrite],
     ask: &mut dyn FnMut(&str) -> Option<String>,
+    auto: bool,
 ) -> ActionReport {
     let mut report = ActionReport::default();
     if writes.is_empty() {
@@ -1121,6 +1341,24 @@ fn process_writes(
                 "  {}",
                 ui::red("⚠ reescritura completa de un archivo grande — la doctrina dice edit_file para archivos existentes")
             );
+        }
+
+        // En modo auto los writes limpios se aplican directo (mostrando el
+        // diff igual, por transparencia); los GUARDS siguen preguntando
+        // SIEMPRE: un posible truncado no se auto-acepta jamás.
+        if auto && shrink.is_none() && !big_rewrite {
+            ui::preview_diff(current.as_deref(), &w.content);
+            match crate::fs::apply(cwd, w) {
+                Ok(path) => {
+                    println!("{} escrito (auto ⚡): {}", ui::accent("⏺"), short_path(&path));
+                    report.ok(format!("[escrito: {}]", w.path));
+                }
+                Err(e) => {
+                    eprintln!("{} {e}", ui::accent("⏺ error"));
+                    report.followup(format!("[ERROR al escribir {}: {e}]", w.path));
+                }
+            }
+            continue;
         }
 
         let accepted = (write_all && shrink.is_none() && !big_rewrite) || {
@@ -1201,6 +1439,7 @@ fn process_edits(
     cwd: &std::path::Path,
     edits: &[crate::fs::FileEdit],
     ask: &mut dyn FnMut(&str) -> Option<String>,
+    auto: bool,
 ) -> ActionReport {
     let mut report = ActionReport::default();
     for e in edits {
@@ -1220,7 +1459,11 @@ fn process_edits(
         match crate::fs::apply_edit(&current, e) {
             Ok(new_content) => {
                 ui::preview_diff(Some(&current), &new_content);
-                if matches!(ask("¿aplicar? [s/N] "), Some(a) if is_yes(&a)) {
+                // En auto, las ediciones quirúrgicas (pequeñas por diseño) se
+                // aplican directo tras mostrar el diff.
+                let accepted =
+                    auto || matches!(ask("¿aplicar? [s/N] "), Some(a) if is_yes(&a));
+                if accepted {
                     let w = crate::fs::FileWrite { path: e.path.clone(), content: new_content };
                     match crate::fs::apply(cwd, &w) {
                         Ok(path) => {
@@ -1339,6 +1582,7 @@ fn confirm_run(
     store: &ProjectStore,
     cwd: &Path,
     cmd: &str,
+    auto: bool,
 ) -> RunDecision {
     use crate::fs::safety::{self, CommandRisk};
 
@@ -1373,6 +1617,13 @@ fn confirm_run(
             ui::accent(cmd),
             ui::dim("(permitido siempre)")
         );
+        return RunDecision::Run;
+    }
+    // Modo auto: un comando clasificado como SEGURO corre sin preguntar (los
+    // peligrosos/prohibidos ya retornaron arriba con sus puertas intactas).
+    if auto {
+        println!("\n{} {}  {}", ui::accent("⏺ ejecutar:"), ui::accent(cmd), ui::dim("(auto ⚡)"));
+        warn_outside_paths(cwd, cmd);
         return RunDecision::Run;
     }
     println!("\n{} {}", ui::accent("⏺ ejecutar:"), ui::accent(cmd));
@@ -1453,7 +1704,7 @@ mod tests {
     fn write_confirmado_se_aplica_y_reporta() {
         let dir = tmp("w-ok");
         let writes = vec![FileWrite { path: "a.txt".into(), content: "hola\n".into() }];
-        let report = process_writes(&dir, &writes, &mut |_| Some("s".into()));
+        let report = process_writes(&dir, &writes, &mut |_| Some("s".into()), false);
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "hola\n");
         assert!(!report.needs_followup);
         assert!(report.notes[0].contains("escrito"));
@@ -1464,7 +1715,7 @@ mod tests {
     fn write_rechazado_pide_followup() {
         let dir = tmp("w-no");
         let writes = vec![FileWrite { path: "a.txt".into(), content: "hola\n".into() }];
-        let report = process_writes(&dir, &writes, &mut |_| Some("n".into()));
+        let report = process_writes(&dir, &writes, &mut |_| Some("n".into()), false);
         assert!(!dir.join("a.txt").exists());
         assert!(report.needs_followup);
         assert!(report.notes[0].contains("rechazó"));
@@ -1479,10 +1730,15 @@ mod tests {
             FileWrite { path: "b.txt".into(), content: "B\n".into() },
         ];
         let mut asked = 0;
-        let report = process_writes(&dir, &writes, &mut |_| {
-            asked += 1;
-            Some("a".into())
-        });
+        let report = process_writes(
+            &dir,
+            &writes,
+            &mut |_| {
+                asked += 1;
+                Some("a".into())
+            },
+            false,
+        );
         assert_eq!(asked, 1);
         assert!(dir.join("a.txt").exists() && dir.join("b.txt").exists());
         assert!(!report.needs_followup);
@@ -1494,7 +1750,7 @@ mod tests {
         let dir = tmp("e-ok");
         std::fs::write(dir.join("x.txt"), "uno\ndos\ntres\n").unwrap();
         let edits = vec![FileEdit { path: "x.txt".into(), search: "dos".into(), replace: "DOS".into() }];
-        let report = process_edits(&dir, &edits, &mut |_| Some("s".into()));
+        let report = process_edits(&dir, &edits, &mut |_| Some("s".into()), false);
         assert_eq!(std::fs::read_to_string(dir.join("x.txt")).unwrap(), "uno\nDOS\ntres\n");
         assert!(!report.needs_followup);
         assert!(report.notes[0].contains("aplicada"));
@@ -1507,10 +1763,15 @@ mod tests {
         std::fs::write(dir.join("x.txt"), "contenido\n").unwrap();
         let edits = vec![FileEdit { path: "x.txt".into(), search: "no-existe".into(), replace: "y".into() }];
         let mut asked = 0;
-        let report = process_edits(&dir, &edits, &mut |_| {
-            asked += 1;
-            Some("s".into())
-        });
+        let report = process_edits(
+            &dir,
+            &edits,
+            &mut |_| {
+                asked += 1;
+                Some("s".into())
+            },
+            false,
+        );
         assert_eq!(asked, 0);
         assert!(report.needs_followup);
         assert!(report.notes[0].contains("ERROR"));
@@ -1522,7 +1783,7 @@ mod tests {
     fn edit_sobre_archivo_inexistente_reporta_error() {
         let dir = tmp("e-nofile");
         let edits = vec![FileEdit { path: "nada.txt".into(), search: "x".into(), replace: "y".into() }];
-        let report = process_edits(&dir, &edits, &mut |_| Some("s".into()));
+        let report = process_edits(&dir, &edits, &mut |_| Some("s".into()), false);
         assert!(report.needs_followup);
         assert!(report.notes[0].contains("dpx:write"));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1652,7 +1913,20 @@ mod tests {
         let skin = ui::skin();
         let store = ProjectStore::init(dir).unwrap();
         let mut ask = |_: &str| Some(answer.to_string());
-        let out = run_turn(fake, &mut history, dir, &skin, &mut ask, &store, "hola").await;
+        let out = run_turn(fake, &mut history, dir, &skin, &mut ask, &store, "hola", false).await;
+        (out, history)
+    }
+
+    /// Como `fake_turn` pero en modo AUTO y con `ask` que PROHÍBE preguntar:
+    /// si algo pide confirmación en auto cuando no debe, el test explota.
+    async fn fake_turn_auto(fake: &FakeMentor, dir: &Path) -> (TurnOutcome, Vec<Message>) {
+        let mut history = Vec::new();
+        let skin = ui::skin();
+        let store = ProjectStore::init(dir).unwrap();
+        let mut ask = |p: &str| -> Option<String> {
+            panic!("en modo auto no debió preguntar nada, pero preguntó: {p}")
+        };
+        let out = run_turn(fake, &mut history, dir, &skin, &mut ask, &store, "hola", true).await;
         (out, history)
     }
 
@@ -1707,23 +1981,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn el_loop_corta_en_el_tope_de_rondas() {
-        let dir = tmp("turn-tope");
-        std::fs::write(dir.join("a.txt"), "x").unwrap();
-        let pide_leer = "sigo\n```dpx:read path=a.txt\n```\n";
-        let fake = FakeMentor::new(
-            (0..MAX_TURN_ROUNDS + 2).map(|_| FakeMentor::ok(pide_leer)).collect(),
-        );
-        let (out, _) = fake_turn(&fake, &dir, "s").await;
-        assert!(matches!(out, TurnOutcome::Reply(_)));
-        assert_eq!(
-            fake.inputs.borrow().len(),
-            MAX_TURN_ROUNDS,
-            "debe parar exactamente en el tope, aunque el modelo siga pidiendo acciones"
-        );
-    }
-
-    #[tokio::test]
     async fn write_rechazado_se_informa_al_modelo_sin_escribir() {
         let dir = tmp("turn-write-no");
         let fake = FakeMentor::new(vec![
@@ -1747,14 +2004,20 @@ mod tests {
         // Responder "s" (el reflejo del piloto automático) NO basta.
         let mut ask_s = |_: &str| Some("s".to_string());
         assert!(matches!(
-            confirm_run(&mut ask_s, &store, &dir, "git reset --hard"),
+            confirm_run(&mut ask_s, &store, &dir, "git reset --hard", false),
             RunDecision::Refused
         ));
         // Reescribir la primera palabra sí confirma.
         let mut ask_git = |_: &str| Some("git".to_string());
         assert!(matches!(
-            confirm_run(&mut ask_git, &store, &dir, "git reset --hard"),
+            confirm_run(&mut ask_git, &store, &dir, "git reset --hard", false),
             RunDecision::Run
+        ));
+        // Y el modo auto NO exime a un comando peligroso de su puerta.
+        let mut ask_no = |_: &str| Some("n".to_string());
+        assert!(matches!(
+            confirm_run(&mut ask_no, &store, &dir, "git reset --hard", true),
+            RunDecision::Refused
         ));
     }
 
@@ -1770,7 +2033,7 @@ mod tests {
             Some("n".to_string())
         };
         assert!(matches!(
-            confirm_run(&mut ask, &store, &dir, "rm -rf target"),
+            confirm_run(&mut ask, &store, &dir, "rm -rf target", false),
             RunDecision::Refused
         ));
         assert!(pregunto, "debió pedir confirmación reforzada pese a la allowlist");
@@ -1784,7 +2047,7 @@ mod tests {
             panic!("un comando prohibido jamás debe llegar a preguntar")
         };
         assert!(matches!(
-            confirm_run(&mut ask, &store, &dir, "shutdown /s /t 0"),
+            confirm_run(&mut ask, &store, &dir, "shutdown /s /t 0", true),
             RunDecision::Blocked(_)
         ));
     }
@@ -1840,7 +2103,7 @@ mod tests {
             path: "grande.rs".into(),
             content: "linea\n".repeat(20), // 200 → 20 líneas: truncado casi seguro
         }];
-        let report = process_writes(&dir, &writes, &mut |_| Some("n".to_string()));
+        let report = process_writes(&dir, &writes, &mut |_| Some("n".to_string()), false);
         assert!(report.needs_followup);
         assert!(report.notes[0].contains("TRUNCADA"));
         assert!(report.notes[0].contains("edit_file"));
@@ -1864,9 +2127,12 @@ mod tests {
         // "a" en la primera activa write_all; el write sospechoso DEBE volver
         // a preguntar igualmente (contestamos "n" la segunda vez).
         let mut respuestas = vec!["a", "n"].into_iter();
-        let report = process_writes(&dir, &writes, &mut |_| {
-            respuestas.next().map(str::to_string)
-        });
+        let report = process_writes(
+            &dir,
+            &writes,
+            &mut |_| respuestas.next().map(str::to_string),
+            false,
+        );
         assert!(respuestas.next().is_none(), "debió preguntar DOS veces (write_all no exime al guard)");
         assert!(report.notes.iter().any(|n| n.contains("TRUNCADA")));
         // El grande sigue intacto; el chico sí se escribió.
@@ -1882,7 +2148,7 @@ mod tests {
             path: "grande.rs".into(),
             content: "linea\n".repeat(240), // no encoge >40%, pero es rewrite completo
         }];
-        let report = process_writes(&dir, &writes, &mut |_| Some("n".to_string()));
+        let report = process_writes(&dir, &writes, &mut |_| Some("n".to_string()), false);
         assert!(report.needs_followup);
         assert!(report.notes[0].contains("edits quirúrgicos"));
         assert_eq!(
@@ -1896,7 +2162,7 @@ mod tests {
             crate::fs::FileWrite { path: "grande.rs".into(), content: "linea\n".repeat(240) },
         ];
         let mut respuestas = vec!["a", "n"].into_iter();
-        process_writes(&dir, &writes, &mut |_| respuestas.next().map(str::to_string));
+        process_writes(&dir, &writes, &mut |_| respuestas.next().map(str::to_string), false);
         assert!(respuestas.next().is_none(), "debió preguntar dos veces");
     }
 
@@ -1971,6 +2237,154 @@ mod tests {
         // Sin plan guardado: el contexto pasa intacto.
         store.remove_plan().unwrap();
         assert_eq!(resume_plan(&store, Some("solo".into())).unwrap(), "solo");
+    }
+
+    // ----- continuación de rondas, resiliencia y modo auto -----
+
+    #[tokio::test]
+    async fn el_turno_continua_mas_alla_de_8_rondas_si_el_usuario_acepta() {
+        let dir = tmp("turn-extend");
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        let pide_leer = "sigo\n```dpx:read path=a.txt\n```\n";
+        let mut replies: Vec<Result<ChatReply>> =
+            (0..11).map(|_| FakeMentor::ok(pide_leer)).collect();
+        replies.push(FakeMentor::ok("terminé"));
+        let fake = FakeMentor::new(replies);
+        // "s" responde tanto al checkpoint de rondas como a cualquier confirm.
+        let (out, _) = fake_turn(&fake, &dir, "s").await;
+        assert!(matches!(out, TurnOutcome::Reply(_)));
+        assert_eq!(
+            fake.inputs.borrow().len(),
+            12,
+            "con el checkpoint aceptado, el turno debe pasar de las 8 rondas"
+        );
+    }
+
+    #[tokio::test]
+    async fn el_usuario_puede_frenar_el_turno_en_el_checkpoint() {
+        let dir = tmp("turn-stop");
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        let pide_leer = "sigo\n```dpx:read path=a.txt\n```\n";
+        let fake =
+            FakeMentor::new((0..12).map(|_| FakeMentor::ok(pide_leer)).collect());
+        let (out, _) = fake_turn(&fake, &dir, "n").await;
+        assert!(matches!(out, TurnOutcome::Reply(_)));
+        assert_eq!(fake.inputs.borrow().len(), 8, "con 'n' el turno para en el presupuesto");
+    }
+
+    #[tokio::test]
+    async fn corte_transitorio_a_mitad_de_turno_no_lo_mata() {
+        let dir = tmp("turn-cut");
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        let fake = FakeMentor::new(vec![
+            FakeMentor::ok("primera parte\n```dpx:read path=a.txt\n```\n"),
+            FakeMentor::fail("error sending request: connection reset"),
+            FakeMentor::ok("segunda parte, terminé"),
+        ]);
+        let (out, _) = fake_turn(&fake, &dir, "s").await;
+        match out {
+            TurnOutcome::Reply(full) => {
+                assert!(full.contains("primera parte"));
+                assert!(full.contains("segunda parte"), "el turno debe sobrevivir al corte");
+            }
+            _ => panic!("esperaba Reply"),
+        }
+        let inputs = fake.inputs.borrow();
+        assert_eq!(inputs.len(), 3);
+        assert!(inputs[2].contains("se cortó"), "el modelo debe saber que su ronda se perdió");
+    }
+
+    #[tokio::test]
+    async fn error_no_transitorio_a_mitad_si_termina_el_turno() {
+        let dir = tmp("turn-cut-perm");
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        let fake = FakeMentor::new(vec![
+            FakeMentor::ok("avancé\n```dpx:read path=a.txt\n```\n"),
+            FakeMentor::fail("402 Insufficient Balance"),
+        ]);
+        let (out, _) = fake_turn(&fake, &dir, "s").await;
+        // Sin saldo no hay reintento que valga: conserva lo dicho y cierra.
+        assert!(matches!(out, TurnOutcome::Reply(f) if f.contains("avancé")));
+        assert_eq!(fake.inputs.borrow().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn modo_auto_aplica_write_y_run_seguro_sin_preguntar() {
+        let dir = tmp("turn-auto");
+        let fake = FakeMentor::new(vec![
+            FakeMentor::ok_with_calls(
+                "voy",
+                vec![
+                    test_call(
+                        "c1",
+                        "write_file",
+                        serde_json::json!({ "path": "nuevo.txt", "content": "hola auto" }),
+                    ),
+                    test_call("c2", "run_command", serde_json::json!({ "command": "echo auto" })),
+                ],
+            ),
+            FakeMentor::ok("listo"),
+        ]);
+        // fake_turn_auto PANICA si algo pregunta: éxito = nadie preguntó.
+        let (out, history) = fake_turn_auto(&fake, &dir).await;
+        assert!(matches!(out, TurnOutcome::Reply(_)));
+        assert_eq!(std::fs::read_to_string(dir.join("nuevo.txt")).unwrap(), "hola auto");
+        let serial = serde_json::to_string(&history).unwrap();
+        assert!(serial.contains("auto"), "la salida del echo viaja como tool result");
+    }
+
+    #[tokio::test]
+    async fn modo_auto_no_exime_al_guard_anti_truncado() {
+        let dir = tmp("turn-auto-guard");
+        std::fs::write(dir.join("grande.rs"), "linea\n".repeat(200)).unwrap();
+        let fake = FakeMentor::new(vec![
+            FakeMentor::ok_with_calls(
+                "reescribo",
+                vec![test_call(
+                    "c1",
+                    "write_file",
+                    serde_json::json!({ "path": "grande.rs", "content": "linea\n".repeat(20) }),
+                )],
+            ),
+            FakeMentor::ok("ok"),
+        ]);
+        // Aquí ask SÍ debe ser llamado (el guard pregunta incluso en auto).
+        let mut history = Vec::new();
+        let skin = ui::skin();
+        let store = ProjectStore::init(&dir).unwrap();
+        let mut pregunto = false;
+        let mut ask = |_: &str| {
+            pregunto = true;
+            Some("n".to_string())
+        };
+        let _ =
+            run_turn(&fake, &mut history, &dir, &skin, &mut ask, &store, "hola", true).await;
+        assert!(pregunto, "el guard anti-truncado debe preguntar incluso en modo auto");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("grande.rs")).unwrap().lines().count(),
+            200,
+            "el archivo no debe tocarse"
+        );
+    }
+
+    #[test]
+    fn extend_rounds_en_auto_respeta_el_tope_duro() {
+        let mut budget = MAX_TURN_ROUNDS;
+        let mut ask = |_: &str| -> Option<String> { panic!("en auto no se pregunta") };
+        // Por debajo del tope: amplía solo.
+        assert!(extend_rounds(&mut ask, 8, true, &mut budget));
+        assert_eq!(budget, 16);
+        // En el tope duro: frena.
+        assert!(!extend_rounds(&mut ask, AUTO_MAX_ROUNDS, true, &mut budget));
+    }
+
+    #[test]
+    fn truncate_log_recorta_sin_partir_utf8() {
+        assert_eq!(truncate_log("corto", 10), "corto");
+        let largo = "ñ".repeat(50);
+        let out = truncate_log(&largo, 10);
+        assert!(out.starts_with(&"ñ".repeat(10)));
+        assert!(out.ends_with("[recortado]"));
     }
 
     // ----- tool calls nativas (function calling) -----

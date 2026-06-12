@@ -1,0 +1,245 @@
+//! Wizard `dpx init`: asiste al usuario para configurar el proyecto.
+//!
+//! El flujo es:
+//! 1. Saludo y detección de stack (por archivos raíz como en `fs::detect_stack`).
+//! 2. Confirmación o cambio manual del focus pack.
+//! 3. Selección de cerebro por defecto (deepseek/kimi/qwen), con indicación de
+//!    si cada uno tiene API key configurada.
+//! 4. Modo (pro/hack).
+//! 5. Modo autónomo sí/no.
+//! 6. Guarda `.dpx/config.toml` y muestra resumen final.
+//!
+//! Es interactivo: pregunta opción por opción, con defaults sensatos basados
+//! en la detección automática. No requiere el editor raw (usa stdin directo).
+
+use std::io::{self, Write};
+use std::path::Path;
+
+use anyhow::{Context, Result};
+
+use crate::config::ProjectConfig;
+use crate::fs;
+use crate::focus;
+use crate::agent::Brain;
+use crate::focus::Mode;
+use crate::ui;
+
+/// Arranca el asistente interactivo de inicialización.
+pub fn run(cwd: &Path) -> Result<()> {
+    ui::logo();
+    println!();
+    println!("  {} dpx init — prepara este proyecto para el mentor", ui::accent("✻"));
+    println!();
+    println!("  El asistente va a configurar el proyecto paso a paso.");
+    println!("  En cada paso puedes aceptar el default [entre corchetes] pulsando Enter,");
+    println!("  o escribir tu propio valor.");
+    println!();
+
+    let stack = fs::detect_stack(cwd);
+    let focus_id = step_focus(stack)?;
+    let brain = step_brain()?;
+    let mode = step_mode()?;
+    let auto = step_auto()?;
+
+    let config = ProjectConfig {
+        focus: focus_id.clone(),
+        brain: brain.name().to_string(),
+        mode: if matches!(mode, Mode::Pro) { "pro".to_string() } else { "hack".to_string() },
+        auto,
+    };
+
+    config.save(cwd).context("No se pudo guardar la configuración")?;
+
+    // Resumen final
+    println!();
+    println!("{}", ui::accent("╭─────────────────────────────────────────────╮"));
+    println!("{}", ui::accent("│  dpx init — configuración guardada          │"));
+    println!("{}", ui::accent("╰─────────────────────────────────────────────╯"));
+    let focus_display = focus_id
+        .as_deref()
+        .map(|id| focus::display_name(Some(id)))
+        .unwrap_or("(general, sin stack específico)");
+    println!("  {}   {}", ui::dim("enfoque"), focus_display);
+    println!("  {}    {}", ui::dim("cerebro"), brain.label());
+    println!("  {}       {}", ui::dim("modo"), if matches!(mode, Mode::Pro) { "pro (metódico)" } else { "hack (rápido)" });
+    if auto {
+        println!("  {}     {}   {}", ui::dim("auto"), ui::accent("⚡"), ui::dim("autónomo activado"));
+    }
+    println!();
+    println!("  {}", ui::dim("Puedes cambiarlo en cualquier momento desde el REPL"));
+    println!("  {}  {}", ui::dim("con /focus, /brain, /mode, /auto, o volviendo a ejecutar"), ui::accent("dpx init"));
+    println!();
+
+    Ok(())
+}
+
+/// Lee una línea de stdin, recortada, o devuelve el default si está vacía.
+fn read_line(prompt: &str) -> io::Result<String> {
+    print!("{}", prompt);
+    io::stdout().flush()?;
+    let mut buf = String::new();
+    io::stdin().read_line(&mut buf)?;
+    let trimmed = buf.trim().to_string();
+    Ok(trimmed)
+}
+
+/// Lee una línea y si está vacía devuelve el default.
+fn read_with_default(prompt: &str, default: &str) -> io::Result<String> {
+    let line = read_line(prompt)?;
+    if line.is_empty() { Ok(default.to_string()) } else { Ok(line) }
+}
+
+/// Pregunta sí/no con default.
+fn ask_yes_no(prompt: &str, default: bool) -> io::Result<bool> {
+    let d = if default { "S/n" } else { "s/N" };
+    let line = read_line(&format!("  {} [{d}] ", prompt))?;
+    if line.is_empty() {
+        return Ok(default);
+    }
+    let l = line.to_lowercase();
+    Ok(matches!(l.as_str(), "s" | "si" | "sí" | "y" | "yes"))
+}
+
+/// Paso 1: focus pack.
+fn step_focus(detected: Option<&str>) -> Result<Option<String>> {
+    println!();
+    println!("{}", ui::accent("⏺ 1. Stack del proyecto"));
+
+    let catalog = focus::catalog();
+    let default_id: &str = detected.unwrap_or("");
+
+    match detected {
+        Some(id) => {
+            let name = focus::display_name(Some(id));
+            println!("  Detectado: {} ({})", ui::accent(name), ui::dim(id));
+        }
+        None => {
+            println!("  {}", ui::dim("No se detectó un stack conocido."));
+        }
+    }
+    println!();
+
+    // Mostramos los disponibles
+    println!("  {}", ui::dim("Enfoques disponibles:"));
+    for f in &catalog {
+        let marker = if detected == Some(f.id) { ui::accent("● ") } else { ui::dim("○ ") };
+        println!("    {}{:<14} {}", marker, f.id, ui::dim(f.tagline));
+    }
+    println!("    {}  {:<14} {}", ui::dim("○ "), "(vacío)", ui::dim("mentor genérico (sin stack)"));
+    println!();
+
+    let default = if default_id.is_empty() { "(vacío)".to_string() } else { default_id.to_string() };
+    let answer = read_with_default(&format!("  Enfoque [{}]: ", default), &default)?;
+
+    let chosen = if answer.is_empty() || answer == "(vacío)" {
+        None
+    } else if catalog.iter().any(|f| f.id == answer) {
+        Some(answer)
+    } else {
+        eprintln!(
+            "  {} Enfoque '{}' no reconocido. Se usará mentor genérico.",
+            ui::dim("⚠"),
+            answer
+        );
+        None
+    };
+
+    Ok(chosen)
+}
+
+/// Paso 2: cerebro por defecto.
+fn step_brain() -> Result<Brain> {
+    println!();
+    println!("{}", ui::accent("⏺ 2. Cerebro por defecto"));
+
+    let brains = Brain::all();
+    let default = if brains[0].has_key() { brains[0] } else { brains.iter().find(|b| b.has_key()).copied().unwrap_or(brains[0]) };
+
+    println!("  {}", ui::dim("Cerebros disponibles:"));
+    for b in &brains {
+        let active_mark = if *b == default { ui::accent("● ") } else { ui::dim("○ ") };
+        let key_str = if b.has_key() { ui::accent("✓ key") } else { ui::dim("✗ key") };
+        println!("    {} {:<9} {}   {}", active_mark, b.name(), key_str, ui::dim(b.capability()));
+    }
+    println!();
+
+    let answer = read_with_default(
+        &format!("  Cerebro [{}]: ", default.name()),
+        default.name(),
+    )?;
+
+    let chosen = Brain::parse(&answer).unwrap_or_else(|| {
+        eprintln!(
+            "  {} '{}' no reconocido, usando {}",
+            ui::dim("⚠"),
+            answer,
+            default.name()
+        );
+        default
+    });
+
+    if !chosen.has_key() {
+        println!(
+            "  {} No hay API key para {} en tu .env (variable {}).",
+            ui::dim("⚠"),
+            chosen.label(),
+            chosen.env_var()
+        );
+        println!("    Puedes cambiarlo luego con /brain en el REPL.");
+    }
+
+    Ok(chosen)
+}
+
+/// Paso 3: modo.
+fn step_mode() -> Result<Mode> {
+    println!();
+    println!("{}", ui::accent("⏺ 3. Modo de trabajo"));
+
+    println!("  {}   {}", ui::accent("pro"),  ui::dim("metódico: explica decisiones, código robusto con tests"));
+    println!("  {}  {}", ui::accent("hack"), ui::dim("rápido: defaults sensatos, mínimo boilerplate, demo funcionando"));
+    println!();
+
+    let answer = read_with_default("  Modo [pro]: ", "pro")?;
+    let chosen = match answer.to_lowercase().as_str() {
+        "hack" => Mode::Hack,
+        _ => Mode::Pro,
+    };
+
+    Ok(chosen)
+}
+
+/// Paso 4: modo autónomo.
+fn step_auto() -> Result<bool> {
+    println!();
+    println!("{}", ui::accent("⏺ 4. Modo autónomo"));
+    println!("  {}", ui::dim("Con el modo autónomo activado, dpx aplica cambios y ejecuta"));
+    println!("  {}", ui::dim("comandos seguros sin pedir confirmación. Los comandos peligrosos"));
+    println!("  {}", ui::dim("y prohibidos siguen bloqueados o preguntando siempre."));
+    println!();
+
+    Ok(ask_yes_no("  ¿Activar modo autónomo?", false)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brain_parse_coincide_con_router() {
+        // Los mismos valores que en el router, confirmamos consistencia.
+        assert!(matches!(Brain::parse("deepseek"), Some(Brain::Deepseek)));
+        assert!(matches!(Brain::parse("kimi"), Some(Brain::Kimi)));
+        assert!(matches!(Brain::parse("qwen"), Some(Brain::Qwen)));
+        assert!(Brain::parse("claude").is_none());
+    }
+
+    #[test]
+    fn config_defaults_son_consistentes() {
+        let cfg = ProjectConfig::default();
+        assert_eq!(cfg.brain, "deepseek");
+        assert_eq!(cfg.mode, "pro");
+        assert!(cfg.focus.is_none());
+        assert!(!cfg.auto);
+    }
+}

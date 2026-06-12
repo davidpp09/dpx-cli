@@ -151,16 +151,26 @@ pub fn resume_banner(project: &str, last_step: &str) {
     println!("\n  {} retomando: {} · {}", accent("⏺"), accent(project), last_step);
 }
 
-/// Línea de estado del área de entrada (focus · modo · cerebro · persona).
-pub fn format_input_status(focus: &str, mode: &str, brain: &str, persona: &str) -> String {
+/// Línea de estado del área de entrada (focus · modo · cerebro · persona · auto).
+pub fn format_input_status(
+    focus: &str,
+    mode: &str,
+    brain: &str,
+    persona: &str,
+    auto: bool,
+) -> String {
     let badge = |label: &str, val: &str| format!("{}: {}", dim(label), accent(val));
-    format!(
+    let mut bar = format!(
         "  {}  {}  {}  {}",
         badge("focus", focus),
         badge("mode", mode),
         badge("brain", brain),
         badge("persona", persona)
-    )
+    );
+    if auto {
+        bar.push_str(&format!("  {}", accent("auto ⚡")));
+    }
+    bar
 }
 
 /// Ancho real de la terminal (sin el clamp estético de `term_width`), para
@@ -685,6 +695,8 @@ pub fn print_help() {
         ("/brain [modelo]", "cambia el cerebro: deepseek|kimi|qwen"),
         ("/mentor", "persona mentor: enseña y te deja escribir"),
         ("/code", "persona code: agente autónomo que hace e itera"),
+        ("/auto [on|off]", "modo autónomo ⚡: cambios y comandos seguros sin preguntar"),
+        ("/update", "recompila e instala dpx desde este repo (corre al reabrir)"),
         ("/salir", "termina y guarda el contexto"),
     ];
     for (cmd, desc) in rows {

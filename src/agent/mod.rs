@@ -10,4 +10,4 @@ pub mod diagnostic;
 pub mod search;
 pub mod tools;
 
-pub use router::{Brain, ChatReply, Mentor, ModelRouter};
+pub use router::{Brain, ChatReply, Mentor, ModelRouter, is_transient_error};
