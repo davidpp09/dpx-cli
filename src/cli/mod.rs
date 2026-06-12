@@ -42,7 +42,9 @@ enum Commands {
 
         /// Modo autónomo: aplica cambios y comandos SEGUROS sin preguntar
         /// (lo peligroso sigue pidiendo confirmación). También: `/auto`.
-        #[arg(long)]
+        /// Acepta `--auto` (= activado), `--auto false`, o ausente (usa la
+        /// config de `dpx init`).
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
         auto: Option<bool>,
     },
 
@@ -62,7 +64,9 @@ enum Commands {
 
         /// Modo autónomo: aplica cambios y comandos SEGUROS sin preguntar
         /// (lo peligroso sigue pidiendo confirmación). También: `/auto`.
-        #[arg(long)]
+        /// Acepta `--auto` (= activado), `--auto false`, o ausente (usa la
+        /// config de `dpx init`).
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
         auto: Option<bool>,
     },
 
