@@ -2,6 +2,8 @@
 name = "dpx-cli"
 version = "0.2.0"
 edition = "2024"
+description = "Tu mentor senior de desarrollo en la terminal, impulsado por IA."
+license = "MIT"
 
 [[bin]]
 name = "dpx"
