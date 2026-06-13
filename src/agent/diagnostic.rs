@@ -1,10 +1,10 @@
-/// Diagnóstico automático de fallos de compilación/ejecución, multi-lenguaje.
-///
-/// Los detectores identfican el lenguaje por marcadores únicos del compilador
-/// (rustc, tsc, Python, javac) y extraen el archivo + línea del error principal,
-/// para ahorrar al modelo rondas de "¿y qué archivo miro?".
-///
-/// Si ningún detector específico casa, el genérico busca paths en la salida.
+//! Diagnóstico automático de fallos de compilación/ejecución, multi-lenguaje.
+//!
+//! Los detectores identifican el lenguaje por marcadores únicos del compilador
+//! (rustc, tsc, Python, javac) y extraen el archivo + línea del error principal,
+//! para ahorrar al modelo rondas de "¿y qué archivo miro?".
+//!
+//! Si ningún detector específico casa, el genérico busca paths en la salida.
 
 pub struct DiagnosticReport {
     pub hint: String,
@@ -153,11 +153,10 @@ fn extract_rust_location(output: &str) -> String {
             let t = line.trim();
             t.strip_prefix("--> ").map(|rest| {
                 // Quitar la columna: "src/file.rs:42:10" → "src/file.rs:42"
-                if let Some(idx) = rest.rfind(':') {
-                    if rest[..idx].rfind(':').is_some() {
+                if let Some(idx) = rest.rfind(':')
+                    && rest[..idx].rfind(':').is_some() {
                         return rest[..idx].to_string();
                     }
-                }
                 rest.to_string()
             })
         })
@@ -392,10 +391,10 @@ fn extract_python_location(output: &str) -> String {
     let mut last = None;
     for line in output.lines() {
         let t = line.trim();
-        if t.starts_with("File \"") {
-            if let Some(rest) = t.strip_prefix("File \"") {
-                if let Some((path, rest)) = rest.split_once('"') {
-                    if let Some(line_num) = rest
+        if t.starts_with("File \"")
+            && let Some(rest) = t.strip_prefix("File \"")
+                && let Some((path, rest)) = rest.split_once('"')
+                    && let Some(line_num) = rest
                         .trim_start_matches(", line ")
                         .split(',')
                         .next()
@@ -403,9 +402,6 @@ fn extract_python_location(output: &str) -> String {
                     {
                         last = Some(format!("{path}:{line_num}"));
                     }
-                }
-            }
-        }
     }
     last.unwrap_or_else(|| "src/main.py".to_string())
 }
@@ -526,18 +522,17 @@ fn extract_java_location(output: &str) -> String {
     for line in output.lines() {
         let t = line.trim();
         if t.contains(".java") {
-            if let Some(rest) = t.strip_prefix("[ERROR] ") {
-                if let Some((path, rest)) = rest.split_once(".java:") {
+            if let Some(rest) = t.strip_prefix("[ERROR] ")
+                && let Some((path, rest)) = rest.split_once(".java:") {
                     let rest = rest.trim_start_matches('[');
-                    if let Some((row, _)) = rest.split_once(|c: char| c == ',' || c == ']') {
+                    if let Some((row, _)) = rest.split_once([',', ']']) {
                         return format!("{path}.java:{row}");
                     }
                 }
-            }
             // Gradle: `src/main/java/App.java:42: error: ...`
             if let Some((path, rest)) = t.split_once(".java:") {
                 let row = rest
-                    .split(|c: char| c == ':' || c == ' ')
+                    .split([':', ' '])
                     .next()
                     .unwrap_or("0");
                 return format!("{path}.java:{row}");
@@ -549,7 +544,7 @@ fn extract_java_location(output: &str) -> String {
         if let Some(start) = line.find(".java") {
             let end = start + 5;
             let before = &line[..end];
-            if let Some(path_start) = before.rfind(|c: char| c == ' ' || c == '\t') {
+            if let Some(path_start) = before.rfind([' ', '\t']) {
                 let path = before[path_start..].trim();
                 return path.to_string();
             }
@@ -618,7 +613,7 @@ fn extract_paths(output: &str) -> Vec<String> {
                 let end = idx + ext.len();
                 // Buscar el inicio del path hacia atrás
                 let start = t[..idx]
-                    .rfind(|c: char| matches!(c, ' ' | '\t' | '(' | '[' | '"' | '\''))
+                    .rfind([' ', '\t', '(', '[', '"', '\''])
                     .map(|p| p + 1)
                     .unwrap_or(0);
                 let path = &t[start..end];
@@ -852,7 +847,7 @@ TypeError: can only concatenate str (not \"int\") to str";
     fn generic_con_paths_extrae_archivos() {
         let output = "ERROR: something went wrong\n  at src/utils.rs:42\n  at src/lib.rs:10";
         let diag = diagnose_failure(output).expect("debió detectar genérico");
-        assert!(diag.suggestions.len() >= 1);
+        assert!(!diag.suggestions.is_empty());
         assert!(diag.suggestions.iter().any(|s| s.contains("utils.rs")));
     }
 

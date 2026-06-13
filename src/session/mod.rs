@@ -261,12 +261,11 @@ pub async fn compact(router: &ModelRouter, turns: &[Turn]) -> Result<String> {
 /// próxima vez el mentor al menos tiene de qué partir.
 pub fn fallback_context(turns: &[Turn], prior: Option<&str>) -> String {
     let mut md = String::new();
-    if let Some(p) = prior {
-        if !p.trim().is_empty() {
+    if let Some(p) = prior
+        && !p.trim().is_empty() {
             md.push_str(p.trim());
             md.push_str("\n\n---\n\n");
         }
-    }
     md.push_str(
         "# Resumen de sesión (sin procesar)\n\
          No se pudo generar el resumen con el modelo (probablemente saturación). \

@@ -117,6 +117,48 @@ pub fn red(s: &str) -> String {
     format!("\x1b[38;2;224;108;117m{s}{RESET}")
 }
 
+// ============================================================
+//  DEGRADADOS DINÁMICOS — los extremos del color de los adornos (logo, reglas,
+//  bordes, spinner). Cámbialos aquí para reteñir toda la UI bonita.
+// ============================================================
+const GRAD_FROM: (u8, u8, u8) = (188, 46, 40); // rojo oscuro
+const GRAD_TO: (u8, u8, u8) = (66, 10, 14); // rojo casi negro (vino/sangre seca)
+
+/// Interpola dos colores RGB con `t ∈ [0,1]`.
+fn lerp_rgb(a: (u8, u8, u8), b: (u8, u8, u8), t: f64) -> (u8, u8, u8) {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round() as u8;
+    (mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
+}
+
+/// Envuelve un solo carácter/segmento en un color RGB (truecolor).
+fn rgb(s: &str, (r, g, b): (u8, u8, u8)) -> String {
+    format!("\x1b[38;2;{r};{g};{b}m{s}{RESET}")
+}
+
+/// Pinta `s` con un degradado horizontal de `from` a `to`, carácter a carácter.
+/// Bonito para títulos, reglas y bordes. Ignora longitudes 0/1 con gracia.
+pub fn gradient(s: &str, from: (u8, u8, u8), to: (u8, u8, u8)) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    if n == 0 {
+        return String::new();
+    }
+    let mut out = String::with_capacity(s.len() * 4);
+    for (i, c) in chars.iter().enumerate() {
+        let t = if n == 1 { 0.0 } else { i as f64 / (n - 1) as f64 };
+        let (r, g, b) = lerp_rgb(from, to, t);
+        out.push_str(&format!("\x1b[38;2;{r};{g};{b}m{c}"));
+    }
+    out.push_str(RESET);
+    out
+}
+
+/// Atajo: degradado con la paleta por defecto de la UI.
+pub fn grad(s: &str) -> String {
+    gradient(s, GRAD_FROM, GRAD_TO)
+}
+
 /// Pone el título de la pestaña/ventana de la terminal (secuencia OSC). No-op
 /// si la salida no es una terminal real (p.ej. al pipear), para no ensuciarla.
 /// Así la pestaña muestra qué hace dpx, como el resto de CLIs serias.
@@ -146,9 +188,9 @@ pub fn term_width() -> usize {
         .clamp(40, 100)
 }
 
-/// Regla horizontal tenue del ancho de la terminal.
+/// Regla horizontal del ancho de la terminal, con degradado dinámico.
 pub fn rule() -> String {
-    dim(&"─".repeat(term_width()))
+    grad(&"─".repeat(term_width()))
 }
 
 /// Ancho visible de una cadena, ignorando las secuencias ANSI (para padding).
@@ -179,9 +221,13 @@ pub fn logo() {
 ██║  ██║██╔═══╝  ██╔██╗
 ██████╔╝██║     ██╔╝ ██╗
 ╚═════╝ ╚═╝     ╚═╝  ╚═╝";
+    let lines: Vec<&str> = ART.lines().collect();
+    let last = lines.len().saturating_sub(1).max(1);
     println!();
-    for line in ART.lines() {
-        println!("  {}", accent(line));
+    for (i, line) in lines.iter().enumerate() {
+        // Degradado VERTICAL: el color baja de GRAD_FROM a GRAD_TO por fila.
+        let color = lerp_rgb(GRAD_FROM, GRAD_TO, i as f64 / last as f64);
+        println!("  {}", rgb(line, color));
     }
 }
 
@@ -203,16 +249,17 @@ pub fn format_input_status(
     persona: &str,
     auto: crate::cli::AutoMode,
 ) -> String {
-    let badge = |label: &str, val: &str| format!("{}: {}", dim(label), accent(val));
+    let badge = |label: &str, val: &str| format!("{} {}", dim(label), grad(val));
+    let sep = dim(" · ");
     let mut bar = format!(
-        "  {}  {}  {}  {}",
+        "  {}{sep}{}{sep}{}{sep}{}",
         badge("focus", focus),
         badge("mode", mode),
         badge("brain", brain),
         badge("persona", persona)
     );
     if auto != crate::cli::AutoMode::Off {
-        bar.push_str(&format!("  {} ({})", accent("auto ⚡"), auto.label()));
+        bar.push_str(&format!("{sep}{} {}", grad("⚡ auto"), dim(auto.label())));
     }
     bar
 }
@@ -229,7 +276,7 @@ pub fn real_term_width() -> usize {
 /// Caja de bienvenida con bordes redondeados.
 pub fn welcome(focus: &str, mode: &str, brain: &str, cwd: &str) {
     let lines = vec![
-        format!("{} dpx · tu mentor senior en la terminal", accent("✻")),
+        format!("{} {}", grad("✻"), grad("dpx · tu mentor senior en la terminal")),
         String::new(),
         format!("{}   {focus}", dim("enfoque")),
         format!("{}      {mode}    {}  {brain}", dim("modo"), dim("cerebro")),
@@ -240,12 +287,12 @@ pub fn welcome(focus: &str, mode: &str, brain: &str, cwd: &str) {
     let inner = content_width + 2; // un espacio de padding a cada lado
 
     println!();
-    println!("{}", accent(&format!("╔{}╗", "═".repeat(inner))));
+    println!("{}", grad(&format!("╭{}╮", "─".repeat(inner))));
     for l in &lines {
         let pad = content_width - visible_width(l);
-        println!("{} {l}{} {}", accent("║"), " ".repeat(pad), accent("║"));
+        println!("{} {l}{} {}", grad("│"), " ".repeat(pad), grad("│"));
     }
-    println!("{}", accent(&format!("╚{}╝", "═".repeat(inner))));
+    println!("{}", grad(&format!("╰{}╯", "─".repeat(inner))));
 }
 
 /// Skin de Markdown con el acento del CLI.
@@ -517,7 +564,7 @@ pub fn danger_panel(title: &str, body: &str) {
 
 pub fn diagnostic_panel(hint: &str, suggestions: &[String]) {
     let warning_color = "\x1b[38;2;245;184;66m"; // Naranja amarillento
-    println!("\n{} {} {}", warning_color, "⚡ dpx diagnóstico automático", RESET);
+    println!("\n{} ⚡ dpx diagnóstico automático {}", warning_color, RESET);
     println!("  {}", dim(hint));
     if !suggestions.is_empty() {
         println!("  {}", dim("  Sugerencias a investigar:"));
@@ -824,12 +871,20 @@ impl Spinner {
             loop {
                 let secs = start.elapsed().as_secs();
                 let label = &labels[(i / FRAMES_PER_WORD) % labels.len()];
+                // El glifo PULSA entre los dos colores del degradado (oscilación
+                // suave con seno) para que la espera se sienta viva.
+                let pulse = ((i as f64) * 0.18).sin() * 0.5 + 0.5;
+                let glyph = rgb(FRAMES[i % FRAMES.len()], lerp_rgb(GRAD_FROM, GRAD_TO, pulse));
+                // Adornos que "respiran": un trío de rombos cuyo brillo corre al
+                // ritmo del spinner, en el degradado rojo oscuro.
+                let spark = ["◆◇◇", "◇◆◇", "◇◇◆", "◇◆◇"][(i / 3) % 4];
                 // `\x1b[2K` limpia la línea: los verbos varían de largo y si no,
                 // un verbo más corto dejaría residuos del anterior.
                 print!(
-                    "\r\x1b[2K{} {label} {}",
-                    accent(FRAMES[i % FRAMES.len()]),
-                    dim(&format!("({secs}s)")),
+                    "\r\x1b[2K{glyph} {} {}  {}",
+                    grad(label),
+                    grad(spark),
+                    dim(&format!("{secs}s")),
                 );
                 io::stdout().flush().ok();
                 i += 1;

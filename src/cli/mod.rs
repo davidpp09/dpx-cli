@@ -138,7 +138,7 @@ impl Cli {
 
         // Helper: CLI flag → si es None, usa la config.
         let resolve_mode = |cli: Option<Mode>| {
-            cli.unwrap_or_else(|| match proj_cfg.mode.as_str() {
+            cli.unwrap_or(match proj_cfg.mode.as_str() {
                 "hack" => Mode::Hack,
                 _ => Mode::Pro,
             })

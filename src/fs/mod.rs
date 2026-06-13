@@ -60,14 +60,12 @@ pub fn parse_reads(text: &str) -> Vec<String> {
             continue;
         };
         let mut path = parse_read_marker(info);
-        if path.is_none() {
-            if let Some(first) = lines.peek() {
-                if let Some(p) = parse_read_marker(first) {
+        if path.is_none()
+            && let Some(first) = lines.peek()
+                && let Some(p) = parse_read_marker(first) {
                     path = Some(p);
                     lines.next();
                 }
-            }
-        }
         if let Some(p) = path {
             reads.push(p);
             for body in lines.by_ref() {
@@ -189,11 +187,10 @@ pub fn plan_to_markdown(plan: &[(bool, String)]) -> String {
 /// bloque `dpx:plan` emitido por el asistente).
 pub fn extract_last_plan(turns: &[crate::session::Turn]) -> Option<Vec<(bool, String)>> {
     for turn in turns.iter().rev() {
-        if turn.role == "assistant" {
-            if let Some(plan) = parse_plan(&turn.text) {
+        if turn.role == "assistant"
+            && let Some(plan) = parse_plan(&turn.text) {
                 return Some(plan);
             }
-        }
     }
     None
 }
@@ -888,13 +885,12 @@ fn strip_kw_prefixes<'a>(mut s: &'a str, prefixes: &[&str]) -> &'a str {
     loop {
         let mut changed = false;
         for p in prefixes {
-            if let Some(rest) = s.strip_prefix(p) {
-                if rest.starts_with(char::is_whitespace) {
+            if let Some(rest) = s.strip_prefix(p)
+                && rest.starts_with(char::is_whitespace) {
                     s = rest.trim_start();
                     changed = true;
                     break;
                 }
-            }
         }
         if !changed {
             return s;
@@ -1059,14 +1055,12 @@ pub fn parse_writes(text: &str) -> Vec<FileWrite> {
         // ¿El marcador está en el fence, o en la primera línea de dentro?
         let mut path = parse_path_marker(info);
         let mut skip_marker_line = false;
-        if path.is_none() {
-            if let Some(first) = lines.peek() {
-                if let Some(p) = parse_path_marker(first) {
+        if path.is_none()
+            && let Some(first) = lines.peek()
+                && let Some(p) = parse_path_marker(first) {
                     path = Some(p);
                     skip_marker_line = true;
                 }
-            }
-        }
 
         match path {
             Some(path) => {
@@ -1126,14 +1120,12 @@ pub fn parse_edits(text: &str) -> Vec<FileEdit> {
             continue;
         };
         let mut path = parse_edit_marker(info);
-        if path.is_none() {
-            if let Some(first) = lines.peek() {
-                if let Some(p) = parse_edit_marker(first) {
+        if path.is_none()
+            && let Some(first) = lines.peek()
+                && let Some(p) = parse_edit_marker(first) {
                     path = Some(p);
                     lines.next();
                 }
-            }
-        }
         let Some(path) = path else { continue };
 
         let mut search = String::new();
@@ -1450,6 +1442,104 @@ pub fn read_file(project_root: &Path, rel: &str) -> Result<String> {
     } else {
         Ok(data)
     }
+}
+
+/// Extrae el marcador `dpx:delete path=<ruta>`
+pub fn parse_delete_marker(s: &str) -> Option<String> {
+    let rest = s.trim().strip_prefix("dpx:delete")?;
+    rest.split_whitespace()
+        .find_map(|tok| tok.strip_prefix("path="))
+        .map(|p| p.trim_matches('"').to_string())
+        .filter(|p| !p.is_empty())
+}
+
+/// Extrae las peticiones de borrado `dpx:delete path=...`
+pub fn parse_deletes(text: &str) -> Vec<String> {
+    let mut deletes = Vec::new();
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        let Some(info) = line.trim_start().strip_prefix("```") else { continue; };
+        let mut path = parse_delete_marker(info);
+        if path.is_none()
+            && let Some(first) = lines.peek()
+                && let Some(p) = parse_delete_marker(first) {
+                    path = Some(p);
+                    lines.next();
+                }
+        if let Some(p) = path {
+            deletes.push(p);
+            for body in lines.by_ref() {
+                if body.trim_start().starts_with("```") { break; }
+            }
+        }
+    }
+    deletes
+}
+
+/// Extrae el marcador `dpx:search pattern=<patron>`
+pub fn parse_search_marker(s: &str) -> Option<String> {
+    let rest = s.trim().strip_prefix("dpx:search")?;
+    let pat = rest.split_whitespace().find_map(|tok| tok.strip_prefix("pattern="));
+    if let Some(p) = pat {
+        let cleaned = p.trim_matches('"').to_string();
+        if !cleaned.is_empty() { return Some(cleaned); }
+    }
+    if let Some(idx) = rest.find("pattern=\"") {
+        let start = idx + 9;
+        if let Some(end) = rest[start..].find('"') {
+            return Some(rest[start..start+end].to_string());
+        }
+    }
+    None
+}
+
+/// Extrae las peticiones de búsqueda `dpx:search pattern=...`
+pub fn parse_searches(text: &str) -> Vec<String> {
+    let mut searches = Vec::new();
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        let Some(info) = line.trim_start().strip_prefix("```") else { continue; };
+        let mut pat = parse_search_marker(info);
+        if pat.is_none()
+            && let Some(first) = lines.peek()
+                && let Some(p) = parse_search_marker(first) {
+                    pat = Some(p);
+                    lines.next();
+                }
+        if let Some(p) = pat {
+            searches.push(p);
+            for body in lines.by_ref() {
+                if body.trim_start().starts_with("```") { break; }
+            }
+        }
+    }
+    searches
+}
+
+/// Borra un archivo de forma segura.
+pub fn delete_file(project_root: &Path, rel: &str) -> Result<()> {
+    let target = safe_target(project_root, rel)?;
+    if target.exists() {
+        // Snapshot del contenido ANTES de borrar (para `/undo`).
+        crate::checkpoint::record_before(&target);
+        fs::remove_file(&target)
+            .map_err(|e| anyhow::anyhow!("no pude borrar {}: {}", target.display(), e))?;
+    }
+    Ok(())
+}
+
+/// Busca una cadena o patrón (grep simple) en los archivos del proyecto.
+pub fn search_in_project(cwd: &Path, pattern: &str) -> String {
+    let cmd = if cwd.join(".git").exists() {
+        format!("git grep -i -n \"{}\" -- \":!target\" \":!node_modules\" \":!build\"", pattern)
+    } else if cfg!(windows) {
+        format!("findstr /s /i /n /c:\"{}\" *.java *.xml *.yml *.properties *.rs *.md *.toml", pattern)
+    } else {
+        format!("grep -r -i -n \"{}\" --exclude-dir={{target,node_modules,build,.git}} .", pattern)
+    };
+
+    let out = run_command(cwd, &cmd);
+    cap_tail(&out, 100)
 }
 
 #[cfg(test)]
@@ -2075,106 +2165,4 @@ dependencies {
         ];
         assert!(extract_last_plan(&turns).is_none());
     }
-}
-
-/// Extrae el marcador `dpx:delete path=<ruta>`
-pub fn parse_delete_marker(s: &str) -> Option<String> {
-    let rest = s.trim().strip_prefix("dpx:delete")?;
-    rest.split_whitespace()
-        .find_map(|tok| tok.strip_prefix("path="))
-        .map(|p| p.trim_matches('"').to_string())
-        .filter(|p| !p.is_empty())
-}
-
-/// Extrae las peticiones de borrado `dpx:delete path=...`
-pub fn parse_deletes(text: &str) -> Vec<String> {
-    let mut deletes = Vec::new();
-    let mut lines = text.lines().peekable();
-    while let Some(line) = lines.next() {
-        let Some(info) = line.trim_start().strip_prefix("```") else { continue; };
-        let mut path = parse_delete_marker(info);
-        if path.is_none() {
-            if let Some(first) = lines.peek() {
-                if let Some(p) = parse_delete_marker(first) {
-                    path = Some(p);
-                    lines.next();
-                }
-            }
-        }
-        if let Some(p) = path {
-            deletes.push(p);
-            for body in lines.by_ref() {
-                if body.trim_start().starts_with("```") { break; }
-            }
-        }
-    }
-    deletes
-}
-
-/// Extrae el marcador `dpx:search pattern=<patron>`
-pub fn parse_search_marker(s: &str) -> Option<String> {
-    let rest = s.trim().strip_prefix("dpx:search")?;
-    let pat = rest.split_whitespace().find_map(|tok| tok.strip_prefix("pattern="));
-    if let Some(p) = pat {
-        let cleaned = p.trim_matches('"').to_string();
-        if !cleaned.is_empty() { return Some(cleaned); }
-    }
-    if let Some(idx) = rest.find("pattern=\"") {
-        let start = idx + 9;
-        if let Some(end) = rest[start..].find('"') {
-            return Some(rest[start..start+end].to_string());
-        }
-    }
-    None
-}
-
-/// Extrae las peticiones de búsqueda `dpx:search pattern=...`
-pub fn parse_searches(text: &str) -> Vec<String> {
-    let mut searches = Vec::new();
-    let mut lines = text.lines().peekable();
-    while let Some(line) = lines.next() {
-        let Some(info) = line.trim_start().strip_prefix("```") else { continue; };
-        let mut pat = parse_search_marker(info);
-        if pat.is_none() {
-            if let Some(first) = lines.peek() {
-                if let Some(p) = parse_search_marker(first) {
-                    pat = Some(p);
-                    lines.next();
-                }
-            }
-        }
-        if let Some(p) = pat {
-            searches.push(p);
-            for body in lines.by_ref() {
-                if body.trim_start().starts_with("```") { break; }
-            }
-        }
-    }
-    searches
-}
-
-/// Borra un archivo de forma segura.
-pub fn delete_file(project_root: &Path, rel: &str) -> Result<()> {
-    let target = safe_target(project_root, rel)?;
-    if target.exists() {
-        // Snapshot del contenido ANTES de borrar (para `/undo`).
-        crate::checkpoint::record_before(&target);
-        fs::remove_file(&target)
-            .map_err(|e| anyhow::anyhow!("no pude borrar {}: {}", target.display(), e))?;
-    }
-    Ok(())
-}
-
-/// Busca una cadena o patrón (grep simple) en los archivos del proyecto.
-pub fn search_in_project(cwd: &Path, pattern: &str) -> String {
-    let cmd = if cwd.join(".git").exists() {
-        format!("git grep -i -n \"{}\" -- \":!target\" \":!node_modules\" \":!build\"", pattern)
-    } else if cfg!(windows) {
-        format!("findstr /s /i /n /c:\"{}\" *.java *.xml *.yml *.properties *.rs *.md *.toml", pattern)
-    } else {
-        format!("grep -r -i -n \"{}\" --exclude-dir={{target,node_modules,build,.git}} .", pattern)
-    };
-
-    let out = run_command(cwd, &cmd);
-    cap_tail(&out, 100)
 }

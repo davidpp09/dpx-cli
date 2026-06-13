@@ -40,18 +40,15 @@ pub async fn web_search(query: &str) -> Result<String> {
     let mut count = 0usize;
 
     // Resultado abstracto (el principal, si existe).
-    if let Some(abstract_text) = raw["AbstractText"].as_str() {
-        if !abstract_text.is_empty() {
-            if let Some(source) = raw["AbstractSource"].as_str() {
-                if let Some(url) = raw["AbstractURL"].as_str() {
+    if let Some(abstract_text) = raw["AbstractText"].as_str()
+        && !abstract_text.is_empty()
+            && let Some(source) = raw["AbstractSource"].as_str()
+                && let Some(url) = raw["AbstractURL"].as_str() {
                     count += 1;
                     out.push_str(&format!(
                         "  {count}. **{abstract_text}**\n     Fuente: [{source}]({url})\n\n"
                     ));
                 }
-            }
-        }
-    }
 
     // RelatedTopics: puede ser un array de objetos o de arrays (categorías).
     if let Some(topics) = raw["RelatedTopics"].as_array() {

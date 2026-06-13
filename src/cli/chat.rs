@@ -427,12 +427,11 @@ fn rebuild_history(history: &mut Vec<Message>, summary: &str) {
     // ya que eso causa un error 400 Bad Request en la mayoría de las APIs.
     // Nota: rig-core serializa los tool_results con "type":"toolresult".
     while !recent.is_empty() {
-        if let Ok(json) = serde_json::to_string(&recent[0]) {
-            if json.contains(r#""type":"toolresult""#) || json.contains(r#""tool_calls""#) {
+        if let Ok(json) = serde_json::to_string(&recent[0])
+            && (json.contains(r#""type":"toolresult""#) || json.contains(r#""tool_calls""#)) {
                 recent.remove(0);
                 continue;
             }
-        }
         break;
     }
 
@@ -494,6 +493,7 @@ impl TurnBrain for Mentor {
 /// ejecuciones `dpx:run` (con confirmación); si hubo acciones, devuelve los
 /// resultados al modelo y vuelve a iterar, hasta que da su respuesta final.
 /// `ask` responde las confirmaciones (producción: el editor; tests: respuestas fijas).
+#[allow(clippy::too_many_arguments)]
 async fn run_turn(
     mentor: &impl TurnBrain,
     history: &mut Vec<Message>,
@@ -738,18 +738,16 @@ async fn run_turn(
                 // corre la suite de tests (que también compila) y se autocorrige
                 // con los fallos. En modos menos autónomos basta el compile-check,
                 // más rápido y sin los efectos secundarios de los tests.
-                if auto.commands() {
-                    if let Some(test_cmd) = crate::fs::detect_test(cwd) {
+                if auto.commands()
+                    && let Some(test_cmd) = crate::fs::detect_test(cwd) {
                         runs.push(test_cmd);
                         auto_tested = true;
                     }
-                }
-                if !auto_tested {
-                    if let Some(build_cmd) = crate::fs::detect_build(cwd) {
+                if !auto_tested
+                    && let Some(build_cmd) = crate::fs::detect_build(cwd) {
                         runs.push(build_cmd);
                         auto_built = true;
                     }
-                }
             }
         }
 
@@ -1616,9 +1614,8 @@ async fn close_session(
     match summary {
         Ok(md) => match store.write_context(&md) {
             Ok(()) => println!(
-                "{} {}",
-                ui::accent("⏺"),
-                "contexto guardado en .dpx/context.md · la próxima vez retomo desde aquí."
+                "{} contexto guardado en .dpx/context.md · la próxima vez retomo desde aquí.",
+                ui::accent("⏺")
             ),
             Err(e) => eprintln!("{} no pude escribir el contexto: {e}", ui::accent("⏺")),
         },
@@ -1928,7 +1925,7 @@ fn extract_refs(input: &str) -> Vec<String> {
         .split_whitespace()
         .filter_map(|t| t.strip_prefix('@'))
         .map(|p| {
-            p.trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | ')' | '?' | '!'))
+            p.trim_end_matches(['.', ',', ';', ':', ')', '?', '!'])
                 .to_string()
         })
         .filter(|p| !p.is_empty())
@@ -1986,7 +1983,7 @@ fn confirm_run(
     if store.is_command_allowed(cmd) {
         println!(
             "\n{} {}  {}",
-            ui::accent("⏺ ejecutar:"),
+            ui::grad("▸▸ ejecutar"),
             ui::accent(cmd),
             ui::dim("(permitido siempre)")
         );
@@ -1995,11 +1992,11 @@ fn confirm_run(
     // Modo auto: un comando clasificado como SEGURO corre sin preguntar (los
     // peligrosos/prohibidos ya retornaron arriba con sus puertas intactas).
     if auto.commands() {
-        println!("\n{} {}  {}", ui::accent("⏺ ejecutar:"), ui::accent(cmd), ui::dim("(auto ⚡)"));
+        println!("\n{} {}  {}", ui::grad("▸▸ ejecutar"), ui::accent(cmd), ui::dim("(auto ⚡)"));
         warn_outside_paths(cwd, cmd);
         return RunDecision::Run;
     }
-    println!("\n{} {}", ui::accent("⏺ ejecutar:"), ui::accent(cmd));
+    println!("\n{} {}", ui::grad("▸▸ ejecutar"), ui::accent(cmd));
     warn_outside_paths(cwd, cmd);
     match ask("¿ejecutar? [s/N/a=siempre] ") {
         Some(ans) => {
@@ -2051,12 +2048,11 @@ fn mode_label(mode: Mode) -> &'static str {
 
 /// Acorta el path del proyecto usando `~` para el home (solo estético).
 fn short_path(cwd: &std::path::Path) -> String {
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(rest) = cwd.strip_prefix(&home) {
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rest) = cwd.strip_prefix(&home) {
             // Normalizamos a '/' para que se vea consistente en Windows.
             return format!("~/{}", rest.display().to_string().replace('\\', "/"));
         }
-    }
     cwd.display().to_string().replace('\\', "/")
 }
 

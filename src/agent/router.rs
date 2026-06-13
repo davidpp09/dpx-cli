@@ -424,3 +424,86 @@ impl ModelRouter {
         mentor.prompt(content).await
     }
 }
+
+#[cfg(test)]
+mod integration {
+    //! Tests que pegan a DeepSeek DE VERDAD (necesitan red + `DEEPSEEK_API_KEY`).
+    //! Van marcados `#[ignore]`: NO corren en `cargo test` normal ni en CI; solo
+    //! con `cargo test -- --ignored`. Cubren lo que el `FakeMentor` no puede ver:
+    //! que el streaming complete sin romper el protocolo, que el historial quede
+    //! válido para la siguiente ronda, y que el `usage` (del que vive `/cost`)
+    //! siga llegando del proveedor.
+    use super::*;
+    use crate::focus::Mode;
+    use rig_core::completion::Message;
+
+    fn cargar_env() {
+        dotenvy::dotenv().ok();
+        if let Some(home) = dirs::home_dir() {
+            dotenvy::from_path(home.join(".dpx").join(".env")).ok();
+        }
+    }
+
+    fn mentor_deepseek() -> Mentor {
+        cargar_env();
+        ModelRouter::new(Brain::Deepseek)
+            .mentor("Eres un asistente de pruebas. Responde muy corto.", Mode::Hack)
+            .expect("no pude construir el mentor DeepSeek (¿falta DEEPSEEK_API_KEY?)")
+    }
+
+    #[tokio::test]
+    #[ignore = "requiere red + DEEPSEEK_API_KEY"]
+    async fn streaming_responde_y_extiende_historial() {
+        let m = mentor_deepseek();
+        let mut history: Vec<Message> = Vec::new();
+        let mut emitido = String::new();
+        let reply = m
+            .chat_stream("Responde solo: pong", &mut history, &mut |d| emitido.push_str(d))
+            .await
+            .expect("el stream falló");
+        assert!(!reply.text.trim().is_empty(), "respuesta vacía");
+        assert!(!emitido.trim().is_empty(), "no se emitió ningún delta por on_delta");
+        // El historial debe quedar [user, assistant]: válido para otra ronda.
+        assert_eq!(history.len(), 2, "el historial no quedó bien formado");
+    }
+
+    #[tokio::test]
+    #[ignore = "requiere red + DEEPSEEK_API_KEY"]
+    async fn streaming_reporta_usage_real() {
+        let m = mentor_deepseek();
+        let mut history: Vec<Message> = Vec::new();
+        let reply = m
+            .chat_stream("Di hola.", &mut history, &mut |_| {})
+            .await
+            .expect("el stream falló");
+        // De esto vive `/cost`: si DeepSeek dejara de mandar usage en streaming,
+        // el medidor se quedaría en ceros y este test lo pillaría.
+        let usage = reply.usage.expect("DeepSeek no reportó usage en streaming");
+        assert!(
+            usage.input_tokens > 0 && usage.output_tokens > 0,
+            "usage con ceros: {usage:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requiere red + DEEPSEEK_API_KEY"]
+    async fn tool_calling_no_rompe_el_protocolo() {
+        let m = mentor_deepseek();
+        let mut history: Vec<Message> = Vec::new();
+        // El prompt invita a usar `read_file`. El modelo puede llamar la tool o
+        // responder texto; lo que NO debe es romper el stream ni el historial.
+        let reply = m
+            .chat_stream(
+                "Usa tus herramientas para leer el archivo Cargo.toml.",
+                &mut history,
+                &mut |_| {},
+            )
+            .await
+            .expect("el stream con tools falló");
+        assert!(
+            !reply.text.trim().is_empty() || !reply.calls.is_empty(),
+            "ni texto ni tool calls: el turno salió vacío"
+        );
+        assert_eq!(history.len(), 2);
+    }
+}

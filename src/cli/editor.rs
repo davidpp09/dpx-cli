@@ -773,7 +773,7 @@ fn word_end_after(buffer: &str, cursor: usize) -> usize {
 /// por fila: una palabra partida por wrapping pierde el color — menor.)
 fn colorize(text: &str, is_command_line: bool) -> String {
     if is_command_line {
-        return ui::accent(text);
+        return ui::grad(text);
     }
     if text.split(' ').any(|w| is_reserved_word(w) || is_file_ref(w)) {
         highlight_reserved(text)
@@ -805,7 +805,7 @@ fn highlight_reserved(line: &str) -> String {
             out.push(' ');
         }
         if is_reserved_word(part) || is_file_ref(part) {
-            out.push_str(&ui::accent(part));
+            out.push_str(&ui::grad(part));
         } else {
             out.push_str(part);
         }
