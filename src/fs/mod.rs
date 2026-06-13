@@ -941,11 +941,19 @@ fn take_block(s: &mut String) -> String {
 /// `core.autocrlf`). El reemplazo PRESERVA los finales de línea originales del
 /// archivo, porque solo se sustituye el tramo coincidente.
 ///
-/// Estrategia: (1) intento exacto —rápido y conserva el comportamiento previo—;
-/// (2) si falla, normaliza AMBOS lados a LF, busca en ese espacio y mapea el
-/// offset de vuelta al contenido original (esto cubre finales mixtos, que un
-/// simple `\n`↔`\r\n` no resolvía). Error claro con pista verbatim si aun así
-/// no encuentra.
+/// Estrategia en capas, de la más estricta a la más tolerante (la primera que
+/// acierta gana, así nunca degradamos un match exacto):
+/// 1. **Exacto** — `str::find` literal; conserva el comportamiento previo.
+/// 2. **Finales de línea** — normaliza CRLF↔LF en ambos lados y mapea el offset
+///    de vuelta al original (cubre finales mixtos).
+/// 3. **Indentación/espacios (fuzzy por línea)** — localiza el bloque comparando
+///    líneas por su contenido SIN espacios de borde, así un SEARCH con la
+///    indentación mal puesta (la causa nº 1 de fallos que quedaba) igual ubica
+///    el tramo. Solo aplica si hay UNA coincidencia: si es ambigua, prefiere
+///    fallar con pista a editar el lugar equivocado.
+///
+/// El reemplazo PRESERVA lo que hay alrededor: solo se sustituye el tramo
+/// coincidente. Error claro con pista verbatim si ninguna capa acierta.
 pub fn apply_edit(current: &str, edit: &FileEdit) -> Result<String> {
     // 1. Intento exacto.
     if let Some(idx) = current.find(&edit.search) {
@@ -963,11 +971,78 @@ pub fn apply_edit(current: &str, edit: &FileEdit) -> Result<String> {
         return Ok(splice(current, start, end, &edit.replace));
     }
 
+    // 3. Tolerante a indentación/espacios: match línea-a-línea por contenido
+    //    recortado, solo si es inequívoco.
+    if let Some((start, end)) = fuzzy_line_span(current, &edit.search) {
+        return Ok(splice(current, start, end, &edit.replace));
+    }
+
     Err(anyhow!(
         "no encontré el bloque SEARCH en `{}`: el texto no coincide con el archivo actual.{}",
         edit.path,
         search_hint(current, &edit.search)
     ))
+}
+
+/// Divide `s` en líneas devolviendo `(offset_de_byte_del_inicio, contenido)`,
+/// donde `contenido` excluye el terminador (`\n` o `\r\n`). Sirve para mapear
+/// una coincidencia por líneas de vuelta a offsets de byte exactos.
+fn line_offsets(s: &str) -> Vec<(usize, &str)> {
+    let bytes = s.as_bytes();
+    let n = bytes.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+    loop {
+        let start = i;
+        let mut j = i;
+        while j < n && bytes[j] != b'\n' {
+            j += 1;
+        }
+        // Excluir el `\r` de un `\r\n` del contenido.
+        let mut content_end = j;
+        if content_end > start && bytes[content_end - 1] == b'\r' {
+            content_end -= 1;
+        }
+        out.push((start, &s[start..content_end]));
+        if j >= n {
+            break;
+        }
+        i = j + 1;
+    }
+    out
+}
+
+/// Localiza el bloque `search` en `current` comparando líneas por su contenido
+/// recortado (ignora indentación y espacios de borde). Devuelve el rango de
+/// bytes `[inicio, fin]` del tramo en `current` (de la 1ª línea a la última, sin
+/// el salto final) SOLO si hay exactamente UNA coincidencia; `None` si hay cero
+/// o varias (ambiguo → mejor no tocar). Requiere al menos una línea con
+/// contenido real, para no "encontrar" un bloque de puras líneas en blanco.
+fn fuzzy_line_span(current: &str, search: &str) -> Option<(usize, usize)> {
+    let needle: Vec<&str> = search.lines().map(str::trim).collect();
+    if needle.is_empty() || needle.iter().all(|l| l.is_empty()) {
+        return None;
+    }
+    let lines = line_offsets(current);
+    let n = needle.len();
+    if lines.len() < n {
+        return None;
+    }
+    let mut found: Option<usize> = None;
+    for i in 0..=(lines.len() - n) {
+        let matches = (0..n).all(|k| lines[i + k].1.trim() == needle[k]);
+        if matches {
+            if found.is_some() {
+                return None; // ambiguo: ≥2 coincidencias
+            }
+            found = Some(i);
+        }
+    }
+    let i = found?;
+    let last = i + n - 1;
+    let start = lines[i].0;
+    let end = lines[last].0 + lines[last].1.len();
+    Some((start, end))
 }
 
 /// Reemplaza `original[start..end]` por `replace`, devolviendo la cadena nueva.
@@ -1301,6 +1376,62 @@ mod tests {
         };
         let out = apply_edit(current, &edit).unwrap();
         assert_eq!(out, "head\r\nfn f() { done(); }\ntail\r\n");
+    }
+
+    #[test]
+    fn apply_edit_fuzzy_tolera_indentacion_mal_puesta() {
+        // El modelo emitió el SEARCH SIN indentación; el archivo la tiene.
+        // Ni el exacto ni el de CRLF lo encuentran; el fuzzy por línea sí.
+        let current = "fn main() {\n    let x = 1;\n    println!(\"{}\", x);\n}\n";
+        let edit = FileEdit {
+            path: "x".into(),
+            search: "let x = 1;\nprintln!(\"{}\", x);".into(), // sin los 4 espacios
+            replace: "    let y = 2;\n    dbg!(y);".into(),
+        };
+        let out = apply_edit(current, &edit).unwrap();
+        assert_eq!(out, "fn main() {\n    let y = 2;\n    dbg!(y);\n}\n");
+    }
+
+    #[test]
+    fn apply_edit_fuzzy_una_sola_linea_con_espacios_de_sobra() {
+        // El SEARCH trae espacios al final que el archivo no tiene → no es
+        // substring literal (exacto/CRLF fallan), pero el fuzzy lo ubica. Como
+        // el fuzzy reemplaza la LÍNEA completa (con su indentación), el REPLACE
+        // debe traer la indentación deseada.
+        let current = "a = 0\n    value = 1\nb = 2\n";
+        let edit = FileEdit {
+            path: "x".into(),
+            search: "value = 1   ".into(), // espacios sobrantes al final
+            replace: "    value = 99".into(),
+        };
+        assert!(current.find(&edit.search).is_none(), "no debe ser match exacto");
+        let out = apply_edit(current, &edit).unwrap();
+        assert_eq!(out, "a = 0\n    value = 99\nb = 2\n");
+    }
+
+    #[test]
+    fn apply_edit_fuzzy_ambiguo_no_toca_y_da_error() {
+        // El MISMO bloque (salvo indentación) aparece dos veces. El SEARCH sin
+        // indentar no es substring literal (hay espacios entre las líneas en el
+        // archivo), así que exacto/CRLF fallan y se llega al fuzzy; al haber dos
+        // coincidencias, se abstiene y devuelve error en vez de editar a ciegas.
+        let current =
+            "fn a() {\n    do_x();\n    do_y();\n}\nfn b() {\n        do_x();\n        do_y();\n}\n";
+        let edit = FileEdit {
+            path: "x".into(),
+            search: "do_x();\ndo_y();".into(),
+            replace: "done();".into(),
+        };
+        assert!(fuzzy_line_span(current, &edit.search).is_none(), "debe ser ambiguo");
+        assert!(apply_edit(current, &edit).is_err());
+    }
+
+    #[test]
+    fn apply_edit_fuzzy_no_inventa_match_con_lineas_en_blanco() {
+        // Un SEARCH de puras líneas en blanco no debe "encontrar" cualquier hueco.
+        let current = "a\n\n\nb\n";
+        assert!(fuzzy_line_span(current, "   \n  ").is_none());
+        assert!(fuzzy_line_span(current, "").is_none());
     }
 
     #[test]
