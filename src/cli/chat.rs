@@ -1177,6 +1177,19 @@ fn build_mentor(
     preamble.push_str(&crate::fs::project_tree(&cwd));
     preamble.push_str("```\n");
 
+    // Mapa de símbolos: qué define cada archivo (fn/struct/class/def…), para que
+    // el modelo lea SOLO los archivos que necesita en vez de adivinar o leerlos
+    // enteros — menos tokens y mejor orientación. Estable por sesión (cacheable).
+    let symbols = crate::fs::symbol_map(&cwd);
+    if !symbols.trim().is_empty() {
+        preamble.push_str(
+            "\n# Mapa de símbolos del proyecto\n\
+             Qué define cada archivo (índice para leer solo lo necesario, no es exhaustivo):\n\n```\n",
+        );
+        preamble.push_str(&symbols);
+        preamble.push_str("```\n");
+    }
+
     // Grounding: las dependencias/versiones REALES del proyecto, para que no
     // invente crates/starters ni versiones inexistentes.
     if let Some((name, content)) = crate::fs::build_manifest(&cwd) {
