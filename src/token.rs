@@ -16,6 +16,12 @@ static IN_TOKENS: AtomicU64 = AtomicU64::new(0); // entrada total (incluye cache
 static CACHED_TOKENS: AtomicU64 = AtomicU64::new(0); // de la entrada, cuántos pegó el caché
 static OUT_TOKENS: AtomicU64 = AtomicU64::new(0); // salida (tokens generados)
 
+// Presupuesto de tokens de la sesión (total in+out). `0` = sin tope. Cuando se
+// supera, el modo auto deja de auto-extenderse y pregunta antes de seguir
+// gastando, y se avisa tras cada turno. Es un guardrail de gasto, no un corte
+// duro a mitad de respuesta (eso rompería el protocolo de tool calls).
+static BUDGET: AtomicU64 = AtomicU64::new(0);
+
 // ── Tarifas (USD por 1M tokens) ─────────────────────────────────────
 // Aproximadas para DeepSeek; AJÚSTALAS aquí si cambian o usas otro cerebro. El
 // conteo de tokens es EXACTO (viene de la API); solo el costo en $ es estimado.
@@ -107,11 +113,51 @@ pub fn session_summary() -> Option<String> {
     ))
 }
 
-/// Reinicia el ledger (al `/clear`, que arranca una conversación nueva).
+/// Reinicia el ledger (al `/clear`, que arranca una conversación nueva). NO
+/// toca el presupuesto: el tope que pusiste sigue vigente tras un `/clear`.
 pub fn reset() {
     IN_TOKENS.store(0, Ordering::Relaxed);
     CACHED_TOKENS.store(0, Ordering::Relaxed);
     OUT_TOKENS.store(0, Ordering::Relaxed);
+}
+
+/// Fija el presupuesto de tokens de la sesión (`0` lo desactiva).
+pub fn set_budget(tokens: u64) {
+    BUDGET.store(tokens, Ordering::Relaxed);
+}
+
+/// Presupuesto actual (`0` = sin tope).
+pub fn budget() -> u64 {
+    BUDGET.load(Ordering::Relaxed)
+}
+
+/// Lógica pura del tope (testeable sin tocar el estado global): `0` = sin tope.
+fn is_over(used: u64, budget: u64) -> bool {
+    budget != 0 && used > budget
+}
+
+/// ¿Se superó el presupuesto? Siempre `false` si no hay tope (`0`).
+pub fn over_budget() -> bool {
+    let (i, _, o) = totals();
+    is_over(i + o, budget())
+}
+
+/// Estado del presupuesto para `/budget` sin argumento. `None` si no hay tope.
+pub fn budget_status() -> Option<String> {
+    let b = budget();
+    if b == 0 {
+        return None;
+    }
+    let (i, _, o) = totals();
+    let used = i + o;
+    let pct = (used as f64 / b as f64 * 100.0).round() as u64;
+    Some(format!(
+        "{} / {} tok usados ({}%){}",
+        k(used),
+        k(b),
+        pct,
+        if used > b { " · SUPERADO" } else { "" }
+    ))
 }
 
 #[cfg(test)]
@@ -147,6 +193,15 @@ mod tests {
         assert_eq!(k(0), "0");
         assert_eq!(k(999), "999");
         assert_eq!(k(1500), "1.5k");
+    }
+
+    #[test]
+    fn is_over_respeta_el_tope() {
+        // 0 = sin tope: nunca se supera.
+        assert!(!is_over(1_000_000, 0));
+        // Estrictamente mayor cuenta como superado.
+        assert!(!is_over(100, 100));
+        assert!(is_over(101, 100));
     }
 
     // El ledger usa atomics GLOBALES; un solo test secuencial evita carreras con

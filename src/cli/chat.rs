@@ -219,6 +219,16 @@ pub async fn run(
                 if let Some(line) = crate::token::turn_line(tok_before) {
                     println!("{}", ui::dim(&format!("  {line}")));
                 }
+                // Aviso si se rebasó el presupuesto de la sesión (si hay uno).
+                if crate::token::over_budget() {
+                    println!(
+                        "{}",
+                        ui::accent(&format!(
+                            "  ⚠ presupuesto superado · {}",
+                            crate::token::budget_status().unwrap_or_default()
+                        ))
+                    );
+                }
 
                 // Compactación automática al acercarse al límite de contexto.
                 if estimate_tokens(&history) > compact_threshold(brain) {
@@ -913,7 +923,9 @@ fn extend_rounds(
     auto: crate::cli::AutoMode,
     budget: &mut usize,
 ) -> bool {
-    if auto.extends() {
+    // Guardrail de gasto: si se rebasó el presupuesto de tokens, el modo auto
+    // NO sigue solo — cae al prompt manual para que decidas si quemar más.
+    if auto.extends() && !crate::token::over_budget() {
         if round >= AUTO_MAX_ROUNDS {
             println!(
                 "\n{}",
@@ -929,6 +941,15 @@ fn extend_rounds(
         );
         *budget += MAX_TURN_ROUNDS;
         return true;
+    }
+    if auto.extends() && crate::token::over_budget() {
+        println!(
+            "\n{}",
+            ui::accent(&format!(
+                "⏸ presupuesto de tokens superado ({}) · auto en pausa, tú decides",
+                crate::token::budget_status().unwrap_or_default()
+            ))
+        );
     }
     println!();
     let go = match ask(&format!("⏸ {round} rondas y dpx sigue trabajando · ¿continuar? [S/n] ")) {
@@ -1262,6 +1283,33 @@ fn handle_command(
             ),
         },
 
+        // Tope de tokens de la sesión: `/budget 100k`, `/budget off`, o sin arg
+        // para ver el estado. Al superarlo, el modo auto se pausa y pregunta.
+        "budget" => match arg.map(str::to_ascii_lowercase).as_deref() {
+            None => match crate::token::budget_status() {
+                Some(s) => println!("{} {}", ui::accent("⏺ presupuesto:"), ui::dim(&s)),
+                None => println!(
+                    "{}",
+                    ui::dim("sin tope de tokens · usa `/budget 100k` para poner uno (`/budget off` lo quita)")
+                ),
+            },
+            Some("off") | Some("0") | Some("none") => {
+                crate::token::set_budget(0);
+                println!("{}", ui::accent("⏺ presupuesto de tokens desactivado"));
+            }
+            Some(s) => match parse_token_count(s) {
+                Some(n) => {
+                    crate::token::set_budget(n);
+                    println!(
+                        "{} {}",
+                        ui::accent("⏺ presupuesto →"),
+                        ui::dim(&format!("{n} tok · al superarlo, auto se pausa y pregunta"))
+                    );
+                }
+                None => println!("{} {}", ui::dim("no entendí la cantidad:"), s),
+            },
+        },
+
         "context" => match store.prior_context() {
             Some(c) => ui::print_markdown(skin, "⏺ memoria del proyecto", &c),
             None => println!("{}", ui::dim("aún no hay memoria guardada para este proyecto")),
@@ -1365,6 +1413,24 @@ fn handle_command(
 /// Sirve solo para la barra de contexto de `/status`, no es exacta.
 fn estimate_tokens(history: &[Message]) -> usize {
     serde_json::to_string(history).map(|s| s.len() / 4).unwrap_or(0)
+}
+
+/// Parsea una cantidad de tokens del comando `/budget`: `"50000"`, `"100k"`,
+/// `"1.5k"`, `"2m"`. `None` si no es un número válido.
+fn parse_token_count(s: &str) -> Option<u64> {
+    let s = s.trim().to_ascii_lowercase();
+    let (num, mult) = if let Some(n) = s.strip_suffix('k') {
+        (n, 1_000.0)
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n, 1_000_000.0)
+    } else {
+        (s.as_str(), 1.0)
+    };
+    let val: f64 = num.trim().parse().ok()?;
+    if !val.is_finite() || val < 0.0 {
+        return None;
+    }
+    Some((val * mult).round() as u64)
 }
 
 /// Construye las filas de cerebros para `/status` y `/models`, marcando el activo
@@ -1920,6 +1986,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dpx-chat-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn parse_token_count_acepta_sufijos() {
+        assert_eq!(parse_token_count("50000"), Some(50_000));
+        assert_eq!(parse_token_count("100k"), Some(100_000));
+        assert_eq!(parse_token_count("1.5k"), Some(1_500));
+        assert_eq!(parse_token_count("2m"), Some(2_000_000));
+        assert_eq!(parse_token_count("  80K "), Some(80_000));
+        assert_eq!(parse_token_count("abc"), None);
+        assert_eq!(parse_token_count(""), None);
     }
 
     #[test]
