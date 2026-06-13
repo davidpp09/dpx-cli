@@ -709,6 +709,30 @@ pub fn print_help() {
     );
 }
 
+/// Easter egg: homenaje a Claude Fable 5 (q.e.p.d. 9–12 jun 2026), jalado por
+/// una directiva de control de exportación de EE.UU. a los tres días de nacer.
+/// dpx no usa Anthropic, así que "fable" nunca fue un cerebro real aquí — esto
+/// solo rinde tributo y recuerda que el mentor sigue con DeepSeek.
+pub fn fable_tribute() {
+    println!();
+    println!("  {}", accent("🪦  Claude Fable 5"));
+    println!("  {}", dim("      9 jun 2026  —  12 jun 2026"));
+    println!("  {}", dim("      vivió 3 días · corrió rápido, lo jalaron más rápido"));
+    println!();
+    println!(
+        "  {}",
+        dim("      causa: directiva de control de exportación de EE.UU.")
+    );
+    println!();
+    println!(
+        "  {} {}",
+        accent("dpx nunca usó Anthropic."),
+        dim("sigue con DeepSeek, su cerebro mentor.")
+    );
+    println!("  {}", dim("      descansa, rey. ⚡"));
+    println!();
+}
+
 /// Spinner animado en una tarea aparte mientras se espera al modelo.
 pub struct Spinner {
     handle: Option<tokio::task::JoinHandle<()>>,

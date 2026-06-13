@@ -409,6 +409,34 @@ pub fn detect_build(cwd: &Path) -> Option<String> {
     None
 }
 
+/// Detecta el comando de tests del proyecto (Maven, Gradle o Cargo). A
+/// diferencia de [`detect_build`], esto COMPILA y además corre la suite: lo usa
+/// el modo full-auto del agente para verificar de verdad tras escribir código
+/// (compila → prueba → se autocorrige), no solo que compile. `None` si no se
+/// reconoce el stack.
+pub fn detect_test(cwd: &Path) -> Option<String> {
+    if cwd.join("pom.xml").exists() {
+        let wrapper = if cfg!(windows) { "mvnw.cmd" } else { "mvnw" };
+        if cwd.join(wrapper).exists() {
+            let invoke = if cfg!(windows) { "mvnw.cmd" } else { "./mvnw" };
+            return Some(format!("{invoke} -q test"));
+        }
+        return Some("mvn -q test".to_string());
+    }
+    if cwd.join("build.gradle").exists() || cwd.join("build.gradle.kts").exists() {
+        let wrapper = if cfg!(windows) { "gradlew.bat" } else { "gradlew" };
+        if cwd.join(wrapper).exists() {
+            let invoke = if cfg!(windows) { "gradlew.bat" } else { "./gradlew" };
+            return Some(format!("{invoke} test -q"));
+        }
+        return Some("gradle test -q".to_string());
+    }
+    if cwd.join("Cargo.toml").exists() {
+        return Some("cargo test --quiet".to_string());
+    }
+    None
+}
+
 /// Detecta el stack del proyecto mirando los archivos de la raíz.
 ///
 /// Primero intenta detección profunda (leyendo dependencias reales de los
@@ -1388,6 +1416,29 @@ mod tests {
 
         fs::write(dir.join("pom.xml"), "<project/>").unwrap();
         assert_eq!(detect_stack(&dir), Some("spring-boot"));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detect_build_y_test_por_stack() {
+        let dir = std::env::temp_dir().join(format!("dpx-verify-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        // Sin manifiesto reconocible: nada que verificar.
+        assert_eq!(detect_build(&dir), None);
+        assert_eq!(detect_test(&dir), None);
+
+        // Cargo: build = check (rápido), test = la suite completa.
+        fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        assert_eq!(detect_build(&dir).as_deref(), Some("cargo check --quiet"));
+        assert_eq!(detect_test(&dir).as_deref(), Some("cargo test --quiet"));
+        fs::remove_file(dir.join("Cargo.toml")).unwrap();
+
+        // Maven sin wrapper: compile salta tests; test los corre.
+        fs::write(dir.join("pom.xml"), "<project/>").unwrap();
+        assert!(detect_build(&dir).unwrap().contains("-DskipTests"));
+        assert!(detect_test(&dir).unwrap().contains("test"));
+        assert!(!detect_test(&dir).unwrap().contains("-DskipTests"));
 
         fs::remove_dir_all(&dir).unwrap();
     }

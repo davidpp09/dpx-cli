@@ -683,18 +683,31 @@ async fn run_turn(
         // errores al modelo para que itere (escribe → compila → corrige), sin que
         // tenga que pedirlo. Se omite si el modelo ya pidió el mismo build tool.
         let mut auto_built = false;
+        let mut auto_tested = false;
         if crate::fs::touches_build(&writes)
             || crate::fs::edits_touch_build(&edits)
             || crate::fs::touches_build(&s_writes)
             || crate::fs::edits_touch_build(&s_edits)
         {
-            if let Some(build_cmd) = crate::fs::detect_build(cwd) {
-                let already = runs
-                    .iter()
-                    .any(|r| r.contains("mvn") || r.contains("gradle") || r.contains("cargo"));
-                if !already {
-                    runs.push(build_cmd);
-                    auto_built = true;
+            let already = runs
+                .iter()
+                .any(|r| r.contains("mvn") || r.contains("gradle") || r.contains("cargo"));
+            if !already {
+                // Modo full-auto (`/auto all`): el agente verifica DE VERDAD —
+                // corre la suite de tests (que también compila) y se autocorrige
+                // con los fallos. En modos menos autónomos basta el compile-check,
+                // más rápido y sin los efectos secundarios de los tests.
+                if auto.commands() {
+                    if let Some(test_cmd) = crate::fs::detect_test(cwd) {
+                        runs.push(test_cmd);
+                        auto_tested = true;
+                    }
+                }
+                if !auto_tested {
+                    if let Some(build_cmd) = crate::fs::detect_build(cwd) {
+                        runs.push(build_cmd);
+                        auto_built = true;
+                    }
                 }
             }
         }
@@ -738,7 +751,9 @@ async fn run_turn(
                 let out = crate::fs::search_in_project(cwd, s);
                 ctx.push_str(&format!("\n--- resultados de búsqueda para `{s}` ---\n{out}\n--- fin ---\n"));
             }
-            if auto_built {
+            if auto_tested {
+                println!("\n{}", ui::dim("dpx verifica que el proyecto compile y pase los tests…"));
+            } else if auto_built {
                 println!("\n{}", ui::dim("dpx verifica que el proyecto compile…"));
             }
             for cmd in &runs {
@@ -1251,25 +1266,37 @@ fn handle_command(
             }
         }
 
-        "brain" => match arg.and_then(Brain::parse) {
-            Some(b) => {
-                let new_router = ModelRouter::new(b);
-                match build_mentor(&new_router, focus_id.as_deref(), *mode, *persona, prior.as_deref()) {
-                    Ok(agent) => {
-                        *router = new_router;
-                        *mentor = agent;
-                        *brain = b;
-                        println!("{} {}", ui::accent("⏺ cerebro →"), router.brain_label());
+        "brain" => {
+            // Easter egg: `/brain fable` (o mythos) rinde tributo. No son cerebros
+            // reales — dpx no usa Anthropic — así que no cambian nada.
+            let id = arg.map(|a| a.to_ascii_lowercase());
+            if matches!(
+                id.as_deref(),
+                Some("fable") | Some("fable5") | Some("fable 5") | Some("mythos") | Some("mythos5")
+            ) {
+                ui::fable_tribute();
+            } else {
+                match arg.and_then(Brain::parse) {
+                    Some(b) => {
+                        let new_router = ModelRouter::new(b);
+                        match build_mentor(&new_router, focus_id.as_deref(), *mode, *persona, prior.as_deref()) {
+                            Ok(agent) => {
+                                *router = new_router;
+                                *mentor = agent;
+                                *brain = b;
+                                println!("{} {}", ui::accent("⏺ cerebro →"), router.brain_label());
+                            }
+                            Err(e) => println!("{} {e}", ui::dim("no pude cambiar de cerebro:")),
+                        }
                     }
-                    Err(e) => println!("{} {e}", ui::dim("no pude cambiar de cerebro:")),
+                    None => println!(
+                        "{} (actual: {})",
+                        ui::dim("uso: /brain deepseek|kimi|qwen"),
+                        router.brain_label()
+                    ),
                 }
             }
-            None => println!(
-                "{} (actual: {})",
-                ui::dim("uso: /brain deepseek|kimi|qwen"),
-                router.brain_label()
-            ),
-        },
+        }
 
         // Cambia de persona en caliente (enseña ↔ hace).
         "mentor" | "code" => {
