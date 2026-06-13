@@ -498,6 +498,11 @@ async fn run_turn(
     let mut round = 0usize;
     let mut round_budget = MAX_TURN_ROUNDS;
     let mut stream_retries = 0usize;
+    // Checkpoint del turno: captura el estado de cada archivo antes de tocarlo
+    // (vía fs::apply/delete_file) y lo apila al terminar para que `/undo` pueda
+    // revertir TODO lo que dpx escribió este turno. Se commitea al soltar el
+    // guard, pase lo que pase (incluido un return temprano).
+    let _checkpoint = crate::checkpoint::TurnGuard::begin();
     // Archivos ya inyectados en ESTE turno: si el modelo vuelve a pedir el mismo
     // en otra ronda, su contenido ya está en el historial → no lo re-mandamos
     // (ahorro de tokens en loops agénticos que releen lo mismo).
@@ -1308,6 +1313,24 @@ fn handle_command(
                 }
                 None => println!("{} {}", ui::dim("no entendí la cantidad:"), s),
             },
+        },
+
+        // Deshace los cambios de archivos del último turno de dpx (restaura lo
+        // que existía, borra lo que creó). No toca git ni tus cambios propios.
+        "undo" => match crate::checkpoint::undo() {
+            Some((restored, deleted)) => {
+                println!(
+                    "{} {}",
+                    ui::accent("⏺ deshecho ↩"),
+                    ui::dim(&format!(
+                        "{restored} archivo(s) restaurado(s), {deleted} borrado(s) · el modelo aún cree que los hizo: dile qué revertiste"
+                    ))
+                );
+            }
+            None => println!(
+                "{}",
+                ui::dim("nada que deshacer (dpx no ha modificado archivos esta sesión)")
+            ),
         },
 
         "context" => match store.prior_context() {

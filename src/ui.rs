@@ -689,6 +689,7 @@ pub fn print_help() {
         ("/cost", "tokens reales gastados en la sesión + % de caché y costo aprox"),
         ("/budget [N]", "tope de tokens de la sesión (ej. /budget 100k); auto se pausa al superarlo"),
         ("/models", "lista los cerebros y cuál tiene API key"),
+        ("/undo", "deshace los cambios de archivos del último turno de dpx"),
         ("/clear", "reinicia la conversación (el mentor olvida esta sesión)"),
         ("/compact", "resume la conversación para liberar contexto (también automático)"),
         ("/context", "muestra la memoria guardada del proyecto"),

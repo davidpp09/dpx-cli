@@ -1144,6 +1144,8 @@ pub fn safe_target(project_root: &Path, rel: &str) -> Result<PathBuf> {
 /// Escribe el archivo en disco, creando los directorios padres necesarios.
 pub fn apply(project_root: &Path, write: &FileWrite) -> Result<PathBuf> {
     let target = safe_target(project_root, &write.path)?;
+    // Snapshot del estado anterior (para `/undo`) ANTES de sobrescribir.
+    crate::checkpoint::record_before(&target);
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| anyhow!("no pude crear {}: {e}", parent.display()))?;
@@ -1831,6 +1833,8 @@ pub fn parse_searches(text: &str) -> Vec<String> {
 pub fn delete_file(project_root: &Path, rel: &str) -> Result<()> {
     let target = safe_target(project_root, rel)?;
     if target.exists() {
+        // Snapshot del contenido ANTES de borrar (para `/undo`).
+        crate::checkpoint::record_before(&target);
         fs::remove_file(&target)
             .map_err(|e| anyhow::anyhow!("no pude borrar {}: {}", target.display(), e))?;
     }
