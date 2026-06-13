@@ -22,6 +22,14 @@ struct FileSnapshot {
     before: Option<Vec<u8>>,
 }
 
+/// Un archivo que dpx cambió en la sesión, para `/diff`: contenido base (al
+/// inicio) vs. actual. `None` = inexistente (nuevo, o borrado).
+pub struct FileChange {
+    pub path: PathBuf,
+    pub before: Option<String>,
+    pub now: Option<String>,
+}
+
 struct State {
     /// ¿Hay un turno en curso? Fuera de un turno no se captura nada.
     active: bool,
@@ -29,11 +37,19 @@ struct State {
     pending: Vec<FileSnapshot>,
     /// Pila de grupos commiteados; cada `undo` saca el de arriba.
     stack: Vec<Vec<FileSnapshot>>,
+    /// Estado de cada archivo al verlo por PRIMERA vez en la sesión (la línea
+    /// base contra la que `/diff` compara). Sobrevive a los `undo`.
+    baseline: Vec<(PathBuf, Option<Vec<u8>>)>,
 }
 
 impl State {
     const fn new() -> Self {
-        State { active: false, pending: Vec::new(), stack: Vec::new() }
+        State {
+            active: false,
+            pending: Vec::new(),
+            stack: Vec::new(),
+            baseline: Vec::new(),
+        }
     }
 
     fn begin(&mut self) {
@@ -65,7 +81,29 @@ impl State {
         } else {
             None
         };
+        // Línea base de la sesión: el PRIMER estado visto de este archivo.
+        if !self.baseline.iter().any(|(p, _)| p == target) {
+            self.baseline.push((target.to_path_buf(), before.clone()));
+        }
         self.pending.push(FileSnapshot { path: target.to_path_buf(), before });
+    }
+
+    /// Archivos cuyo contenido actual difiere de su línea base de la sesión.
+    fn changes(&self) -> Vec<FileChange> {
+        let mut out = Vec::new();
+        for (path, base_bytes) in &self.baseline {
+            let now_bytes = std::fs::read(path).ok();
+            if &now_bytes == base_bytes {
+                continue; // sin cambio neto (p.ej. ya se hizo `/undo`)
+            }
+            let to_text = |b: &Vec<u8>| String::from_utf8_lossy(b).into_owned();
+            out.push(FileChange {
+                path: path.clone(),
+                before: base_bytes.as_ref().map(to_text),
+                now: now_bytes.as_ref().map(to_text),
+            });
+        }
+        out
     }
 
     #[cfg(test)]
@@ -119,6 +157,11 @@ pub fn undo() -> Option<(usize, usize)> {
     lock().undo()
 }
 
+/// Archivos que dpx cambió en la sesión (base vs. actual), para `/diff`.
+pub fn session_changes() -> Vec<FileChange> {
+    lock().changes()
+}
+
 /// Guarda RAII de un turno: abre al crearse, commitea al soltarse (cualquier
 /// camino de salida de `run_turn`, incluido un early return).
 pub struct TurnGuard;
@@ -169,12 +212,25 @@ mod tests {
         st.commit();
         assert_eq!(st.depth(), 1);
 
+        // changes(): el existente (modificado) y el nuevo (creado) aparecen.
+        let changes = st.changes();
+        assert_eq!(changes.len(), 2);
+        let exist_change = changes.iter().find(|c| c.path == existente).unwrap();
+        assert_eq!(exist_change.before.as_deref(), Some("original\n"));
+        assert_eq!(exist_change.now.as_deref(), Some("modificado\n"));
+        let nuevo_change = changes.iter().find(|c| c.path == nuevo).unwrap();
+        assert_eq!(nuevo_change.before, None); // era nuevo
+        assert_eq!(nuevo_change.now.as_deref(), Some("nuevo\n"));
+
         // Undo: restaura el existente, borra el nuevo.
         assert_eq!(st.undo(), Some((1, 1)));
         assert_eq!(std::fs::read(&existente).unwrap(), b"original\n");
         assert!(!nuevo.exists());
         assert_eq!(st.depth(), 0);
         assert!(st.undo().is_none());
+
+        // Tras el undo, todo volvió a la base → no hay cambios netos.
+        assert!(st.changes().is_empty());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

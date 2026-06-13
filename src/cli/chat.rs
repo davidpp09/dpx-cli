@@ -1333,6 +1333,34 @@ fn handle_command(
             ),
         },
 
+        // Muestra TODO lo que dpx cambió en la sesión (base vs. actual), para
+        // revisar antes de confiar/commitear. Solo lectura.
+        "diff" => {
+            let changes = crate::checkpoint::session_changes();
+            if changes.is_empty() {
+                println!(
+                    "{}",
+                    ui::dim("dpx no ha cambiado archivos esta sesión (o ya los revertiste)")
+                );
+            } else {
+                println!(
+                    "\n{} {}",
+                    ui::accent("⏺ cambios de la sesión"),
+                    ui::dim(&format!("({} archivo(s))", changes.len()))
+                );
+                for ch in &changes {
+                    let rel = ch.path.strip_prefix(cwd).unwrap_or(&ch.path);
+                    match &ch.now {
+                        None => println!("\n{} {}", ui::red("borrado:"), rel.display()),
+                        Some(now) => {
+                            println!("\n{} {}", ui::accent("●"), rel.display());
+                            ui::preview_diff(ch.before.as_deref(), now);
+                        }
+                    }
+                }
+            }
+        }
+
         "context" => match store.prior_context() {
             Some(c) => ui::print_markdown(skin, "⏺ memoria del proyecto", &c),
             None => println!("{}", ui::dim("aún no hay memoria guardada para este proyecto")),
