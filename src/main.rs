@@ -11,6 +11,7 @@ mod cli;
 mod config;
 mod focus;
 mod fs;
+mod mcp;
 mod session;
 mod ui;
 
@@ -25,6 +26,10 @@ async fn main() -> anyhow::Result<()> {
     if let Some(home) = dirs::home_dir() {
         dotenvy::from_path(home.join(".dpx").join(".env")).ok();
     }
+
+    // MCP: arrancar servidores externos antes de la sesión.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    mcp::McpManager::init(&cwd);
 
     cli::Cli::parse().run().await
 }

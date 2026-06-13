@@ -6,7 +6,7 @@
 //! 3. Selección de cerebro por defecto (deepseek/kimi/qwen), con indicación de
 //!    si cada uno tiene API key configurada.
 //! 4. Modo (pro/hack).
-//! 5. Modo autónomo sí/no.
+//! 5. Modo autónomo: off / reads / writes / all.
 //! 6. Guarda `.dpx/config.toml` y muestra resumen final.
 //!
 //! Es interactivo: pregunta opción por opción, con defaults sensatos basados
@@ -22,6 +22,7 @@ use crate::fs;
 use crate::focus;
 use crate::agent::Brain;
 use crate::focus::Mode;
+use crate::cli::AutoMode;
 use crate::ui;
 
 /// Arranca el asistente interactivo de inicialización.
@@ -62,9 +63,8 @@ pub fn run(cwd: &Path) -> Result<()> {
     println!("  {}   {}", ui::dim("enfoque"), focus_display);
     println!("  {}    {}", ui::dim("cerebro"), brain.label());
     println!("  {}       {}", ui::dim("modo"), if matches!(mode, Mode::Pro) { "pro (metódico)" } else { "hack (rápido)" });
-    if auto {
-        println!("  {}     {}   {}", ui::dim("auto"), ui::accent("⚡"), ui::dim("autónomo activado"));
-    }
+    let auto_label = AutoMode::parse(&config.auto).map(|a| a.label()).unwrap_or("off");
+    println!("  {}   {}   {}", ui::dim("auto"), ui::accent(auto_label), ui::dim("· /auto para cambiar"));
     println!();
     println!("  {}", ui::dim("Puedes cambiarlo en cualquier momento desde el REPL"));
     println!("  {}  {}", ui::dim("con /focus, /brain, /mode, /auto, o volviendo a ejecutar"), ui::accent("dpx init"));
@@ -87,17 +87,6 @@ fn read_line(prompt: &str) -> io::Result<String> {
 fn read_with_default(prompt: &str, default: &str) -> io::Result<String> {
     let line = read_line(prompt)?;
     if line.is_empty() { Ok(default.to_string()) } else { Ok(line) }
-}
-
-/// Pregunta sí/no con default.
-fn ask_yes_no(prompt: &str, default: bool) -> io::Result<bool> {
-    let d = if default { "S/n" } else { "s/N" };
-    let line = read_line(&format!("  {} [{d}] ", prompt))?;
-    if line.is_empty() {
-        return Ok(default);
-    }
-    let l = line.to_lowercase();
-    Ok(matches!(l.as_str(), "s" | "si" | "sí" | "y" | "yes"))
 }
 
 /// Paso 1: focus pack.
@@ -209,16 +198,20 @@ fn step_mode() -> Result<Mode> {
     Ok(chosen)
 }
 
-/// Paso 4: modo autónomo.
-fn step_auto() -> Result<bool> {
+/// Paso 4: modo autónomo granular.
+fn step_auto() -> Result<String> {
     println!();
     println!("{}", ui::accent("⏺ 4. Modo autónomo"));
-    println!("  {}", ui::dim("Con el modo autónomo activado, dpx aplica cambios y ejecuta"));
-    println!("  {}", ui::dim("comandos seguros sin pedir confirmación. Los comandos peligrosos"));
-    println!("  {}", ui::dim("y prohibidos siguen bloqueados o preguntando siempre."));
+    println!("  {}  {}", ui::accent("off"),    ui::dim("cada cambio y comando pide confirmación"));
+    println!("  {} {}", ui::accent("reads"),   ui::dim("auto-extiende rondas (investigación larga sin preguntar)"));
+    println!("  {} {}", ui::accent("writes"),  ui::dim("lo anterior + aplica escrituras/ediciones sin confirmación"));
+    println!("  {}   {}", ui::accent("all"),    ui::dim("todo: escrituras y comandos seguros sin preguntar"));
+    println!();
+    println!("  {}", ui::dim("Los comandos peligrosos y los guards anti-truncado preguntan SIEMPRE."));
     println!();
 
-    Ok(ask_yes_no("  ¿Activar modo autónomo?", false)?)
+    let answer = read_with_default("  Nivel [off]: ", "off")?;
+    Ok(AutoMode::parse(&answer).map(|a| a.label().to_string()).unwrap_or_else(|| "off".to_string()))
 }
 
 #[cfg(test)]
@@ -240,6 +233,6 @@ mod tests {
         assert_eq!(cfg.brain, "deepseek");
         assert_eq!(cfg.mode, "pro");
         assert!(cfg.focus.is_none());
-        assert!(!cfg.auto);
+        assert_eq!(cfg.auto, "off");
     }
 }

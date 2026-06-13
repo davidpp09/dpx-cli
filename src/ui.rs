@@ -157,7 +157,7 @@ pub fn format_input_status(
     mode: &str,
     brain: &str,
     persona: &str,
-    auto: bool,
+    auto: crate::cli::AutoMode,
 ) -> String {
     let badge = |label: &str, val: &str| format!("{}: {}", dim(label), accent(val));
     let mut bar = format!(
@@ -167,8 +167,8 @@ pub fn format_input_status(
         badge("brain", brain),
         badge("persona", persona)
     );
-    if auto {
-        bar.push_str(&format!("  {}", accent("auto ⚡")));
+    if auto != crate::cli::AutoMode::Off {
+        bar.push_str(&format!("  {} ({})", accent("auto ⚡"), auto.label()));
     }
     bar
 }

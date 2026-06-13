@@ -23,10 +23,26 @@ pub enum DpxCall {
     GitDiff { path: Option<String> },
     GitLog { n: Option<usize> },
     GitCommit { message: String },
+    /// Tool de un servidor MCP externo (prefijo `mcp__<server>__<tool>`).
+    McpTool { name: String, args: Value },
 }
 
 /// Las definiciones que se anuncian al modelo en cada petición.
+/// Fusiona las 11 tools nativas con las tools MCP cacheadas (si las hay).
 pub fn definitions() -> Vec<ToolDefinition> {
+    let mut defs = native_definitions();
+    for tool in crate::mcp::McpManager::cached_tools() {
+        defs.push(ToolDefinition {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.input_schema,
+        });
+    }
+    defs
+}
+
+/// Solo las 11 definiciones nativas, sin MCP.
+fn native_definitions() -> Vec<ToolDefinition> {
     fn def(name: &str, description: &str, props: Value, required: &[&str]) -> ToolDefinition {
         ToolDefinition {
             name: name.to_string(),
@@ -165,6 +181,10 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
             Ok(DpxCall::GitLog { n })
         }
         "git_commit" => Ok(DpxCall::GitCommit { message: arg("message")? }),
+        other if other.starts_with("mcp__") => Ok(DpxCall::McpTool {
+            name: other.to_string(),
+            args: args.clone(),
+        }),
         other => Err(format!(
             "herramienta desconocida: `{other}`. Las disponibles son: read_file, search_project, \
              write_file, edit_file, delete_file, run_command, web_search, git_status, git_diff, \
@@ -180,7 +200,7 @@ mod tests {
     #[test]
     fn definiciones_completas_y_con_schema() {
         let defs = definitions();
-        assert_eq!(defs.len(), 11);
+        assert!(defs.len() >= 11, "esperaba al menos 11 tools nativas");
         for d in &defs {
             assert!(!d.description.is_empty());
             assert_eq!(d.parameters["type"], "object");

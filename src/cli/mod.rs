@@ -1,7 +1,9 @@
 //! Definición de la CLI con `clap` y despacho de comandos.
 
 mod chat;
+mod commands;
 mod editor;
+pub mod hooks;
 mod init;
 
 use anyhow::Result;
@@ -9,6 +11,59 @@ use clap::{Parser, Subcommand};
 
 use crate::agent::Brain;
 use crate::focus::{self, Mode, Persona};
+
+// ── AutoMode granular ──────────────────────────────────────────────
+/// Nivel de autonomía del modo auto. Acumulativo: `All` ⊃ `Writes` ⊃ `Reads` ⊃ `Off`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoMode {
+    /// Nada automático: cada acción pide confirmación.
+    Off,
+    /// Lecturas y búsquedas (ya libres) + auto-extiende rondas sin preguntar.
+    Reads,
+    /// Lo anterior + escrituras/ediciones sin preguntar (los guards siguen).
+    Writes,
+    /// Todo: lecturas, escrituras, comandos seguros + auto-extiende rondas.
+    All,
+}
+
+impl AutoMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            AutoMode::Off => "off",
+            AutoMode::Reads => "reads",
+            AutoMode::Writes => "writes",
+            AutoMode::All => "all",
+        }
+    }
+
+    /// ¿Auto-extiende el presupuesto de rondas sin preguntar?
+    pub fn extends(&self) -> bool {
+        !matches!(self, AutoMode::Off)
+    }
+
+    /// ¿Aplica escrituras/ediciones sin confirmación?
+    /// Los guards (anti-truncado, big-rewrite) preguntan SIEMPRE.
+    pub fn writes(&self) -> bool {
+        matches!(self, AutoMode::Writes | AutoMode::All)
+    }
+
+    /// ¿Ejecuta comandos seguros sin confirmación?
+    /// Los peligrosos/prohibidos ignoran esto: sus puertas son incondicionales.
+    pub fn commands(&self) -> bool {
+        matches!(self, AutoMode::All)
+    }
+
+    /// Parsea desde string: CLI arg, config toml, o comando `/auto`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "off" | "false" | "no" => Some(AutoMode::Off),
+            "reads" | "read" | "r" => Some(AutoMode::Reads),
+            "writes" | "write" | "w" => Some(AutoMode::Writes),
+            "all" | "on" | "true" | "yes" | "full" => Some(AutoMode::All),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -40,12 +95,11 @@ enum Commands {
         #[arg(short, long, value_enum)]
         brain: Option<Brain>,
 
-        /// Modo autónomo: aplica cambios y comandos SEGUROS sin preguntar
-        /// (lo peligroso sigue pidiendo confirmación). También: `/auto`.
-        /// Acepta `--auto` (= activado), `--auto false`, o ausente (usa la
-        /// config de `dpx init`).
-        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-        auto: Option<bool>,
+        /// Modo autónomo: `off`, `reads` (auto-extiende rondas), `writes` (o
+        /// +auto-apply), `all` (o +comandos seguros). `/auto` en el REPL.
+        /// Acepta `--auto` (= `all`), `--auto writes`, etc.; o ausente (usa config).
+        #[arg(long, num_args = 0..=1, default_missing_value = "all")]
+        auto: Option<String>,
     },
 
     /// Agente autónomo: hace el trabajo e itera (escribe, ejecuta, corrige).
@@ -62,12 +116,10 @@ enum Commands {
         #[arg(short, long, value_enum)]
         brain: Option<Brain>,
 
-        /// Modo autónomo: aplica cambios y comandos SEGUROS sin preguntar
-        /// (lo peligroso sigue pidiendo confirmación). También: `/auto`.
-        /// Acepta `--auto` (= activado), `--auto false`, o ausente (usa la
-        /// config de `dpx init`).
-        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-        auto: Option<bool>,
+        /// Modo autónomo: `off`, `reads`, `writes`, `all`. Misma semántica que en Chat.
+        /// Acepta `--auto` (= `all`), `--auto writes`, etc.
+        #[arg(long, num_args = 0..=1, default_missing_value = "all")]
+        auto: Option<String>,
     },
 
     /// Lista los enfoques (focus packs) disponibles.
@@ -94,7 +146,10 @@ impl Cli {
         let resolve_brain = |cli: Option<Brain>| {
             cli.unwrap_or_else(|| Brain::parse(&proj_cfg.brain).unwrap_or(Brain::Deepseek))
         };
-        let resolve_auto = |cli: Option<bool>| cli.unwrap_or(proj_cfg.auto);
+        let resolve_auto = |cli: Option<String>| {
+            cli.and_then(|s| AutoMode::parse(&s))
+                .unwrap_or_else(|| AutoMode::parse(&proj_cfg.auto).unwrap_or(AutoMode::Off))
+        };
         // focus: CLI flag gana; si es None, la config; si también None, detecta.
         let resolve_focus = |cli: Option<String>| cli.or_else(|| proj_cfg.focus.clone());
 

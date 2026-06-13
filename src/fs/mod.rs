@@ -905,20 +905,80 @@ fn take_block(s: &mut String) -> String {
 }
 
 /// Aplica una edición sobre el contenido actual: busca `search` de forma LITERAL
-/// (sin regex) y reemplaza su primera aparición. Error claro si no aparece.
+/// (sin regex) y reemplaza su primera aparición.
+///
+/// Tolera diferencias de final de línea (CRLF vs LF), la causa nº 1 de fallos de
+/// `edit_file` en Windows: el LLM emite el SEARCH con `\n` pero el archivo en
+/// disco tiene `\r\n` (o una mezcla de ambos, p.ej. tras `git checkout` con
+/// `core.autocrlf`). El reemplazo PRESERVA los finales de línea originales del
+/// archivo, porque solo se sustituye el tramo coincidente.
+///
+/// Estrategia: (1) intento exacto —rápido y conserva el comportamiento previo—;
+/// (2) si falla, normaliza AMBOS lados a LF, busca en ese espacio y mapea el
+/// offset de vuelta al contenido original (esto cubre finales mixtos, que un
+/// simple `\n`↔`\r\n` no resolvía). Error claro con pista verbatim si aun así
+/// no encuentra.
 pub fn apply_edit(current: &str, edit: &FileEdit) -> Result<String> {
-    let Some(idx) = current.find(&edit.search) else {
-        return Err(anyhow!(
-            "no encontré el bloque SEARCH en `{}`: el texto no coincide con el archivo actual.{}",
-            edit.path,
-            search_hint(current, &edit.search)
-        ));
-    };
-    let mut out = String::with_capacity(current.len() + edit.replace.len());
-    out.push_str(&current[..idx]);
-    out.push_str(&edit.replace);
-    out.push_str(&current[idx + edit.search.len()..]);
-    Ok(out)
+    // 1. Intento exacto.
+    if let Some(idx) = current.find(&edit.search) {
+        return Ok(splice(current, idx, idx + edit.search.len(), &edit.replace));
+    }
+
+    // 2. Tolerante a finales de línea: normaliza CRLF→LF en ambos lados y busca
+    //    en el espacio normalizado; el `map` traduce el offset normalizado al
+    //    byte original para cortar exactamente el tramo coincidente.
+    let needle_norm = edit.search.replace("\r\n", "\n");
+    let (current_norm, map) = normalize_lf_with_map(current);
+    if let Some(n_idx) = current_norm.find(&needle_norm) {
+        let start = map[n_idx];
+        let end = map[n_idx + needle_norm.len()];
+        return Ok(splice(current, start, end, &edit.replace));
+    }
+
+    Err(anyhow!(
+        "no encontré el bloque SEARCH en `{}`: el texto no coincide con el archivo actual.{}",
+        edit.path,
+        search_hint(current, &edit.search)
+    ))
+}
+
+/// Reemplaza `original[start..end]` por `replace`, devolviendo la cadena nueva.
+fn splice(original: &str, start: usize, end: usize, replace: &str) -> String {
+    let mut out = String::with_capacity(original.len() + replace.len());
+    out.push_str(&original[..start]);
+    out.push_str(replace);
+    out.push_str(&original[end..]);
+    out
+}
+
+/// Normaliza `\r\n` → `\n` y devuelve `(normalizado, map)`, donde `map[i]` es el
+/// índice de byte en `original` del que proviene el byte `i` del normalizado.
+/// `map` tiene `normalizado.len() + 1` entradas y `map[normalizado.len()]` apunta
+/// a `original.len()`, de modo que cualquier rango `[a, b]` del normalizado se
+/// traduce a `[map[a], map[b]]` en el original. Solo toca ASCII (`\r`/`\n`), así
+/// que preserva la validez UTF-8 y los límites de carácter.
+fn normalize_lf_with_map(original: &str) -> (String, Vec<usize>) {
+    let bytes = original.as_bytes();
+    let mut norm: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut map: Vec<usize> = Vec::with_capacity(bytes.len() + 1);
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+            // El '\n' del normalizado nace en el '\r' y consume 2 bytes.
+            map.push(i);
+            norm.push(b'\n');
+            i += 2;
+        } else {
+            map.push(i);
+            norm.push(bytes[i]);
+            i += 1;
+        }
+    }
+    map.push(bytes.len());
+    // `norm` solo difiere de `original` en ASCII \r\n → \n: sigue siendo UTF-8
+    // válido. El fallback a `original` jamás debería dispararse.
+    let norm = String::from_utf8(norm).unwrap_or_else(|_| original.to_string());
+    (norm, map)
 }
 
 /// Pista para un SEARCH fallido, pensada para que el MODELO se autocorrija en
@@ -1129,6 +1189,90 @@ mod tests {
     fn apply_edit_falla_si_no_encuentra() {
         let edit = FileEdit { path: "x".into(), search: "no está".into(), replace: "y".into() };
         assert!(apply_edit("contenido real", &edit).is_err());
+    }
+
+    #[test]
+    fn apply_edit_tolera_crlf_en_archivo_con_search_lf() {
+        // Caso real en Windows: el archivo tiene \r\n, el SEARCH del LLM usa \n.
+        let current = "línea uno\r\nlínea dos\r\nlínea tres\r\n";
+        let edit = FileEdit {
+            path: "x".into(),
+            search: "línea uno\nlínea dos".into(),  // solo LF
+            replace: "reemplazada".into(),
+        };
+        let out = apply_edit(current, &edit).unwrap();
+        // El contenido se reemplaza respetando los \r\n originales.
+        assert_eq!(out, "reemplazada\r\nlínea tres\r\n");
+    }
+
+    #[test]
+    fn apply_edit_tolera_crlf_en_search_con_archivo_lf() {
+        // Caso inverso (raro pero posible): archivo LF, SEARCH con CRLF.
+        let current = "fn foo() {\n    bar();\n}\n";
+        let edit = FileEdit {
+            path: "x".into(),
+            search: "fn foo() {\r\n    bar();".into(),
+            replace: "fn baz() {".into(),
+        };
+        let out = apply_edit(current, &edit).unwrap();
+        assert_eq!(out, "fn baz() {\n}\n");
+    }
+
+    #[test]
+    fn apply_edit_exacto_sigue_funcionando() {
+        // Sin diferencias CRLF, el comportamiento no cambia.
+        let edit = FileEdit {
+            path: "x".into(),
+            search: "línea uno\nlínea dos".into(),
+            replace: "reemplazada".into(),
+        };
+        let out = apply_edit("línea uno\nlínea dos\nlínea tres\n", &edit).unwrap();
+        assert_eq!(out, "reemplazada\nlínea tres\n");
+    }
+
+    #[test]
+    fn apply_edit_solo_lf_con_crlf_en_medio_del_contenido() {
+        // El archivo mezcla CRLF y LF (pasa en la práctica: git checkout en
+        // Windows con core.autocrlf=true puede dejar mezclas).
+        let current = "cabecera\ncuerpo\r\npie\n";
+        let edit = FileEdit {
+            path: "x".into(),
+            search: "cuerpo".into(), // sin newlines, exact match basta
+            replace: "nuevo".into(),
+        };
+        let out = apply_edit(current, &edit).unwrap();
+        assert_eq!(out, "cabecera\nnuevo\r\npie\n");
+    }
+
+    #[test]
+    fn apply_edit_tolera_finales_mixtos_multilinea() {
+        // El bloque a editar ABARCA líneas con finales distintos: la primera
+        // termina en \r\n y la segunda en \n. El SEARCH del LLM viene todo en
+        // \n. El heurístico simple de \n↔\r\n NO resolvía esto (normalizaba a
+        // todo-CRLF y no encontraba); el mapeo normalizado sí.
+        let current = "uno\r\ndos\ntres\r\n";
+        let edit = FileEdit {
+            path: "x".into(),
+            search: "uno\ndos\ntres".into(), // todo LF, cruza CRLF y LF reales
+            replace: "fusionado".into(),
+        };
+        let out = apply_edit(current, &edit).unwrap();
+        // Reemplaza el tramo coincidente y preserva el \r\n final del archivo.
+        assert_eq!(out, "fusionado\r\n");
+    }
+
+    #[test]
+    fn apply_edit_finales_mixtos_preserva_cola_intacta() {
+        // Verifica que el mapeo de offsets corta exactamente: el texto antes y
+        // después del match queda byte-a-byte intacto, con sus finales propios.
+        let current = "head\r\nfn f() {\n    body();\r\n}\ntail\r\n";
+        let edit = FileEdit {
+            path: "x".into(),
+            search: "fn f() {\n    body();\n}".into(), // LF, pero el archivo mezcla
+            replace: "fn f() { done(); }".into(),
+        };
+        let out = apply_edit(current, &edit).unwrap();
+        assert_eq!(out, "head\r\nfn f() { done(); }\ntail\r\n");
     }
 
     #[test]

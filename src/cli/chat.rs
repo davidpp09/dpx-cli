@@ -13,6 +13,7 @@ use rig_core::completion::Message;
 use super::editor::{InputEditor, ReadResult};
 use crate::agent::tools::{self, DpxCall};
 use crate::agent::{Brain, ChatReply, Mentor, ModelRouter};
+use crate::cli::AutoMode;
 use crate::focus::{self, Mode, Persona};
 use crate::session::{self, ProjectStore, Turn};
 use crate::ui;
@@ -22,7 +23,7 @@ pub async fn run(
     mode: Mode,
     brain: Brain,
     persona: Persona,
-    auto: bool,
+    auto: AutoMode,
 ) -> Result<()> {
     let cwd = env::current_dir()?;
     let store = ProjectStore::init(&cwd)?;
@@ -68,6 +69,11 @@ pub async fn run(
         ui::dim("escribe tu mensaje · @archivo lee código · Shift+Enter salto de línea · Ctrl-C cancela · /salir")
     );
 
+    // Hooks del proyecto (.dpx/hooks.toml): se disparan ante eventos del ciclo
+    // de vida. OnSessionStart se ejecuta aquí, al inicio.
+    let hooks = store.load_hooks();
+    crate::cli::hooks::run_hooks(&hooks, &crate::cli::hooks::HookEvent::OnSessionStart, None, &cwd);
+
     let mut history: Vec<Message> = Vec::new();
     let mut turns: Vec<Turn> = Vec::new();
 
@@ -106,6 +112,34 @@ pub async fn run(
                 if single_line && let Some(cmd) = input.strip_prefix('/') {
                     if matches!(cmd, "salir" | "exit" | "q") {
                         break;
+                    }
+                    // Comandos personalizados del proyecto (.dpx/commands.toml)
+                    let ccmds = store.load_custom_commands();
+                    if let Some(prompt) =
+                        super::commands::dispatch_custom_command(&ccmds, cmd).await
+                    {
+                        store.checkpoint("user", input)?;
+                        turns.push(Turn {
+                            role: "user",
+                            text: input.to_string(),
+                        });
+                        ui::clear_cancel();
+                        let outcome = run_turn(
+                            &mentor, &mut history, &cwd, &skin,
+                            &mut |p| ed.confirm_line(p), &store,
+                            &prompt, auto,
+                        ).await;
+                        match outcome {
+                            TurnOutcome::Reply(full) => {
+                                store.checkpoint("assistant", &full)?;
+                                turns.push(Turn { role: "assistant", text: full });
+                            }
+                            TurnOutcome::Empty => {}
+                            TurnOutcome::ModelFailed(err) => {
+                                ui::panel("⚠ error del modelo", &ui::friendly_error(&err));
+                            }
+                        }
+                        continue;
                     }
                     handle_command(
                         cmd, &skin, &store, &prior, &mut router, &mut mentor, &mut focus_id,
@@ -359,7 +393,21 @@ async fn compact_now(
 /// [`KEEP_RECENT_MESSAGES`] mensajes intactos.
 fn rebuild_history(history: &mut Vec<Message>, summary: &str) {
     let keep_from = history.len().saturating_sub(KEEP_RECENT_MESSAGES);
-    let recent = history.split_off(keep_from);
+    let mut recent = history.split_off(keep_from);
+    
+    // Evitar dejar tool_results o tool_calls huérfanos sin su pareja previa,
+    // ya que eso causa un error 400 Bad Request en la mayoría de las APIs.
+    // Nota: rig-core serializa los tool_results con "type":"toolresult".
+    while !recent.is_empty() {
+        if let Ok(json) = serde_json::to_string(&recent[0]) {
+            if json.contains(r#""type":"toolresult""#) || json.contains(r#""tool_calls""#) {
+                recent.remove(0);
+                continue;
+            }
+        }
+        break;
+    }
+
     history.clear();
     history.push(Message::user(format!(
         "[CONTEXTO COMPACTADO] La conversación previa se resumió para liberar espacio. \
@@ -426,7 +474,7 @@ async fn run_turn(
     ask: &mut dyn FnMut(&str) -> Option<String>,
     store: &ProjectStore,
     user_input: &str,
-    auto: bool,
+    auto: crate::cli::AutoMode,
 ) -> TurnOutcome {
     let mut to_send = attach_files(cwd, user_input);
     let mut full = String::new();
@@ -537,6 +585,22 @@ async fn run_turn(
         let deletes = if quarantined { Vec::new() } else { crate::fs::parse_deletes(&reply) };
         report.absorb(process_deletes(cwd, &deletes, &mut *ask));
 
+        // Hooks PostToolUse: tras aplicar cambios, ejecutar comandos
+        // (p.ej. cargo fmt después de writes/edits).
+        let all_tools_used = {
+            let mut names: Vec<&str> = Vec::new();
+            if !writes.is_empty() { names.push("write_file"); }
+            if !edits.is_empty() { names.push("edit_file"); }
+            if !deletes.is_empty() { names.push("delete_file"); }
+            names
+        };
+        if !all_tools_used.is_empty() {
+            let hooks = store.load_hooks();
+            for name in &all_tools_used {
+                crate::cli::hooks::run_hooks(&hooks, &crate::cli::hooks::HookEvent::PostToolUse, Some(name), cwd);
+            }
+        }
+
         // 2b. Tool calls nativas (function calling): la vía estructurada y
         //     preferida. Se atienden SIEMPRE y cada una deja su tool result en
         //     el historial — sin un resultado por llamada, la siguiente
@@ -587,7 +651,20 @@ async fn run_turn(
             };
         }
 
-        // 3. Lecturas, búsquedas y ejecuciones (también en cuarentena si aplica:
+        // 3. Hooks PostToolUse para tool calls nativas que modificaron.
+        let native_modifiers: Vec<&str> = calls
+            .iter()
+            .map(|c| c.function.name.as_str())
+            .filter(|n| matches!(*n, "write_file" | "edit_file" | "delete_file"))
+            .collect();
+        if !native_modifiers.is_empty() {
+            let hooks = store.load_hooks();
+            for name in native_modifiers {
+                crate::cli::hooks::run_hooks(&hooks, &crate::cli::hooks::HookEvent::PostToolUse, Some(name), cwd);
+            }
+        }
+
+        // 4. Lecturas, búsquedas y ejecuciones (también en cuarentena si aplica:
         //    el `mvn` fantasma de un fence roto era justamente un run parseado).
         let mut reads = Vec::new();
         if !quarantined {
@@ -796,10 +873,10 @@ fn self_update(cwd: &Path) {
 fn extend_rounds(
     ask: &mut dyn FnMut(&str) -> Option<String>,
     round: usize,
-    auto: bool,
+    auto: crate::cli::AutoMode,
     budget: &mut usize,
 ) -> bool {
-    if auto {
+    if auto.extends() {
         if round >= AUTO_MAX_ROUNDS {
             println!(
                 "\n{}",
@@ -856,7 +933,7 @@ async fn run_tool_call(
     call: &rig_core::message::ToolCall,
     writes: &mut Vec<crate::fs::FileWrite>,
     edits: &mut Vec<crate::fs::FileEdit>,
-    auto: bool,
+    auto: crate::cli::AutoMode,
 ) -> ToolOutcome {
     match tools::parse_call(&call.function.name, &call.function.arguments) {
         Err(e) => {
@@ -914,11 +991,17 @@ async fn run_tool_call(
             // como arg ÚNICO (run_git no parte por espacios), así que mensajes
             // con espacios funcionan bien.
             println!("\n{} {}", ui::accent("⏺ commit:"), ui::accent(&message));
-            let ok = auto || matches!(ask("¿crear commit? [s/N] "), Some(a) if is_yes(&a));
+            let ok = auto.commands() || matches!(ask("¿crear commit? [s/N] "), Some(a) if is_yes(&a));
             if !ok {
                 println!("{}", ui::dim("omitido."));
                 ToolOutcome::Done("[el usuario rechazó crear el commit]".to_string())
             } else {
+                // Hooks PreCommit: si fallan, el commit se cancela.
+                let hooks = store.load_hooks();
+                if !crate::cli::hooks::run_hooks(&hooks, &crate::cli::hooks::HookEvent::PreCommit, None, cwd) {
+                    println!("{}", ui::dim("commit cancelado: el hook PreCommit falló"));
+                    return ToolOutcome::Done("[commit cancelado: el hook PreCommit falló]".to_string());
+                }
                 let add = run_git(cwd, &["add", "-A"]);
                 let commit = run_git(cwd, &["commit", "-m", &message]);
                 ToolOutcome::Done(format!("git add -A:\n{add}\ngit commit:\n{commit}"))
@@ -936,6 +1019,13 @@ async fn run_tool_call(
             RunDecision::Run => {
                 let (out, cancelled) = execute_run(cwd, &command);
                 if cancelled { ToolOutcome::Cancelled(out) } else { ToolOutcome::Done(out) }
+            }
+        },
+        Ok(DpxCall::McpTool { name, args }) => {
+            println!("{}", ui::accent(&format!("  ⚙ MCP: {name}")));
+            match crate::mcp::McpManager::call_tool(&name, &args) {
+                Ok(out) => ToolOutcome::Done(out),
+                Err(e) => ToolOutcome::Done(format!("[error MCP {name}: {e}]")),
             }
         },
     }
@@ -1051,7 +1141,7 @@ fn handle_command(
     mode: &mut Mode,
     brain: &mut Brain,
     persona: &mut Persona,
-    auto: &mut bool,
+    auto: &mut crate::cli::AutoMode,
     history: &mut Vec<Message>,
     cwd: &Path,
     turn_count: usize,
@@ -1083,16 +1173,24 @@ fn handle_command(
         // duras (peligrosos, prohibidos, guards anti-truncado, borrados) se
         // mantienen SIEMPRE, con o sin auto.
         "auto" => {
-            *auto = match arg {
-                Some("on") => true,
-                Some("off") => false,
-                _ => !*auto,
-            };
-            if *auto {
+            if let Some(a) = arg {
+                if let Some(m) = crate::cli::AutoMode::parse(a) {
+                    *auto = m;
+                } else {
+                    println!("{} {}", ui::dim("modo auto desconocido:"), a);
+                }
+            } else {
+                *auto = if *auto == crate::cli::AutoMode::All {
+                    crate::cli::AutoMode::Off
+                } else {
+                    crate::cli::AutoMode::All
+                };
+            }
+            if *auto != crate::cli::AutoMode::Off {
                 println!(
                     "{} {}",
-                    ui::accent("⏺ auto ⚡ ACTIVADO"),
-                    ui::dim("· escrituras/ediciones y comandos seguros sin preguntar · /auto off para volver")
+                    ui::accent(&format!("⏺ auto ⚡ ACTIVADO ({})", auto.label())),
+                    ui::dim("· usa /auto off para volver a manual")
                 );
             } else {
                 println!("{}", ui::accent("⏺ auto desactivado · cada cambio vuelve a confirmarse"));
@@ -1277,6 +1375,14 @@ async fn close_session(
     turns: &[Turn],
     prior: Option<&str>,
 ) {
+    // Hooks OnSessionEnd: se ejecutan antes del resumen, incluso si la sesión
+    // está vacía (un hook puede querer correr igual).
+    {
+        let hooks = store.load_hooks();
+        let cwd = store.project_dir();
+        crate::cli::hooks::run_hooks(&hooks, &crate::cli::hooks::HookEvent::OnSessionEnd, None, cwd);
+    }
+
     if turns.is_empty() {
         println!("\n{}", ui::dim("sesión vacía: no hay nada que recordar. Hasta luego."));
         return;
@@ -1345,7 +1451,7 @@ fn process_writes(
     cwd: &std::path::Path,
     writes: &[crate::fs::FileWrite],
     ask: &mut dyn FnMut(&str) -> Option<String>,
-    auto: bool,
+    auto: crate::cli::AutoMode,
 ) -> ActionReport {
     let mut report = ActionReport::default();
     if writes.is_empty() {
@@ -1396,7 +1502,7 @@ fn process_writes(
         // En modo auto los writes limpios se aplican directo (mostrando el
         // diff igual, por transparencia); los GUARDS siguen preguntando
         // SIEMPRE: un posible truncado no se auto-acepta jamás.
-        if auto && shrink.is_none() && !big_rewrite {
+        if auto.writes() && shrink.is_none() && !big_rewrite {
             ui::preview_diff(current.as_deref(), &w.content);
             match crate::fs::apply(cwd, w) {
                 Ok(path) => {
@@ -1489,7 +1595,7 @@ fn process_edits(
     cwd: &std::path::Path,
     edits: &[crate::fs::FileEdit],
     ask: &mut dyn FnMut(&str) -> Option<String>,
-    auto: bool,
+    auto: crate::cli::AutoMode,
 ) -> ActionReport {
     let mut report = ActionReport::default();
     for e in edits {
@@ -1512,7 +1618,7 @@ fn process_edits(
                 // En auto, las ediciones quirúrgicas (pequeñas por diseño) se
                 // aplican directo tras mostrar el diff.
                 let accepted =
-                    auto || matches!(ask("¿aplicar? [s/N] "), Some(a) if is_yes(&a));
+                    auto.writes() || matches!(ask("¿aplicar? [s/N] "), Some(a) if is_yes(&a));
                 if accepted {
                     let w = crate::fs::FileWrite { path: e.path.clone(), content: new_content };
                     match crate::fs::apply(cwd, &w) {
@@ -1632,7 +1738,7 @@ fn confirm_run(
     store: &ProjectStore,
     cwd: &Path,
     cmd: &str,
-    auto: bool,
+    auto: crate::cli::AutoMode,
 ) -> RunDecision {
     use crate::fs::safety::{self, CommandRisk};
 
@@ -1671,7 +1777,7 @@ fn confirm_run(
     }
     // Modo auto: un comando clasificado como SEGURO corre sin preguntar (los
     // peligrosos/prohibidos ya retornaron arriba con sus puertas intactas).
-    if auto {
+    if auto.commands() {
         println!("\n{} {}  {}", ui::accent("⏺ ejecutar:"), ui::accent(cmd), ui::dim("(auto ⚡)"));
         warn_outside_paths(cwd, cmd);
         return RunDecision::Run;
@@ -1754,7 +1860,7 @@ mod tests {
     fn write_confirmado_se_aplica_y_reporta() {
         let dir = tmp("w-ok");
         let writes = vec![FileWrite { path: "a.txt".into(), content: "hola\n".into() }];
-        let report = process_writes(&dir, &writes, &mut |_| Some("s".into()), false);
+        let report = process_writes(&dir, &writes, &mut |_| Some("s".into()), AutoMode::Off);
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "hola\n");
         assert!(!report.needs_followup);
         assert!(report.notes[0].contains("escrito"));
@@ -1765,7 +1871,7 @@ mod tests {
     fn write_rechazado_pide_followup() {
         let dir = tmp("w-no");
         let writes = vec![FileWrite { path: "a.txt".into(), content: "hola\n".into() }];
-        let report = process_writes(&dir, &writes, &mut |_| Some("n".into()), false);
+        let report = process_writes(&dir, &writes, &mut |_| Some("n".into()), AutoMode::Off);
         assert!(!dir.join("a.txt").exists());
         assert!(report.needs_followup);
         assert!(report.notes[0].contains("rechazó"));
@@ -1787,7 +1893,7 @@ mod tests {
                 asked += 1;
                 Some("a".into())
             },
-            false,
+            AutoMode::Off,
         );
         assert_eq!(asked, 1);
         assert!(dir.join("a.txt").exists() && dir.join("b.txt").exists());
@@ -1800,7 +1906,7 @@ mod tests {
         let dir = tmp("e-ok");
         std::fs::write(dir.join("x.txt"), "uno\ndos\ntres\n").unwrap();
         let edits = vec![FileEdit { path: "x.txt".into(), search: "dos".into(), replace: "DOS".into() }];
-        let report = process_edits(&dir, &edits, &mut |_| Some("s".into()), false);
+        let report = process_edits(&dir, &edits, &mut |_| Some("s".into()), AutoMode::Off);
         assert_eq!(std::fs::read_to_string(dir.join("x.txt")).unwrap(), "uno\nDOS\ntres\n");
         assert!(!report.needs_followup);
         assert!(report.notes[0].contains("aplicada"));
@@ -1820,7 +1926,7 @@ mod tests {
                 asked += 1;
                 Some("s".into())
             },
-            false,
+            AutoMode::Off,
         );
         assert_eq!(asked, 0);
         assert!(report.needs_followup);
@@ -1833,7 +1939,7 @@ mod tests {
     fn edit_sobre_archivo_inexistente_reporta_error() {
         let dir = tmp("e-nofile");
         let edits = vec![FileEdit { path: "nada.txt".into(), search: "x".into(), replace: "y".into() }];
-        let report = process_edits(&dir, &edits, &mut |_| Some("s".into()), false);
+        let report = process_edits(&dir, &edits, &mut |_| Some("s".into()), AutoMode::Off);
         assert!(report.needs_followup);
         assert!(report.notes[0].contains("dpx:write"));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1963,7 +2069,7 @@ mod tests {
         let skin = ui::skin();
         let store = ProjectStore::init(dir).unwrap();
         let mut ask = |_: &str| Some(answer.to_string());
-        let out = run_turn(fake, &mut history, dir, &skin, &mut ask, &store, "hola", false).await;
+        let out = run_turn(fake, &mut history, dir, &skin, &mut ask, &store, "hola", AutoMode::Off).await;
         (out, history)
     }
 
@@ -1976,7 +2082,7 @@ mod tests {
         let mut ask = |p: &str| -> Option<String> {
             panic!("en modo auto no debió preguntar nada, pero preguntó: {p}")
         };
-        let out = run_turn(fake, &mut history, dir, &skin, &mut ask, &store, "hola", true).await;
+        let out = run_turn(fake, &mut history, dir, &skin, &mut ask, &store, "hola", AutoMode::All).await;
         (out, history)
     }
 
@@ -2054,19 +2160,19 @@ mod tests {
         // Responder "s" (el reflejo del piloto automático) NO basta.
         let mut ask_s = |_: &str| Some("s".to_string());
         assert!(matches!(
-            confirm_run(&mut ask_s, &store, &dir, "git reset --hard", false),
+            confirm_run(&mut ask_s, &store, &dir, "git reset --hard", AutoMode::Off),
             RunDecision::Refused
         ));
         // Reescribir la primera palabra sí confirma.
         let mut ask_git = |_: &str| Some("git".to_string());
         assert!(matches!(
-            confirm_run(&mut ask_git, &store, &dir, "git reset --hard", false),
+            confirm_run(&mut ask_git, &store, &dir, "git reset --hard", AutoMode::Off),
             RunDecision::Run
         ));
         // Y el modo auto NO exime a un comando peligroso de su puerta.
         let mut ask_no = |_: &str| Some("n".to_string());
         assert!(matches!(
-            confirm_run(&mut ask_no, &store, &dir, "git reset --hard", true),
+            confirm_run(&mut ask_no, &store, &dir, "git reset --hard", AutoMode::All),
             RunDecision::Refused
         ));
     }
@@ -2083,7 +2189,7 @@ mod tests {
             Some("n".to_string())
         };
         assert!(matches!(
-            confirm_run(&mut ask, &store, &dir, "rm -rf target", false),
+            confirm_run(&mut ask, &store, &dir, "rm -rf target", AutoMode::Off),
             RunDecision::Refused
         ));
         assert!(pregunto, "debió pedir confirmación reforzada pese a la allowlist");
@@ -2097,7 +2203,7 @@ mod tests {
             panic!("un comando prohibido jamás debe llegar a preguntar")
         };
         assert!(matches!(
-            confirm_run(&mut ask, &store, &dir, "shutdown /s /t 0", true),
+            confirm_run(&mut ask, &store, &dir, "shutdown /s /t 0", AutoMode::All),
             RunDecision::Blocked(_)
         ));
     }
@@ -2153,7 +2259,7 @@ mod tests {
             path: "grande.rs".into(),
             content: "linea\n".repeat(20), // 200 → 20 líneas: truncado casi seguro
         }];
-        let report = process_writes(&dir, &writes, &mut |_| Some("n".to_string()), false);
+        let report = process_writes(&dir, &writes, &mut |_| Some("n".to_string()), AutoMode::Off);
         assert!(report.needs_followup);
         assert!(report.notes[0].contains("TRUNCADA"));
         assert!(report.notes[0].contains("edit_file"));
@@ -2181,7 +2287,7 @@ mod tests {
             &dir,
             &writes,
             &mut |_| respuestas.next().map(str::to_string),
-            false,
+            AutoMode::Off,
         );
         assert!(respuestas.next().is_none(), "debió preguntar DOS veces (write_all no exime al guard)");
         assert!(report.notes.iter().any(|n| n.contains("TRUNCADA")));
@@ -2198,7 +2304,7 @@ mod tests {
             path: "grande.rs".into(),
             content: "linea\n".repeat(240), // no encoge >40%, pero es rewrite completo
         }];
-        let report = process_writes(&dir, &writes, &mut |_| Some("n".to_string()), false);
+        let report = process_writes(&dir, &writes, &mut |_| Some("n".to_string()), AutoMode::Off);
         assert!(report.needs_followup);
         assert!(report.notes[0].contains("edits quirúrgicos"));
         assert_eq!(
@@ -2212,7 +2318,7 @@ mod tests {
             crate::fs::FileWrite { path: "grande.rs".into(), content: "linea\n".repeat(240) },
         ];
         let mut respuestas = vec!["a", "n"].into_iter();
-        process_writes(&dir, &writes, &mut |_| respuestas.next().map(str::to_string), false);
+        process_writes(&dir, &writes, &mut |_| respuestas.next().map(str::to_string), AutoMode::Off);
         assert!(respuestas.next().is_none(), "debió preguntar dos veces");
     }
 
@@ -2408,7 +2514,7 @@ mod tests {
             Some("n".to_string())
         };
         let _ =
-            run_turn(&fake, &mut history, &dir, &skin, &mut ask, &store, "hola", true).await;
+            run_turn(&fake, &mut history, &dir, &skin, &mut ask, &store, "hola", AutoMode::All).await;
         assert!(pregunto, "el guard anti-truncado debe preguntar incluso en modo auto");
         assert_eq!(
             std::fs::read_to_string(dir.join("grande.rs")).unwrap().lines().count(),
@@ -2422,10 +2528,10 @@ mod tests {
         let mut budget = MAX_TURN_ROUNDS;
         let mut ask = |_: &str| -> Option<String> { panic!("en auto no se pregunta") };
         // Por debajo del tope: amplía solo.
-        assert!(extend_rounds(&mut ask, 8, true, &mut budget));
+        assert!(extend_rounds(&mut ask, 8, AutoMode::All, &mut budget));
         assert_eq!(budget, 16);
         // En el tope duro: frena.
-        assert!(!extend_rounds(&mut ask, AUTO_MAX_ROUNDS, true, &mut budget));
+        assert!(!extend_rounds(&mut ask, AUTO_MAX_ROUNDS, AutoMode::All, &mut budget));
     }
 
     #[test]
@@ -2501,7 +2607,7 @@ mod tests {
         let skin = ui::skin();
         let store = ProjectStore::init(&dir).unwrap();
         let mut ask = |_: &str| Some("n".to_string());
-        let _ = run_turn(&fake, &mut history, &dir, &skin, &mut ask, &store, "hola", false).await;
+        let _ = run_turn(&fake, &mut history, &dir, &skin, &mut ask, &store, "hola", AutoMode::Off).await;
         // El log NO debe tener el commit rechazado.
         assert!(!run_git(&dir, &["log", "--oneline"]).contains("no debería"));
         let serial = serde_json::to_string(&history).unwrap();
