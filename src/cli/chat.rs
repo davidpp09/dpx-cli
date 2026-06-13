@@ -157,6 +157,8 @@ pub async fn run(
                 // Si el cerebro no llega a responder nada (sin saldo, cuota, caído),
                 // se degrada al siguiente con API key y se reintenta UNA vez.
                 ui::clear_cancel();
+                // Snapshot del consumo ANTES del turno: el delta = lo que costó.
+                let tok_before = crate::token::totals();
                 let mut outcome = run_turn(
                     &mentor,
                     &mut history,
@@ -211,6 +213,11 @@ pub async fn run(
                     TurnOutcome::ModelFailed(err) => {
                         ui::panel("⚠ error del modelo", &ui::friendly_error(&err));
                     }
+                }
+
+                // Consumo real del turno (in/out + % de caché + costo aprox).
+                if let Some(line) = crate::token::turn_line(tok_before) {
+                    println!("{}", ui::dim(&format!("  {line}")));
                 }
 
                 // Compactación automática al acercarse al límite de contexto.
@@ -481,6 +488,10 @@ async fn run_turn(
     let mut round = 0usize;
     let mut round_budget = MAX_TURN_ROUNDS;
     let mut stream_retries = 0usize;
+    // Archivos ya inyectados en ESTE turno: si el modelo vuelve a pedir el mismo
+    // en otra ronda, su contenido ya está en el historial → no lo re-mandamos
+    // (ahorro de tokens en loops agénticos que releen lo mismo).
+    let mut read_paths_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
         round += 1;
@@ -504,7 +515,7 @@ async fn run_turn(
             };
         };
 
-        let ChatReply { text: reply, calls } = match result {
+        let ChatReply { text: reply, calls, usage } = match result {
             Ok(r) => r,
             Err(e) => {
                 if full.trim().is_empty() {
@@ -534,6 +545,9 @@ async fn run_turn(
         };
         full.push_str(&reply);
         full.push('\n');
+
+        // Consumo real de tokens de esta ronda (in/out/cached) al ledger de sesión.
+        crate::token::record(&usage);
 
         // 1. Narración de esta ronda (sin bloques de acción) → Markdown progresivo.
         let body = crate::fs::strip_action_blocks(&reply);
@@ -741,6 +755,14 @@ async fn run_turn(
             }
             for r in &reads {
                 ui::action_read(r);
+                // Ya leído en este turno: su contenido está más arriba en la
+                // conversación, no lo duplicamos (ahorro de tokens).
+                if !read_paths_seen.insert(r.clone()) {
+                    ctx.push_str(&format!(
+                        "\n--- `{r}` ya lo leíste antes en este turno; su contenido está más arriba. No lo volví a pegar. ---\n"
+                    ));
+                    continue;
+                }
                 match crate::fs::read_file(cwd, r) {
                     Ok(c) => ctx.push_str(&format!("\n--- `{r}` ---\n{c}\n--- fin `{r}` ---\n")),
                     Err(e) => ctx.push_str(&format!("\n[no pude leer `{r}`: {e}]\n")),
@@ -1217,11 +1239,28 @@ fn handle_command(
 
         "clear" => {
             history.clear();
+            crate::token::reset();
             println!(
                 "{}",
                 ui::dim("conversación reiniciada · olvida el contexto de esta sesión")
             );
         }
+
+        // Consumo de tokens REAL de la sesión (de la API, no estimado), con el
+        // % servido desde el caché de contexto y el costo aproximado.
+        "cost" => match crate::token::session_summary() {
+            Some(s) => {
+                println!("\n{}  {}", ui::accent("⏺ tokens · sesión"), ui::dim(&s));
+                println!(
+                    "  {}",
+                    ui::dim("caché alto = más barato · sube el % manteniendo estable el inicio del prompt")
+                );
+            }
+            None => println!(
+                "{}",
+                ui::dim("aún no hay consumo registrado (el proveedor no reportó tokens todavía)")
+            ),
+        },
 
         "context" => match store.prior_context() {
             Some(c) => ui::print_markdown(skin, "⏺ memoria del proyecto", &c),
@@ -2044,14 +2083,14 @@ mod tests {
         }
 
         fn ok(reply: &str) -> Result<ChatReply> {
-            Ok(ChatReply { text: reply.to_string(), calls: Vec::new() })
+            Ok(ChatReply { text: reply.to_string(), calls: Vec::new(), usage: None })
         }
 
         fn ok_with_calls(
             text: &str,
             calls: Vec<rig_core::message::ToolCall>,
         ) -> Result<ChatReply> {
-            Ok(ChatReply { text: text.to_string(), calls })
+            Ok(ChatReply { text: text.to_string(), calls, usage: None })
         }
 
         fn fail(error: &str) -> Result<ChatReply> {

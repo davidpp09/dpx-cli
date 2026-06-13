@@ -13,6 +13,7 @@ mod focus;
 mod fs;
 mod mcp;
 mod session;
+mod token;
 mod ui;
 
 use clap::Parser;

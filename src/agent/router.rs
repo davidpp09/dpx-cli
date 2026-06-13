@@ -17,11 +17,15 @@ use rig_core::streaming::{StreamedAssistantContent, StreamingCompletion};
 
 use crate::focus::Mode;
 
-/// Lo que devolvió el modelo en un turno: la narración en texto y las
-/// llamadas a herramientas nativas (function calling), si las hubo.
+/// Lo que devolvió el modelo en un turno: la narración en texto, las llamadas a
+/// herramientas nativas (function calling) si las hubo, y el consumo de tokens
+/// REAL que reportó el proveedor (cuando lo expone — `None` si no vino).
 pub struct ChatReply {
     pub text: String,
     pub calls: Vec<ToolCall>,
+    /// Tokens de esta ronda según la API (in/out/cached). El desglose de caché
+    /// permite ver cuánto pegó el context-cache de DeepSeek (tokens 10x más baratos).
+    pub usage: Option<rig_core::completion::Usage>,
 }
 
 /// Proveedor que hace de cerebro mentor. Los tres del plan anti-suscripción:
@@ -236,12 +240,18 @@ macro_rules! stream_dispatch {
                 _ => None,
             })
             .collect();
+        // Consumo real de la ronda: el proveedor lo deja en `stream.response`
+        // (impl `GetTokenUsage`). Puede ser `None` si no lo emitió en el stream.
+        let usage = stream
+            .response
+            .as_ref()
+            .and_then(rig_core::completion::GetTokenUsage::token_usage);
         $history.push(Message::user($input.to_string()));
         $history.push(Message::Assistant {
             id: None,
             content: assistant_choice(&full, &calls),
         });
-        Ok::<ChatReply, anyhow::Error>(ChatReply { text: full, calls })
+        Ok::<ChatReply, anyhow::Error>(ChatReply { text: full, calls, usage })
     }};
 }
 

@@ -686,6 +686,7 @@ pub fn print_help() {
     let rows = [
         ("/help", "esta ayuda"),
         ("/status", "estado de la sesión: config, cerebros y memoria"),
+        ("/cost", "tokens reales gastados en la sesión + % de caché y costo aprox"),
         ("/models", "lista los cerebros y cuál tiene API key"),
         ("/clear", "reinicia la conversación (el mentor olvida esta sesión)"),
         ("/compact", "resume la conversación para liberar contexto (también automático)"),
