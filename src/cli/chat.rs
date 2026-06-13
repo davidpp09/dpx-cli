@@ -77,10 +77,19 @@ pub async fn run(
     let mut history: Vec<Message> = Vec::new();
     let mut turns: Vec<Turn> = Vec::new();
 
+    // Etiqueta del proyecto para el título de la pestaña (carpeta actual).
+    let proj_label = cwd
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "proyecto".to_string());
+    ui::title_idle(&proj_label);
+
     // Editor de entrada propio (crossterm): multilínea, Tab, pegados, historial.
     let mut ed = InputEditor::new(cwd.clone());
 
     loop {
+        // De vuelta en el prompt: la pestaña muestra dpx en reposo.
+        ui::title_idle(&proj_label);
         let bar = ui::format_input_status(
             focus::display_name(focus_id.as_deref()),
             mode_label(mode),
@@ -253,6 +262,8 @@ pub async fn run(
     }
 
     close_session(&router, &store, &turns, prior.as_deref()).await;
+    // Devuelve el título de la pestaña a algo neutro al salir.
+    ui::set_title("dpx");
     Ok(())
 }
 
@@ -510,8 +521,9 @@ async fn run_turn(
 
     loop {
         round += 1;
-        let label = if round == 1 { "Pensando…" } else { "Continuando…" };
-        let spinner = ui::Spinner::start(label);
+        // Verbos rotativos + título de pestaña según la fase del turno.
+        let spinner = if round == 1 { ui::Spinner::thinking() } else { ui::Spinner::working() };
+        ui::title_busy(if round == 1 { "pensando" } else { "trabajando" });
         // Carrera contra la cancelación: Ctrl-C durante la espera aborta el turno
         // (soltar el future corta la petición; el historial no se tocó aún).
         let mut on_delta = |_: &str| {};
@@ -768,6 +780,9 @@ async fn run_turn(
                 }
                 ctx.push_str("--- fin ---\n");
             }
+            if !reads.is_empty() {
+                ui::title_busy("explorando código");
+            }
             for r in &reads {
                 ui::action_read(r);
                 // Ya leído en este turno: su contenido está más arriba en la
@@ -782,6 +797,9 @@ async fn run_turn(
                     Ok(c) => ctx.push_str(&format!("\n--- `{r}` ---\n{c}\n--- fin `{r}` ---\n")),
                     Err(e) => ctx.push_str(&format!("\n[no pude leer `{r}`: {e}]\n")),
                 }
+            }
+            if !searches.is_empty() {
+                ui::title_busy("buscando en el proyecto");
             }
             for s in &searches {
                 println!("{}", ui::accent(&format!("  ⎁ buscando: {}", s)));
@@ -1122,6 +1140,9 @@ fn run_git(cwd: &Path, args: &[&str]) -> String {
 /// automático de fallos. Devuelve (texto para el modelo, ¿se canceló?).
 fn execute_run(cwd: &Path, cmd: &str) -> (String, bool) {
     let t = std::time::Instant::now();
+    // La pestaña muestra el comando en curso (acotado para que quepa).
+    let shown_cmd: String = cmd.chars().take(48).collect();
+    ui::title_busy(&format!("⚙ {shown_cmd}"));
     ui::clear_cancel();
     let mut shown = 0usize;
     let out = crate::fs::run_command_streaming(

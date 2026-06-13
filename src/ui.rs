@@ -37,6 +37,29 @@ const RESET: &str = "\x1b[0m";
 const TYPE_MS: u64 = 4; // carácter normal
 const TYPE_FAST_MS: u64 = 1; // espacios y saltos de línea
 
+// ============================================================
+//  VERBOS ROTATIVOS DEL SPINNER (estilo Claude Code: "Reasoning…", "Exploring…")
+//  Cambian cada ~2s para que la espera se sienta viva y se note QUÉ fase corre.
+// ============================================================
+const THINKING_VERBS: &[&str] = &[
+    "Pensando…",
+    "Razonando…",
+    "Tramando…",
+    "Maquinando…",
+    "Hilando fino…",
+    "Conectando ideas…",
+    "Rumiando…",
+    "Cocinando…",
+];
+const WORKING_VERBS: &[&str] = &[
+    "Continuando…",
+    "Iterando…",
+    "Avanzando…",
+    "Puliendo…",
+    "Ajustando…",
+    "Rematando…",
+];
+
 /// Marca de cancelación global (Ctrl-C fuera del prompt). En el prompt el
 /// editor está en modo raw y recibe Ctrl-C como tecla (devuelve `Interrupted`),
 /// así que esta marca solo se activa durante un turno: espera del modelo,
@@ -92,6 +115,27 @@ pub fn green(s: &str) -> String {
 /// Rojo para líneas eliminadas en un diff.
 pub fn red(s: &str) -> String {
     format!("\x1b[38;2;224;108;117m{s}{RESET}")
+}
+
+/// Pone el título de la pestaña/ventana de la terminal (secuencia OSC). No-op
+/// si la salida no es una terminal real (p.ej. al pipear), para no ensuciarla.
+/// Así la pestaña muestra qué hace dpx, como el resto de CLIs serias.
+pub fn set_title(text: &str) {
+    if io::stdout().is_terminal() {
+        // OSC 0: fija título de ventana e icono. Terminador BEL (`\x07`).
+        print!("\x1b]0;{text}\x07");
+        let _ = io::stdout().flush();
+    }
+}
+
+/// Título "en reposo": dpx esperando tu mensaje, con el proyecto a la vista.
+pub fn title_idle(label: &str) {
+    set_title(&format!("✳ dpx — {label}"));
+}
+
+/// Título "ocupado": la acción que dpx está ejecutando ahora mismo.
+pub fn title_busy(activity: &str) {
+    set_title(&format!("dpx · {activity}"));
 }
 
 /// Ancho de la terminal (acotado para que las líneas no queden gigantes).
@@ -743,25 +787,47 @@ pub struct Spinner {
 }
 
 impl Spinner {
-    /// Arranca el spinner con una etiqueta (ej. "Pensando…").
-    ///
-    /// Solo anima si la salida es una terminal real; al pipear (no-TTY) imprime
-    /// una sola línea estática, evitando el spam de frames y los *broken pipe*.
-    pub fn start(label: &'static str) -> Self {
+    /// Arranca el spinner con una etiqueta FIJA (ej. "Compactando contexto…").
+    pub fn start(label: &str) -> Self {
+        Self::rotating(vec![label.to_string()])
+    }
+
+    /// Spinner de espera del modelo con verbos rotativos ("Pensando…",
+    /// "Razonando…", …) — el equivalente al "Reasoning…" de otras CLIs.
+    pub fn thinking() -> Self {
+        Self::rotating(THINKING_VERBS.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// Igual, pero para las rondas de continuación de un turno agéntico.
+    pub fn working() -> Self {
+        Self::rotating(WORKING_VERBS.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// Núcleo del spinner: rota `labels` (cambia cada ~2s) sobre el frame
+    /// animado. Solo anima si la salida es una terminal real; al pipear (no-TTY)
+    /// imprime una sola línea estática, evitando spam de frames y *broken pipe*.
+    fn rotating(labels: Vec<String>) -> Self {
+        if labels.is_empty() {
+            return Self { handle: None };
+        }
         if !io::stdout().is_terminal() {
-            println!("{}", dim(label));
+            println!("{}", dim(&labels[0]));
             return Self { handle: None };
         }
         let handle = tokio::spawn(async move {
             const FRAMES: [&str; 10] =
                 ["⠋", "⠙", "⠚", "⠞", "⠖", "⠦", "⠴", "⠲", "⠳", "⠙"];
+            const FRAMES_PER_WORD: usize = 24; // ~2.2s por verbo (a 90ms/frame)
             let start = Instant::now();
             let mut i = 0usize;
             print!("\x1b[?25l"); // ocultar cursor
             loop {
                 let secs = start.elapsed().as_secs();
+                let label = &labels[(i / FRAMES_PER_WORD) % labels.len()];
+                // `\x1b[2K` limpia la línea: los verbos varían de largo y si no,
+                // un verbo más corto dejaría residuos del anterior.
                 print!(
-                    "\r{} {label} {}",
+                    "\r\x1b[2K{} {label} {}",
                     accent(FRAMES[i % FRAMES.len()]),
                     dim(&format!("({secs}s)")),
                 );
