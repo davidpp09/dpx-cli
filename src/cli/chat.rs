@@ -127,9 +127,9 @@ pub async fn run(
         ui::title_idle(&proj_label);
         let bar = ui::format_input_status(
             focus::display_name(focus_id.as_deref()),
-            mode_label(mode),
+            mode_label_compact(mode),
             router.brain_label(),
-            persona_label(persona),
+            persona_label_compact(persona),
             auto,
         );
 
@@ -2058,6 +2058,14 @@ fn persona_label(persona: Persona) -> &'static str {
     }
 }
 
+/// Versión compacta para la barra de estado.
+fn persona_label_compact(persona: Persona) -> &'static str {
+    match persona {
+        Persona::Mentor => "mentor (enseña)",
+        Persona::Code => "code (hace)",
+    }
+}
+
 /// Cierre limpio: genera y persiste el contexto del proyecto.
 /// Si hay un plan pendiente guardado y la memoria se está retomando, lo
 /// muestra como checklist y lo añade al contexto que se inyecta al modelo,
@@ -2576,6 +2584,15 @@ fn mode_label(mode: Mode) -> &'static str {
         Mode::Pro => "pro (metódico)",
         Mode::Hack => "hack (rápido)",
         Mode::Learn => "learn 🎓 (tutor socrático)",
+    }
+}
+
+/// Versión compacta para la barra de estado (sin emojis ni paréntesis largos).
+fn mode_label_compact(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Pro => "pro (metódico)",
+        Mode::Hack => "hack (rápido)",
+        Mode::Learn => "learn 🎓",
     }
 }
 

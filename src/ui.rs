@@ -254,6 +254,7 @@ pub fn learn_banner() {
 }
 
 /// Línea de estado del área de entrada (focus · modo · cerebro · persona · auto).
+/// Trunca al ancho REAL de la terminal para evitar que desborde y corte la barra.
 pub fn format_input_status(
     focus: &str,
     mode: &str,
@@ -273,7 +274,40 @@ pub fn format_input_status(
     if auto != crate::cli::AutoMode::Off {
         bar.push_str(&format!("{sep}{} {}", grad("⚡ auto"), dim(auto.label())));
     }
+    // Truncar al ancho real de la terminal (con margen mínimo); si la barra
+    // es más larga, se corta el excedente para que no desborde la línea.
+    let max_w = real_term_width().saturating_sub(2);
+    if visible_width(&bar) > max_w {
+        bar = truncate_visible(&bar, max_w);
+    }
     bar
+}
+
+/// Trunca una cadena CON códigos ANSI a un ancho VISIBLE máximo.
+fn truncate_visible(s: &str, max_visible: usize) -> String {
+    let mut out = String::new();
+    let mut visible = 0;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            out.push(c);
+            for e in chars.by_ref() {
+                out.push(e);
+                if e == 'm' {
+                    break;
+                }
+            }
+        } else {
+            if visible >= max_visible {
+                // Ya llegamos al límite: cerrar cualquier secuencia ANSI abierta.
+                out.push_str("\x1b[0m");
+                break;
+            }
+            visible += 1;
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Ancho real de la terminal (sin el clamp estético de `term_width`), para

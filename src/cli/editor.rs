@@ -241,6 +241,11 @@ struct Prompt<'a> {
     cur_region_row: usize,
     /// Total de filas pintadas la última vez.
     region_rows: usize,
+    /// Fila absoluta (Y) del tope de la región, capturada con `position()`
+    /// solo la primera vez que se pinta. Se reúsa en repintados sucesivos:
+    /// `position()` se desincroniza con clics de ratón, redimensiones, y
+    /// comandos que imprimen output entre prompts (ej. `/mode`).
+    region_top_y: Option<u16>,
     /// El buffer tal cual se envió (con placeholders), para el historial.
     submitted_raw: String,
 }
@@ -259,14 +264,23 @@ impl<'a> Prompt<'a> {
             draft: String::new(),
             cur_region_row: 0,
             region_rows: 0,
+            region_top_y: None,
             submitted_raw: String::new(),
         }
     }
 
     fn run(&mut self) -> io::Result<ReadResult> {
         let mut out = io::stdout();
-        // Línea en blanco de separación con la salida anterior, como antes.
-        print!("\r\n");
+        // Capturar la posición ANTES del \r\n: así el Clear(FromCursorDown)
+        // en paint() abarca TODO el output viejo (incluido el del comando
+        // anterior como /mode), no solo desde después del salto de línea.
+        // Sin esto, el output fantasma queda arriba y nunca se limpia.
+        if let Ok((_col, y)) = position() {
+            self.region_top_y = Some(y);
+        }
+        // Usamos queue! en vez de print! para mantener un solo buffer de
+        // salida: print! usa su propio buffer y puede desincronizarse.
+        queue!(out, Print("\r\n"))?;
         out.flush()?;
         let _raw = RawGuard::enable()?;
         self.paint(&mut out)?;
@@ -427,23 +441,25 @@ impl<'a> Prompt<'a> {
         // +1 por la regla superior, +1 si hay indicador de filas ocultas arriba.
         let target_row = 1 + usize::from(start > 0) + (crow - start);
         queue!(out, MoveToColumn(0))?;
-        // Borrado anclado a la fila REAL del cursor: subir `cur_region_row` con
-        // un MoveUp RELATIVO se desincroniza cuando la región está al fondo de una
-        // pantalla llena y el repintado provoca scroll (el MoveUp se queda corto y
-        // la regla superior se queda huérfana → se apila un muro de `────` a lo
-        // largo de una sesión larga). Anclando a la fila absoluta del cursor el
-        // borrado es inmune al scroll. En Windows crossterm lee la posición de la
-        // API de consola (sin carreras con la entrada). Si la terminal no la da,
-        // caemos al MoveUp relativo de siempre.
-        match position() {
-            Ok((_col, cur_y)) => {
-                let top = cur_y.saturating_sub(self.cur_region_row as u16);
-                queue!(out, MoveTo(0, top))?;
+        // Borrado anclado a la fila absoulta del tope de la región, cachead
+        // la primera vez con `position()` y reusada en repintados sucesivos.
+        // `position()` se desincroniza con clics de ratón, redimensiones, y
+        // comandos que imprimen output entre prompts (ej. `/mode` → líneas
+        // fantasma al cambiar de modo). Cacheándola, el borrado siempre
+        // apunta a la misma fila física de la terminal.
+        if self.region_top_y.is_none()
+            && let Ok((_col, cur_y)) = position()
+        {
+            self.region_top_y = Some(cur_y.saturating_sub(self.cur_region_row as u16));
+        }
+        match self.region_top_y {
+            Some(top_y) => {
+                queue!(out, MoveTo(0, top_y))?;
             }
-            Err(_) if self.cur_region_row > 0 => {
+            None if self.cur_region_row > 0 => {
                 queue!(out, MoveUp(self.cur_region_row as u16))?;
             }
-            Err(_) => {}
+            None => {}
         }
         queue!(out, Clear(ClearType::FromCursorDown))?;
         for (i, l) in lines.iter().enumerate() {
