@@ -21,43 +21,40 @@ use crate::ui;
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-/// Cerebro y modo ACTIVOS de la sesión, guardados como globales para que un
-/// subagente (que se lanza desde el fondo de una tool call) pueda construirse
-/// con el mismo cerebro sin tener que enhebrar `Brain`/`Mode` por todo el hot
-/// path de `run_turn`. Mismo patrón que los globales de `token`/`checkpoint`/
-/// `ui::CANCEL`. Se actualizan al arrancar la sesión y en cada cambio de
-/// cerebro/modo (incluido el fallback automático).
+/// Cerebro ACTIVO de la sesión, guardado como global para que un subagente (que
+/// se lanza desde el fondo de una tool call) sepa con qué cerebro construirse sin
+/// enhebrar `Brain` por todo el hot path de `run_turn`. Mismo patrón que los
+/// globales de `token`/`checkpoint`/`ui::CANCEL`. Se actualiza al arrancar la
+/// sesión y en cada cambio de cerebro (incluido el fallback automático).
 static ACTIVE_BRAIN: AtomicU8 = AtomicU8::new(0);
-static ACTIVE_MODE: AtomicU8 = AtomicU8::new(0);
 
-/// Registra el cerebro y el modo activos para que los lea un subagente.
-fn set_active_session(brain: Brain, mode: Mode) {
+/// Registra el cerebro activo para que lo lea un subagente.
+fn set_active_brain(brain: Brain) {
     let b = match brain {
         Brain::Deepseek => 0,
         Brain::Kimi => 1,
         Brain::Qwen => 2,
     };
     ACTIVE_BRAIN.store(b, Ordering::Relaxed);
-    ACTIVE_MODE.store(matches!(mode, Mode::Hack) as u8, Ordering::Relaxed);
+}
+
+/// El cerebro activo registrado (sin mirar si tiene API key).
+fn active_brain_raw() -> Brain {
+    match ACTIVE_BRAIN.load(Ordering::Relaxed) {
+        1 => Brain::Kimi,
+        2 => Brain::Qwen,
+        _ => Brain::Deepseek,
+    }
 }
 
 /// El cerebro con el que lanzar un subagente: el activo si tiene API key, y si
 /// no, el primero disponible (el subagente investiga; necesita un cerebro vivo).
 fn subagent_brain() -> Option<Brain> {
-    let active = match ACTIVE_BRAIN.load(Ordering::Relaxed) {
-        1 => Brain::Kimi,
-        2 => Brain::Qwen,
-        _ => Brain::Deepseek,
-    };
+    let active = active_brain_raw();
     if active.has_key() {
         return Some(active);
     }
     Brain::all().into_iter().find(|b| b.has_key())
-}
-
-/// El modo activo de la sesión (para construir el subagente con la misma actitud).
-fn active_mode() -> Mode {
-    if ACTIVE_MODE.load(Ordering::Relaxed) == 1 { Mode::Hack } else { Mode::Pro }
 }
 
 pub async fn run(
@@ -95,7 +92,7 @@ pub async fn run(
     let mut auto = auto;
     let mut router = ModelRouter::new(brain);
     let mut mentor = build_mentor(&router, focus_id.as_deref(), mode, persona, prior.as_deref())?;
-    set_active_session(brain, mode);
+    set_active_brain(brain);
 
     ui::welcome(
         focus::display_name(focus_id.as_deref()),
@@ -130,6 +127,23 @@ pub async fn run(
     // Editor de entrada propio (crossterm): multilínea, Tab, pegados, historial.
     let mut ed = InputEditor::new(cwd.clone());
 
+    // Modo hack sin contexto previo: arranca preguntando el tema y ofreciendo
+    // el comité para generar un plan (F2 · comité de hack).
+    if mode == Mode::Hack && prior.is_none() {
+        println!(
+            "\n{}",
+            ui::accent("⚡ modo hack · ¿qué quieres construir? Cuéntame tu idea y la evalúo con un comité.")
+        );
+        println!(
+            "{}",
+            ui::dim("  o usa /comite <idea> para que 4 roles (juez, product, tech lead, escéptico) la analicen y te den un plan dpx:plan")
+        );
+        println!(
+            "{}",
+            ui::dim("  también puedes empezar a codear directo: dime qué archivo crear y voy a ello.")
+        );
+    }
+
     loop {
         // De vuelta en el prompt: la pestaña muestra dpx en reposo.
         ui::title_idle(&proj_label);
@@ -158,6 +172,17 @@ pub async fn run(
                 // no en handle_command (que es síncrono).
                 if single_line && input == "/compact" {
                     compact_now(&router, &mut history, &turns).await;
+                    continue;
+                }
+
+                // /comite (alias /brainstorm): lanza el comité de hack para
+                // evaluar una idea desde 4 roles y devolver un plan.
+                if single_line
+                    && let Some(idea) = input
+                        .strip_prefix("/comite ")
+                        .or_else(|| input.strip_prefix("/brainstorm "))
+                {
+                    run_comite_command(&cwd, idea, &skin, &store, &mut turns).await;
                     continue;
                 }
 
@@ -240,7 +265,7 @@ pub async fn run(
                                 router = new_router;
                                 mentor = m;
                                 brain = next;
-                                set_active_session(brain, mode);
+                                set_active_brain(brain);
                                 outcome = run_turn(
                                     &mentor,
                                     &mut history,
@@ -1121,9 +1146,9 @@ async fn run_tool_call(
             println!("\n{}", ui::dim(&format!("⚠ tool call inválida: {e}")));
             ToolOutcome::Done(format!("[ERROR: {e}]"))
         }
-        Ok(DpxCall::Read { path }) => {
+        Ok(DpxCall::Read { path, offset, limit }) => {
             ui::action_read(&path);
-            ToolOutcome::Done(match crate::fs::read_file(cwd, &path) {
+            ToolOutcome::Done(match crate::fs::read_file_range(cwd, &path, offset, limit) {
                 Ok(c) => c,
                 Err(e) => format!("[no pude leer `{path}`: {e}]"),
             })
@@ -1242,7 +1267,9 @@ async fn run_subagent(cwd: &Path, task: &str) -> String {
         return "[no pude lanzar el subagente: ningún cerebro tiene API key]".to_string();
     };
     let preamble = subagent_preamble(cwd, task);
-    let mentor = match ModelRouter::new(brain).mentor(&preamble, active_mode()) {
+    // Subagente barato: investigar no necesita el cerebro caro. DeepSeek usa
+    // flash sin thinking (12× más barato); Kimi/Qwen no tienen tier flash.
+    let mentor = match ModelRouter::new(brain).subagent_mentor(&preamble) {
         Ok(m) => m,
         Err(e) => return format!("[no pude lanzar el subagente: {e}]"),
     };
@@ -1336,9 +1363,9 @@ fn subagent_preamble(cwd: &Path, task: &str) -> String {
 /// rechaza con un mensaje (el subagente no tiene efectos secundarios).
 async fn subagent_tool(cwd: &Path, call: &rig_core::message::ToolCall) -> String {
     match tools::parse_call(&call.function.name, &call.function.arguments) {
-        Ok(DpxCall::Read { path }) => {
+        Ok(DpxCall::Read { path, offset, limit }) => {
             println!("  {}", ui::dim(&format!("↳ subagente lee {path}")));
-            match crate::fs::read_file(cwd, &path) {
+            match crate::fs::read_file_range(cwd, &path, offset, limit) {
                 Ok(c) => c,
                 Err(e) => format!("[no pude leer `{path}`: {e}]"),
             }
@@ -1359,6 +1386,74 @@ async fn subagent_tool(cwd: &Path, call: &rig_core::message::ToolCall) -> String
               limítate a investigar y devolver tu conclusión en texto.]"
             .to_string(),
     }
+}
+
+/// Lanza el comité de hack desde el REPL: banner, 4 roles + síntesis,
+/// y muestra el resultado (que incluye el bloque dpx:plan).
+async fn run_comite_command(
+    cwd: &Path,
+    idea: &str,
+    skin: &termimad::MadSkin,
+    store: &ProjectStore,
+    turns: &mut Vec<Turn>,
+) {
+    let idea = idea.trim();
+    if idea.is_empty() {
+        println!(
+            "{} {}",
+            ui::dim("uso:"),
+            ui::dim("/comite <descripción de la idea>")
+        );
+        return;
+    }
+    println!(
+        "\n{} {}",
+        ui::accent("⏺ comité de hack"),
+        ui::dim(&format!("· evaluando: {idea}"))
+    );
+    println!("{}", ui::dim("  consultando 4 roles, uno por uno…"));
+    let synthesis = run_committee(cwd, idea).await;
+    println!();
+    ui::print_markdown(skin, "📋 veredicto del comité", &synthesis);
+    let _ = store.checkpoint("user", &format!("/comite {idea}"));
+    turns.push(Turn {
+        role: "user",
+        text: format!("/comite {idea}"),
+    });
+    let _ = store.checkpoint("assistant", &synthesis);
+    turns.push(Turn {
+        role: "assistant",
+        text: synthesis,
+    });
+}
+
+/// Lanza el COMITÉ DE HACK: 4 subagentes secuenciales — juez, product,
+/// tech lead, usuario escéptico — cada uno evalúa la idea desde su rol.
+/// Luego un subagente de síntesis produce un veredicto + plan dpx:plan.
+/// Devuelve el texto de la síntesis (que incluye el bloque dpx:plan).
+async fn run_committee(cwd: &Path, idea: &str) -> String {
+    let roles = crate::focus::committee::roles();
+    let mut contributions: Vec<(String, String)> = Vec::new();
+
+    for role in &roles {
+        println!(
+            "{} {}· {}",
+            ui::accent("  comité"),
+            role.emoji,
+            ui::dim(role.label)
+        );
+        let task = crate::focus::committee::role_task(role, idea);
+        let contrib = run_subagent(cwd, &task).await;
+        contributions.push((role.emoji.to_string() + " " + role.label, contrib));
+    }
+
+    println!(
+        "{comite} 🧠· {synth}",
+        comite = ui::accent("  comité"),
+        synth = ui::dim("sintetizando aportes…")
+    );
+    let synthesis_task = crate::focus::committee::synthesis_prompt(&contributions, idea);
+    run_subagent(cwd, &synthesis_task).await
 }
 
 /// Ejecuta `git` con los args dados (cada uno SIN partir por espacios — clave
@@ -1741,9 +1836,9 @@ fn handle_command(
             ui::dim(&format!("comando desconocido: /{other} — escribe /help"))
         ),
     }
-    // Cualquier comando pudo cambiar cerebro/modo (/brain, /mode): refresca el
-    // estado global que usa un subagente para construirse.
-    set_active_session(*brain, *mode);
+    // Un comando pudo cambiar el cerebro (/brain): refresca el estado global que
+    // usa un subagente para construirse.
+    set_active_brain(*brain);
 }
 
 /// Estimación tosca de los tokens consumidos por el historial (≈ 4 chars/token).
@@ -3203,10 +3298,10 @@ mod tests {
 
     #[test]
     fn estado_de_sesion_round_trip() {
-        set_active_session(Brain::Kimi, Mode::Hack);
-        assert!(matches!(active_mode(), Mode::Hack));
-        set_active_session(Brain::Deepseek, Mode::Pro);
-        assert!(matches!(active_mode(), Mode::Pro));
+        set_active_brain(Brain::Kimi);
+        assert_eq!(active_brain_raw(), Brain::Kimi);
+        set_active_brain(Brain::Deepseek);
+        assert_eq!(active_brain_raw(), Brain::Deepseek);
     }
 
     // ----- compactación de tool-outputs viejos -----
@@ -3242,5 +3337,104 @@ mod tests {
         assert_eq!(prune_tool_outputs(&mut history), 0);
         // Nada se borró: el número de mensajes no cambia (sin huérfanos → sin 400).
         assert_eq!(history.len(), 11);
+    }
+
+    // ── subagente: solo-lectura ────────────────────────────────────────
+
+    /// Verifica que `subagent_tool` rechaza cualquier tool call que no sea
+    /// read_file, search_project o web_search (el subagente es solo-lectura).
+    #[tokio::test]
+    async fn subagent_rechaza_escritura() {
+        use rig_core::message::ToolCall;
+        use serde_json::json;
+        let call = ToolCall {
+            id: "t1".into(),
+            call_id: None,
+            signature: None,
+            additional_params: Default::default(),
+            function: rig_core::message::ToolFunction {
+                name: "write_file".into(),
+                arguments: json!({"path": "x.txt", "content": "evil"}),
+            },
+        };
+        let cwd = std::env::current_dir().unwrap();
+        let out = subagent_tool(&cwd, &call).await;
+        assert!(
+            out.contains("SOLO LECTURA"),
+            "el subagente debe rechazar write_file: {out}"
+        );
+    }
+
+    /// Verifica que `subagent_tool` también rechaza comandos `run_command`.
+    #[tokio::test]
+    async fn subagent_rechaza_run() {
+        use rig_core::message::ToolCall;
+        use serde_json::json;
+        let call = ToolCall {
+            id: "t2".into(),
+            call_id: None,
+            signature: None,
+            additional_params: Default::default(),
+            function: rig_core::message::ToolFunction {
+                name: "run_command".into(),
+                arguments: json!({"command": "rm -rf /"}),
+            },
+        };
+        let cwd = std::env::current_dir().unwrap();
+        let out = subagent_tool(&cwd, &call).await;
+        assert!(
+            out.contains("SOLO LECTURA"),
+            "el subagente debe rechazar run_command: {out}"
+        );
+    }
+
+    /// Verifica que `subagent_tool` SÍ acepta read_file.
+    #[tokio::test]
+    async fn subagent_acepta_read() {
+        use rig_core::message::ToolCall;
+        use serde_json::json;
+        let call = ToolCall {
+            id: "t3".into(),
+            call_id: None,
+            signature: None,
+            additional_params: Default::default(),
+            function: rig_core::message::ToolFunction {
+                name: "read_file".into(),
+                arguments: json!({"path": "Cargo.toml"}),
+            },
+        };
+        let cwd = std::env::current_dir().unwrap();
+        let out = subagent_tool(&cwd, &call).await;
+        assert!(
+            out.contains("[package]") || out.contains("name"),
+            "el subagente debe leer Cargo.toml: {out}"
+        );
+    }
+
+    /// Verifica que el consumo de un subagente se refleja en el ledger de /cost.
+    #[test]
+    fn subagent_consumo_se_suma_al_ledger() {
+        crate::token::reset();
+        let before = crate::token::totals();
+
+        crate::token::record(&Some(rig_core::completion::Usage {
+            input_tokens: 500,
+            output_tokens: 100,
+            total_tokens: 600,
+            cached_input_tokens: 200,
+            cache_creation_input_tokens: 0,
+            reasoning_tokens: 0,
+        }));
+
+        let (i, c, o) = crate::token::totals();
+        assert_eq!(i, 500);
+        assert_eq!(c, 200);
+        assert_eq!(o, 100);
+
+        let line = crate::token::turn_line(before).unwrap();
+        assert!(line.contains("500 in") && line.contains("100 out"), "turn_line: {line}");
+
+        let summary = crate::token::session_summary().unwrap();
+        assert!(summary.contains("500") && summary.contains("100"), "/cost summary: {summary}");
     }
 }

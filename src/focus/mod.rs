@@ -9,6 +9,7 @@
 //!
 //! Y, si existe, se le añade la **memoria del proyecto** de sesiones anteriores.
 
+pub mod committee;
 mod node;
 mod python;
 mod react;
@@ -19,7 +20,7 @@ use anyhow::{Result, bail};
 use clap::ValueEnum;
 
 /// Actitud del mentor durante la sesión.
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
 pub enum Mode {
     /// Metódico: arquitectura primero, decisiones explicadas, código robusto con tests.
     Pro,
@@ -346,10 +347,15 @@ modelo del mundo está mal en algo. Relee el archivo FRESCO, replantea el enfoqu
 el bloqueo al usuario.
 - Si un edit no encuentra su SEARCH, el error te muestra la zona REAL del archivo: copia de \
 ahí EXACTAMENTE (espacios, `\\` y escapes incluidos) y reintenta.
-- PROHIBIDO construir herramientas improvisadas (scripts Python/sed/PowerShell de \
-buscar-y-reemplazar) para esquivar tus propias herramientas: se saltan el diff y la \
-confirmación del usuario, y corrompen los archivos (codificación, BOM, finales de línea). \
-Si edit_file no te funciona, el problema es tu SEARCH, no la herramienta.
+- PROHIBIDO ABSOLUTAMENTE construir scripts improvisados (Python/sed/PowerShell/node) para \
+TOCAR archivos —editar, buscar-y-reemplazar— O PARA LEERLOS (nada de `python` para hacer \
+`tail`/contar líneas/ver el final de un archivo). Los de escritura corrompen archivos (BOM, \
+codificación, finales de línea) y se saltan el diff; los de lectura son innecesarios. \
+Herramientas para CADA caso: leer todo o un tramo → `read_file` (con `offset`/`limit` para el \
+final de un archivo grande; si la salida dice cuántas líneas faltan, vuelve a llamar con ese \
+offset); buscar texto → `search_project`; editar → `edit_file` (si falla, el problema es tu \
+SEARCH, no la herramienta: copia la zona real que te muestra el error). Si te ves escribiendo un \
+`.py`/`.ps1` para manipular el repo, PÁRATE: existe una tool nativa para eso.
 
 ## Reaccionar al mundo real
 - Un rechazo del usuario es INFORMACIÓN: pregunta el porqué antes de re-proponer lo mismo.

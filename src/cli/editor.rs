@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use termimad::crossterm::{
-    cursor::{MoveDown, MoveToColumn, MoveUp},
+    cursor::{MoveDown, MoveTo, MoveToColumn, MoveUp, position},
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     queue,
     style::Print,
@@ -427,8 +427,23 @@ impl<'a> Prompt<'a> {
         // +1 por la regla superior, +1 si hay indicador de filas ocultas arriba.
         let target_row = 1 + usize::from(start > 0) + (crow - start);
         queue!(out, MoveToColumn(0))?;
-        if self.cur_region_row > 0 {
-            queue!(out, MoveUp(self.cur_region_row as u16))?;
+        // Borrado anclado a la fila REAL del cursor: subir `cur_region_row` con
+        // un MoveUp RELATIVO se desincroniza cuando la región está al fondo de una
+        // pantalla llena y el repintado provoca scroll (el MoveUp se queda corto y
+        // la regla superior se queda huérfana → se apila un muro de `────` a lo
+        // largo de una sesión larga). Anclando a la fila absoluta del cursor el
+        // borrado es inmune al scroll. En Windows crossterm lee la posición de la
+        // API de consola (sin carreras con la entrada). Si la terminal no la da,
+        // caemos al MoveUp relativo de siempre.
+        match position() {
+            Ok((_col, cur_y)) => {
+                let top = cur_y.saturating_sub(self.cur_region_row as u16);
+                queue!(out, MoveTo(0, top))?;
+            }
+            Err(_) if self.cur_region_row > 0 => {
+                queue!(out, MoveUp(self.cur_region_row as u16))?;
+            }
+            Err(_) => {}
         }
         queue!(out, Clear(ClearType::FromCursorDown))?;
         for (i, l) in lines.iter().enumerate() {

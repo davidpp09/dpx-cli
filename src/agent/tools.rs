@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 /// Una llamada a herramienta ya parseada y validada.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DpxCall {
-    Read { path: String },
+    Read { path: String, offset: Option<usize>, limit: Option<usize> },
     Search { pattern: String },
     Write { path: String, content: String },
     Edit { path: String, search: String, replace: String },
@@ -66,8 +66,16 @@ fn native_definitions() -> Vec<ToolDefinition> {
         def(
             "read_file",
             "Lee un archivo del proyecto y te devuelve su contenido. Úsala siempre que \
-             necesites ver código existente: NUNCA le pidas al usuario que te pegue archivos.",
-            json!({ "path": path("Ruta relativa al archivo, p.ej. src/main/java/App.java") }),
+             necesites ver código existente: NUNCA le pidas al usuario que te pegue archivos NI \
+             escribas scripts (python/tail/etc.) para leer un archivo. Para archivos largos lee \
+             un RANGO con `offset` (línea inicial, 1-based) y `limit` (nº de líneas): si la \
+             salida dice cuántas líneas faltan, vuelve a llamar con el `offset` indicado para \
+             ver el resto (p.ej. el final del archivo).",
+            json!({
+                "path": path("Ruta relativa al archivo, p.ej. src/main/java/App.java"),
+                "offset": { "type": "integer", "description": "Opcional: línea inicial (1-based) para leer un rango de un archivo grande" },
+                "limit": { "type": "integer", "description": "Opcional: máximo de líneas a leer desde offset" },
+            }),
             &["path"],
         ),
         def(
@@ -188,7 +196,11 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
             .ok_or_else(|| format!("falta el argumento `{key}` (string) en la llamada a `{name}`"))
     };
     match name {
-        "read_file" => Ok(DpxCall::Read { path: arg("path")? }),
+        "read_file" => Ok(DpxCall::Read {
+            path: arg("path")?,
+            offset: args.get("offset").and_then(Value::as_u64).map(|v| v as usize),
+            limit: args.get("limit").and_then(Value::as_u64).map(|v| v as usize),
+        }),
         "search_project" => Ok(DpxCall::Search { pattern: arg("pattern")? }),
         "write_file" => Ok(DpxCall::Write { path: arg("path")?, content: arg("content")? }),
         "edit_file" => Ok(DpxCall::Edit {
@@ -241,7 +253,14 @@ mod tests {
     #[test]
     fn parse_call_valida_argumentos() {
         let ok = parse_call("read_file", &json!({ "path": "src/main.rs" }));
-        assert_eq!(ok, Ok(DpxCall::Read { path: "src/main.rs".into() }));
+        assert_eq!(ok, Ok(DpxCall::Read { path: "src/main.rs".into(), offset: None, limit: None }));
+
+        // Con rango (offset/limit) para archivos grandes.
+        let ranged = parse_call("read_file", &json!({ "path": "big.rs", "offset": 2501, "limit": 500 }));
+        assert_eq!(
+            ranged,
+            Ok(DpxCall::Read { path: "big.rs".into(), offset: Some(2501), limit: Some(500) })
+        );
 
         let edit = parse_call(
             "edit_file",

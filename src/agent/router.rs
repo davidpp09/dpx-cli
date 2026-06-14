@@ -414,6 +414,23 @@ impl ModelRouter {
         }
     }
 
+    /// Mentor barato para subagentes: investigar es tarea mecánica, no necesita
+    /// el cerebro caro. En DeepSeek usa `flash` sin thinking (12× más barato que
+    /// el `pro`); Kimi y Qwen no tienen tier barato → mismo modelo, documentado.
+    pub fn subagent_mentor(&self, preamble: &str) -> Result<Mentor> {
+        match self.brain {
+            Brain::Deepseek => build_deepseek(
+                DEEPSEEK_FLASH,
+                preamble,
+                0.2,
+                deepseek_no_thinking(),
+            ),
+            // Kimi y Qwen no tienen un tier "flash": el subagente usa el mismo
+            // modelo. Su consumo se suma igualmente al ledger de /cost.
+            other => other.build(preamble, 0.2, None),
+        }
+    }
+
     /// Resumen de cierre de sesión (un turno, baja temperatura). Tarea mecánica:
     /// en DeepSeek usamos `flash` SIN thinking (12x más barato), no el caro `pro`.
     pub async fn summarize(&self, preamble: &str, content: &str) -> Result<String> {

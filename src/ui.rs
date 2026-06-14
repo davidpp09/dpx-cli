@@ -784,6 +784,8 @@ pub fn print_help() {
         ("/undo", "deshace los cambios de archivos del último turno de dpx"),
         ("/clear", "reinicia la conversación (el mentor olvida esta sesión)"),
         ("/compact", "resume la conversación para liberar contexto (también automático)"),
+        ("/comite <idea>", "convoca al comité de hack (4 roles) a evaluar tu idea"),
+        ("/brainstorm <idea>", "alias de /comite · mismos 4 roles, mismo plan"),
         ("/context", "muestra la memoria guardada del proyecto"),
         ("/focus [id]", "cambia de enfoque (sin id: lista los disponibles)"),
         ("/mode [pro|hack]", "cambia la actitud del mentor"),

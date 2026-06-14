@@ -1423,25 +1423,59 @@ pub fn current_content(project_root: &Path, rel: &str) -> Option<String> {
     fs::read_to_string(target).ok()
 }
 
-/// Lee un archivo del proyecto (para referencias `@archivo`), con las mismas
-/// reglas de seguridad y un tope de líneas para no inundar el contexto. El tope
-/// es generoso a propósito: un archivo fuente que el modelo va a EDITAR debe
-/// verse entero (si no, propone ediciones sobre código que no leyó).
+/// Tope de líneas por lectura para no inundar el contexto. Generoso a propósito:
+/// un archivo que el modelo va a EDITAR debe verse entero.
+const READ_MAX_LINES: usize = 2500;
+
+/// Lee un archivo del proyecto (para referencias `@archivo` y el subagente),
+/// desde el principio y con el tope por defecto.
 pub fn read_file(project_root: &Path, rel: &str) -> Result<String> {
-    const MAX_LINES: usize = 2500;
+    read_file_range(project_root, rel, None, None)
+}
+
+/// Lee un archivo con soporte de RANGO: `offset` = línea inicial (1-based),
+/// `limit` = nº máximo de líneas. Para archivos más largos que el tope, en vez
+/// de cortar a ciegas le dice al modelo cuántas líneas faltan y con qué `offset`
+/// pedirlas — así puede leer el FINAL de un archivo grande con su propia
+/// herramienta (read_file), sin inventar scripts para hacer `tail`.
+pub fn read_file_range(
+    project_root: &Path,
+    rel: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<String> {
     let target = safe_target(project_root, rel)?;
     let data = fs::read_to_string(&target)
         .map_err(|e| anyhow!("no pude leer {}: {e}", target.display()))?;
 
-    let total = data.lines().count();
-    if total > MAX_LINES {
-        let head: String = data.lines().take(MAX_LINES).collect::<Vec<_>>().join("\n");
-        Ok(format!(
-            "{head}\n…[truncado: {total} líneas en total, mostradas {MAX_LINES}]"
-        ))
-    } else {
-        Ok(data)
+    let all: Vec<&str> = data.lines().collect();
+    let total = all.len();
+    let start = offset.unwrap_or(1).max(1); // 1-based
+    let limit = limit.unwrap_or(READ_MAX_LINES);
+
+    // Lectura por defecto de un archivo que cabe entero: devuelve el contenido
+    // EXACTO (preserva el salto final), como antes.
+    if start == 1 && total <= limit {
+        return Ok(data);
     }
+    if start > total {
+        return Ok(format!(
+            "[el archivo `{rel}` tiene {total} líneas; pediste desde la {start}, que no existe]"
+        ));
+    }
+
+    let start_idx = start - 1;
+    let end_idx = (start_idx + limit).min(total);
+    let slice = all[start_idx..end_idx].join("\n");
+    let mut out = format!("[`{rel}` líneas {start}–{end_idx} de {total}]\n{slice}");
+    if end_idx < total {
+        out.push_str(&format!(
+            "\n…[faltan {} líneas; para verlas vuelve a llamar a read_file con offset={}]",
+            total - end_idx,
+            end_idx + 1
+        ));
+    }
+    Ok(out)
 }
 
 /// Extrae el marcador `dpx:delete path=<ruta>`
@@ -1986,6 +2020,34 @@ impl Mentor for Config {}
         assert!(detect_build(&dir).unwrap().contains("-DskipTests"));
         assert!(detect_test(&dir).unwrap().contains("test"));
         assert!(!detect_test(&dir).unwrap().contains("-DskipTests"));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_file_range_lee_el_final_de_un_archivo_grande() {
+        let dir = std::env::temp_dir().join(format!("dpx-read-range-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        // Archivo de 3000 líneas: "linea N" en cada una.
+        let body: String = (1..=3000).map(|n| format!("linea {n}\n")).collect();
+        fs::write(dir.join("big.txt"), &body).unwrap();
+
+        // Lectura por defecto (sin rango): trunca al tope y dice cómo seguir.
+        let head = read_file_range(&dir, "big.txt", None, None).unwrap();
+        assert!(head.contains("linea 1\n"));
+        assert!(!head.contains("linea 3000"), "no debe llegar al final por defecto");
+        assert!(head.contains("offset="), "debe indicar con qué offset seguir");
+
+        // Lectura del FINAL con offset: lo que dpx necesitaba (en vez de un .py).
+        let tail = read_file_range(&dir, "big.txt", Some(2900), Some(500)).unwrap();
+        assert!(tail.contains("linea 2900"));
+        assert!(tail.contains("linea 3000"), "el final debe estar accesible por offset");
+        assert!(tail.contains("líneas 2900–3000 de 3000"));
+
+        // Archivo pequeño leído entero: contenido exacto, sin cabecera de rango.
+        fs::write(dir.join("small.txt"), "uno\ndos\n").unwrap();
+        let small = read_file_range(&dir, "small.txt", None, None).unwrap();
+        assert_eq!(small, "uno\ndos\n");
 
         fs::remove_dir_all(&dir).unwrap();
     }
