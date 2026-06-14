@@ -799,6 +799,8 @@ pub fn print_help() {
         ("/focus [id]", "cambia de enfoque (sin id: lista los disponibles)"),
         ("/mode [pro|hack|learn]", "actitud del mentor (learn 🎓 = tutor socrático)"),
         ("/progreso", "tu progreso de aprendizaje: nivel por tema y qué repasar"),
+        ("/temario", "el temario del stack y cuánto llevas (modo learn)"),
+        ("/quiz [tema]", "el tutor te interroga para fijar lo aprendido (retrieval)"),
         ("/brain [modelo]", "cerebro (dpx usa solo deepseek)"),
         ("/mentor", "persona mentor: enseña y te deja escribir"),
         ("/code", "persona code: agente autónomo que hace e itera"),

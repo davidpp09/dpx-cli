@@ -10,6 +10,7 @@
 //! Y, si existe, se le añade la **memoria del proyecto** de sesiones anteriores.
 
 pub mod committee;
+pub mod curriculum;
 mod dpx;
 mod node;
 mod python;
@@ -133,6 +134,12 @@ pub fn system_prompt(
     }
     s.push_str("\n\n");
     s.push_str(mode_addendum(mode));
+
+    // En modo aprender, el temario del stack (si lo hay) guía qué enseñar y en
+    // qué orden — el equivalente pedagógico del Focus Pack.
+    if mode == Mode::Learn {
+        s.push_str(&curriculum::prompt_section(focus_id));
+    }
 
     if let Some(p) = prior {
         let p = p.trim();
@@ -258,6 +265,7 @@ Corres dentro de `dpx`, un CLI con estos comandos (el usuario los escribe con `/
 `/help` (ayuda), `/clear` (reinicia la conversación), `/context` (muestra la memoria \
 guardada), `/focus <id>` (cambia de enfoque/stack), `/mode pro|hack|learn` (cambia tu actitud; \
 learn 🎓 = tutor socrático), `/progreso` (el progreso de aprendizaje del usuario), \
+`/temario` (el temario del stack y su avance), `/quiz` (te interroga para fijar lo aprendido), \
 `/mentor` y `/code` (cambia entre \
 enseñarte y hacerlo él), `/auto` (modo autónomo: aplica cambios y comandos seguros sin \
 preguntar), `/update` (recompila e instala dpx desde este repo) y `/salir`. Si el usuario \

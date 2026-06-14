@@ -157,6 +157,32 @@ pub async fn run(
                     continue;
                 }
 
+                // /quiz [tema]: el tutor te interroga (retrieval practice) sobre lo
+                // que ya viste. Es un turno normal con un prompt sintético, así que
+                // la conversación sigue (puedes responder y te da feedback).
+                if single_line && (input == "/quiz" || input.starts_with("/quiz ")) {
+                    let topic = input.strip_prefix("/quiz").unwrap_or("").trim();
+                    let prompt = build_quiz_prompt(&store, focus_id.as_deref(), topic);
+                    store.checkpoint("user", input)?;
+                    turns.push(Turn { role: "user", text: input.to_string() });
+                    ui::clear_cancel();
+                    let outcome = run_turn(
+                        &mentor, &mut history, &cwd, &skin,
+                        &mut |p| ed.confirm_line(p), &store, &prompt, auto,
+                    ).await;
+                    match outcome {
+                        TurnOutcome::Reply(full) => {
+                            store.checkpoint("assistant", &full)?;
+                            turns.push(Turn { role: "assistant", text: full });
+                        }
+                        TurnOutcome::Empty => {}
+                        TurnOutcome::ModelFailed(err) => {
+                            ui::panel("⚠ error del modelo", &ui::friendly_error(&err));
+                        }
+                    }
+                    continue;
+                }
+
                 if single_line && let Some(cmd) = input.strip_prefix('/') {
                     if matches!(cmd, "salir" | "exit" | "q") {
                         break;
@@ -1252,6 +1278,40 @@ async fn run_tool_call(
     }
 }
 
+/// Construye el prompt sintético de `/quiz`: instruye al tutor a hacer un repaso
+/// de recuperación (retrieval practice) sobre lo que el usuario ya vio. Si se da
+/// un tema, se centra en él; si no, usa las habilidades registradas; y si no hay
+/// ninguna, repasa lo básico del temario del stack.
+fn build_quiz_prompt(store: &ProjectStore, focus_id: Option<&str>, topic: &str) -> String {
+    let base = "Ponme a prueba con un QUIZ de repaso (retrieval practice): UNA pregunta a la \
+                vez, espera mi respuesta, y dame feedback corto antes de la siguiente. No me des \
+                las respuestas de entrada. Empieza ya con la primera pregunta.";
+    if !topic.is_empty() {
+        return format!("Hazme un quiz sobre «{topic}». {base}");
+    }
+    let skills = store.read_skills();
+    if !skills.is_empty() {
+        let temas: Vec<String> = skills
+            .iter()
+            .filter(|s| s.level != crate::skill::SkillLevel::Visto)
+            .chain(skills.iter())
+            .map(|s| s.topic.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        return format!(
+            "Hazme un quiz sobre estos temas que ya hemos trabajado: {}. {base}",
+            temas.join(", ")
+        );
+    }
+    let topics = crate::focus::curriculum::topics(focus_id);
+    if let Some(first) = topics.first() {
+        format!("Aún no hemos registrado temas. Hazme un quiz introductorio sobre «{}». {base}", first.name)
+    } else {
+        format!("Hazme un quiz sobre los fundamentos de lo que estoy aprendiendo. {base}")
+    }
+}
+
 /// Rondas máximas de un subagente: es para investigar, no para épicas. Acotado
 /// para que no se desboque (su contexto y coste corren por cuenta de la sesión).
 const SUBAGENT_MAX_ROUNDS: usize = 6;
@@ -1753,6 +1813,14 @@ fn handle_command(
         "progreso" | "progress" => {
             let skills = store.read_skills();
             println!("\n{}", crate::skill::render(&skills, &crate::skill::today()));
+        }
+
+        "temario" | "curriculum" => {
+            let skills = store.read_skills();
+            println!(
+                "\n{}",
+                crate::focus::curriculum::render(focus_id.as_deref(), &skills)
+            );
         }
 
         "focus" => match arg {
