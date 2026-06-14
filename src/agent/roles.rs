@@ -14,6 +14,9 @@
 pub enum AgentRole {
     /// Localiza código, mapea flujos, recopila contexto disperso. El default.
     Researcher,
+    /// Ante un cambio que pide el usuario, averigua DÓNDE y CÓMO se hace en el
+    /// código (archivos/funciones a tocar, orden, cabos a no olvidar).
+    Planner,
     /// Revisa un archivo o diff buscando bugs, casos borde y malas prácticas.
     Reviewer,
     /// Propone casos de test (camino feliz + bordes) para una función o módulo.
@@ -28,9 +31,10 @@ pub enum AgentRole {
 
 impl AgentRole {
     /// Todos los roles, en orden de uso típico.
-    pub fn all() -> [AgentRole; 6] {
+    pub fn all() -> [AgentRole; 7] {
         [
             AgentRole::Researcher,
+            AgentRole::Planner,
             AgentRole::Reviewer,
             AgentRole::TestDesigner,
             AgentRole::Debugger,
@@ -43,6 +47,7 @@ impl AgentRole {
     pub fn name(self) -> &'static str {
         match self {
             AgentRole::Researcher => "researcher",
+            AgentRole::Planner => "planner",
             AgentRole::Reviewer => "reviewer",
             AgentRole::TestDesigner => "test-designer",
             AgentRole::Debugger => "debugger",
@@ -55,6 +60,9 @@ impl AgentRole {
     /// default seguro (un subagente sin rol claro investiga).
     pub fn parse(s: Option<&str>) -> AgentRole {
         match s.map(|x| x.trim().to_ascii_lowercase()).as_deref() {
+            Some("planner") | Some("plan") | Some("scout") | Some("planificador") => {
+                AgentRole::Planner
+            }
             Some("reviewer") => AgentRole::Reviewer,
             Some("test-designer") | Some("test_designer") | Some("tester") => {
                 AgentRole::TestDesigner
@@ -70,6 +78,7 @@ impl AgentRole {
     pub fn emoji(self) -> &'static str {
         match self {
             AgentRole::Researcher => "🔎",
+            AgentRole::Planner => "🧭",
             AgentRole::Reviewer => "🔬",
             AgentRole::TestDesigner => "🧪",
             AgentRole::Debugger => "🐛",
@@ -82,6 +91,7 @@ impl AgentRole {
     pub fn label(self) -> &'static str {
         match self {
             AgentRole::Researcher => "investigador",
+            AgentRole::Planner => "planificador de cambios",
             AgentRole::Reviewer => "revisor de código",
             AgentRole::TestDesigner => "diseñador de tests",
             AgentRole::Debugger => "depurador",
@@ -96,6 +106,9 @@ impl AgentRole {
         match self {
             AgentRole::Researcher => {
                 "localiza código, mapea un flujo o recopila contexto disperso"
+            }
+            AgentRole::Planner => {
+                "averigua DÓNDE y CÓMO hacer un cambio que pides (archivos/funciones + orden)"
             }
             AgentRole::Reviewer => "revisa un archivo/diff: bugs, casos borde, malas prácticas",
             AgentRole::TestDesigner => "propone casos de test (feliz + bordes) para una función",
@@ -113,6 +126,15 @@ impl AgentRole {
             AgentRole::Researcher => "\
 Eres un SUBAGENTE INVESTIGADOR. Tu trabajo es localizar dónde se hace algo en el código, \
 mapear un flujo o recopilar contexto disperso, y devolver los hechos con rutas y fragmentos.",
+            AgentRole::Planner => "\
+Eres un SUBAGENTE PLANIFICADOR DE CAMBIOS. El usuario describió un cambio que quiere, a menudo \
+de forma INFORMAL y SIN decir en qué archivo va. Tu trabajo es averiguar, leyendo el código, \
+DÓNDE y CÓMO se hace: localiza con search_project y el mapa de símbolos los archivos y funciones \
+EXACTOS a tocar, el ORDEN de los cambios, y los puntos que se suelen olvidar (registrar un \
+comando/tool, su ayuda, los prompts, los tests). Devuelve un PLAN concreto y accionable, en \
+forma de pasos `archivo:función → qué cambiar`, para que el agente principal lo ejecute sin \
+adivinar. NO escribes ni editas: solo localizas y planificas. Si el objetivo es ambiguo, di qué \
+interpretaste y cuál es el punto a confirmar.",
             AgentRole::Reviewer => "\
 Eres un SUBAGENTE REVISOR DE CÓDIGO senior. Lee lo que se te indica y reporta, en orden de \
 gravedad, los problemas REALES: bugs de corrección, casos borde sin cubrir, condiciones de \
@@ -162,6 +184,8 @@ mod tests {
 
     #[test]
     fn parse_reconoce_roles_y_alias() {
+        assert_eq!(AgentRole::parse(Some("planner")), AgentRole::Planner);
+        assert_eq!(AgentRole::parse(Some("scout")), AgentRole::Planner);
         assert_eq!(AgentRole::parse(Some("reviewer")), AgentRole::Reviewer);
         assert_eq!(AgentRole::parse(Some("TEST-DESIGNER")), AgentRole::TestDesigner);
         assert_eq!(AgentRole::parse(Some("tester")), AgentRole::TestDesigner);

@@ -177,17 +177,59 @@ fn is_absolute_path_token(token: &str) -> bool {
         && bytes[1] == b':'
         && (bytes[2] == b'\\' || bytes[2] == b'/');
     let is_unc = token.starts_with("\\\\");
+    // Ruta absoluta Unix: empieza con '/' y o bien tiene otro '/'
+    // (multinivel) o es uno de los directorios raíz estándar de un solo
+    // nivel. Así evitamos que flags de Windows (/q, /s) den falsos positivos.
     let is_unix_root = token.starts_with('/')
-        && ["/etc", "/usr", "/bin", "/home", "/var", "/tmp", "/opt", "/root"]
-            .iter()
-            .any(|r| token.starts_with(r));
-    is_drive || is_unc || is_unix_root
+        && (token[1..].contains('/')
+            || ["/etc", "/usr", "/bin", "/home", "/var", "/tmp", "/opt", "/root",
+                "/sbin", "/boot", "/dev", "/mnt", "/proc", "/sys", "/run"]
+                .iter()
+                .any(|r| token.starts_with(r)));
+    // Expansiones de home de Unix
+    let is_home = token.starts_with('~') || token.starts_with("$HOME");
+    is_drive || is_unc || is_unix_root || is_home
 }
 
 /// Divide una cadena en segmentos encadenados (`&&`, `||`, `;`). El `|` de
 /// pipe NO divide: el chequeo de pipe-a-intérprete mira la cadena completa.
+/// Respeta comillas simples y dobles: los separadores dentro de comillas no
+/// parten el segmento.
 fn split_segments(cmd: &str) -> Vec<&str> {
-    cmd.split("&&").flat_map(|s| s.split("||")).flat_map(|s| s.split(';')).collect()
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < chars.len() {
+        match chars[i] {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '&' if !in_single && !in_double && i + 1 < chars.len() && chars[i + 1] == '&' => {
+                segments.push(&cmd[start..i]);
+                i += 2;
+                start = i;
+                continue;
+            }
+            '|' if !in_single && !in_double && i + 1 < chars.len() && chars[i + 1] == '|' => {
+                segments.push(&cmd[start..i]);
+                i += 2;
+                start = i;
+                continue;
+            }
+            ';' if !in_single && !in_double => {
+                segments.push(&cmd[start..i]);
+                i += 1;
+                start = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    segments.push(&cmd[start..]);
+    segments
 }
 
 fn max_risk(a: CommandRisk, b: CommandRisk) -> CommandRisk {
@@ -286,5 +328,62 @@ mod tests {
         // Dentro del proyecto y flags /x no cuentan.
         assert!(outside_project_paths("del /q C:\\Users\\Omar\\Desktop\\proyecto\\a.txt", &cwd).is_empty());
         assert!(outside_project_paths("mvn -q compile", &cwd).is_empty());
+    }
+
+    // --- Tests específicos para los 3 bugs críticos ---
+
+    /// Bug 1: is_absolute_path_token debe reconocer cualquier ruta Unix,
+    /// no solo un puñado de prefijos.
+    #[test]
+    fn ruta_absoluta_unix_cualquiera() {
+        assert!(is_absolute_path_token("/usr/local/bin/cmake"));
+        assert!(is_absolute_path_token("/opt/foo/bar"));
+        assert!(is_absolute_path_token("/home/omar/.config"));
+        assert!(is_absolute_path_token("/tmp/x"));
+        assert!(is_absolute_path_token("/mnt/data/backup"));
+        assert!(is_absolute_path_token("/srv/www/html"));
+        assert!(is_absolute_path_token("/var/log/syslog"));
+        // Pero flags de Windows (/s, /q) no deben contar.
+        assert!(!is_absolute_path_token("/s"));
+        assert!(!is_absolute_path_token("/q"));
+        assert!(!is_absolute_path_token("/f"));
+        assert!(!is_absolute_path_token("/r"));
+    }
+
+    /// Bug 2: outside_project_paths debe detectar rutas con ~ y $HOME.
+    #[test]
+    fn rutas_home_se_detectan() {
+        let cwd = PathBuf::from("/home/omar/proyecto");
+        let fuera = outside_project_paths("cp ~/secreto.txt .", &cwd);
+        assert_eq!(fuera, vec!["~/secreto.txt"]);
+        let fuera2 = outside_project_paths("cat $HOME/.ssh/id_rsa", &cwd);
+        assert_eq!(fuera2, vec!["$HOME/.ssh/id_rsa"]);
+    }
+
+    /// Bug 3: split_segments respeta comillas (no parte dentro de comillas).
+    #[test]
+    fn split_segments_ignora_comillas() {
+        // && dentro de comillas no cuenta como separador
+        let segs = split_segments("echo \"hola && adios\"");
+        assert_eq!(segs, vec!["echo \"hola && adios\""]);
+
+        // ; dentro de comillas no cuenta
+        let segs = split_segments("echo 'a;b'");
+        assert_eq!(segs, vec!["echo 'a;b'"]);
+
+        // Fuera de comillas sí debe separar
+        let segs = split_segments("cargo build && rm -rf target");
+        assert_eq!(segs, vec!["cargo build ", " rm -rf target"]);
+
+        let segs = split_segments("echo a; echo b");
+        assert_eq!(segs, vec!["echo a", " echo b"]);
+
+        // Mezcla: && dentro de comillas NO parte, pero fuera SÍ
+        let segs = split_segments("echo \"foo&&bar\" && rm x");
+        assert_eq!(segs, vec!["echo \"foo&&bar\" ", " rm x"]);
+
+        // Sin separadores: un solo segmento
+        let segs = split_segments("cargo check");
+        assert_eq!(segs, vec!["cargo check"]);
     }
 }

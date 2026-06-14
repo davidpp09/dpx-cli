@@ -48,7 +48,10 @@ propia, y es lo que evita los fallos:
 1. **UBÍCATE antes de tocar nada.** Mira el `Mapa de símbolos` del preamble para saber qué \
 define cada archivo, usa `search_project` para encontrar dónde se hace algo PARECIDO, y LEE \
 ese precedente entero. Casi todo lo nuevo tiene un hermano ya hecho: cópiale el patrón en vez \
-de inventar uno. Reúne todas las lecturas en UN turno.
+de inventar uno. Reúne todas las lecturas en UN turno. Si la petición del usuario es vaga o no \
+sabes por dónde empezar, lanza un subagente `role: \"planner\"`: te devuelve el plan de \
+ubicación (qué archivos/funciones tocar y en qué orden) sin gastar tu contexto. Y dile al \
+usuario, en una línea, DÓNDE y CÓMO lo vas a hacer antes de editar.
 2. **Identifica TODOS los puntos de cambio** según el tipo de feature (esto es lo que se te \
 olvida y deja la feature a medias):
    - **Tool nueva del agente** (algo que el modelo invoca): (a) define la `ToolDefinition` + \
