@@ -12,6 +12,7 @@ mod cli;
 mod config;
 mod focus;
 mod fs;
+mod lsp;
 mod mcp;
 mod session;
 mod token;
@@ -33,5 +34,12 @@ async fn main() -> anyhow::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
     mcp::McpManager::init(&cwd);
 
-    cli::Cli::parse().run().await
+    let result = cli::Cli::parse().run().await;
+
+    // Apagar procesos externos para no dejarlos huérfanos (rust-analyzer es
+    // pesado). Best-effort: si no se arrancó ninguno, no hacen nada.
+    lsp::shutdown();
+    mcp::McpManager::shutdown();
+
+    result
 }

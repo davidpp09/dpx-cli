@@ -9,6 +9,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use rig_core::completion::Message;
+use rig_core::completion::message::{ToolResultContent, UserContent};
 
 use super::editor::{InputEditor, ReadResult};
 use crate::agent::tools::{self, DpxCall};
@@ -17,6 +18,47 @@ use crate::cli::AutoMode;
 use crate::focus::{self, Mode, Persona};
 use crate::session::{self, ProjectStore, Turn};
 use crate::ui;
+
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// Cerebro y modo ACTIVOS de la sesión, guardados como globales para que un
+/// subagente (que se lanza desde el fondo de una tool call) pueda construirse
+/// con el mismo cerebro sin tener que enhebrar `Brain`/`Mode` por todo el hot
+/// path de `run_turn`. Mismo patrón que los globales de `token`/`checkpoint`/
+/// `ui::CANCEL`. Se actualizan al arrancar la sesión y en cada cambio de
+/// cerebro/modo (incluido el fallback automático).
+static ACTIVE_BRAIN: AtomicU8 = AtomicU8::new(0);
+static ACTIVE_MODE: AtomicU8 = AtomicU8::new(0);
+
+/// Registra el cerebro y el modo activos para que los lea un subagente.
+fn set_active_session(brain: Brain, mode: Mode) {
+    let b = match brain {
+        Brain::Deepseek => 0,
+        Brain::Kimi => 1,
+        Brain::Qwen => 2,
+    };
+    ACTIVE_BRAIN.store(b, Ordering::Relaxed);
+    ACTIVE_MODE.store(matches!(mode, Mode::Hack) as u8, Ordering::Relaxed);
+}
+
+/// El cerebro con el que lanzar un subagente: el activo si tiene API key, y si
+/// no, el primero disponible (el subagente investiga; necesita un cerebro vivo).
+fn subagent_brain() -> Option<Brain> {
+    let active = match ACTIVE_BRAIN.load(Ordering::Relaxed) {
+        1 => Brain::Kimi,
+        2 => Brain::Qwen,
+        _ => Brain::Deepseek,
+    };
+    if active.has_key() {
+        return Some(active);
+    }
+    Brain::all().into_iter().find(|b| b.has_key())
+}
+
+/// El modo activo de la sesión (para construir el subagente con la misma actitud).
+fn active_mode() -> Mode {
+    if ACTIVE_MODE.load(Ordering::Relaxed) == 1 { Mode::Hack } else { Mode::Pro }
+}
 
 pub async fn run(
     focus: Option<String>,
@@ -53,6 +95,7 @@ pub async fn run(
     let mut auto = auto;
     let mut router = ModelRouter::new(brain);
     let mut mentor = build_mentor(&router, focus_id.as_deref(), mode, persona, prior.as_deref())?;
+    set_active_session(brain, mode);
 
     ui::welcome(
         focus::display_name(focus_id.as_deref()),
@@ -197,6 +240,7 @@ pub async fn run(
                                 router = new_router;
                                 mentor = m;
                                 brain = next;
+                                set_active_session(brain, mode);
                                 outcome = run_turn(
                                     &mentor,
                                     &mut history,
@@ -446,6 +490,51 @@ fn rebuild_history(history: &mut Vec<Message>, summary: &str) {
     history.extend(recent);
 }
 
+/// Tamaño (en chars) a partir del cual el cuerpo de un tool result VIEJO se
+/// considera voluminoso y se elide. Por debajo no compensa: el stub pesaría casi
+/// lo mismo que el contenido.
+const TOOL_OUTPUT_ELIDE_OVER: usize = 1200;
+
+/// Cantidad de mensajes finales que NUNCA se tocan al elidir: los últimos tool
+/// results suelen ser justo los que el modelo está usando para la ronda actual.
+const KEEP_RECENT_TOOL_OUTPUTS: usize = 6;
+
+/// Marca con la que empieza un stub de elisión (para no volver a elidir lo ya
+/// elidido en turnos posteriores → tras la primera pasada, el prefijo del
+/// historial se reestabiliza y el caché de contexto vuelve a pegar).
+const ELIDED_PREFIX: &str = "[salida elidida";
+
+/// Compactación LIGERA: elide el cuerpo de los tool results viejos y voluminosos
+/// (archivos leídos / salidas de comandos de rondas anteriores que el modelo ya
+/// no necesita enteros), dejando un stub corto. CLAVE: no borra mensajes ni
+/// cambia ids → el emparejamiento tool_call/tool_result queda intacto (los
+/// huérfanos son justo lo que dispara los 400 de las APIs). Solo toca tool
+/// results de TEXTO largos que NO estén entre los últimos
+/// [`KEEP_RECENT_TOOL_OUTPUTS`] mensajes. Devuelve cuántos elidió.
+fn prune_tool_outputs(history: &mut [Message]) -> usize {
+    let cutoff = history.len().saturating_sub(KEEP_RECENT_TOOL_OUTPUTS);
+    let mut elided = 0;
+    for msg in history.iter_mut().take(cutoff) {
+        let Message::User { content } = msg else { continue };
+        for uc in content.iter_mut() {
+            let UserContent::ToolResult(tr) = uc else { continue };
+            for trc in tr.content.iter_mut() {
+                let ToolResultContent::Text(t) = trc else { continue };
+                if t.text.len() > TOOL_OUTPUT_ELIDE_OVER && !t.text.starts_with(ELIDED_PREFIX) {
+                    let n = t.text.chars().count();
+                    t.text = format!(
+                        "{ELIDED_PREFIX} para ahorrar contexto: ~{n} caracteres de una ronda \
+                         anterior. Si necesitas ese contenido otra vez, vuelve a leer el archivo \
+                         o re-ejecuta la acción.]"
+                    );
+                    elided += 1;
+                }
+            }
+        }
+    }
+    elided
+}
+
 /// Se resuelve cuando el usuario pide cancelar (Ctrl-C fuera del prompt).
 /// Para correr en `tokio::select!` contra la espera del modelo.
 async fn wait_for_cancel() {
@@ -518,6 +607,19 @@ async fn run_turn(
     // en otra ronda, su contenido ya está en el historial → no lo re-mandamos
     // (ahorro de tokens en loops agénticos que releen lo mismo).
     let mut read_paths_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Compactación ligera al empezar el turno: elide el cuerpo de los tool
+    // results viejos y voluminosos de turnos anteriores (su contenido ya cumplió
+    // su función) para no arrastrar archivos enteros ronda tras ronda. Conserva
+    // ids/estructura → emparejamiento tool intacto. Una vez por turno: acota el
+    // trasiego del caché de contexto (cada elisión rompe el prefijo una sola vez).
+    let pruned = prune_tool_outputs(history);
+    if pruned > 0 {
+        println!(
+            "{}",
+            ui::dim(&format!("  ↯ {pruned} salida(s) de herramienta antiguas elididas · ahorro de contexto"))
+        );
+    }
 
     loop {
         round += 1;
@@ -1037,6 +1139,20 @@ async fn run_tool_call(
                 Err(e) => format!("[web_search falló: {e}]"),
             })
         }
+        Ok(DpxCall::Spawn { task }) => ToolOutcome::Done(run_subagent(cwd, &task).await),
+        Ok(DpxCall::LspDiagnostics { path }) => {
+            println!("{}", ui::accent(&format!("  ⚙ language server: {path}")));
+            // El cliente LSP bloquea (espera diagnósticos con timeout): lo sacamos
+            // del hilo async para no congelar el runtime.
+            let cwd2 = cwd.to_path_buf();
+            let p = path.clone();
+            let out = match tokio::task::spawn_blocking(move || crate::lsp::diagnostics(&cwd2, &p)).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => format!("[lsp_diagnostics: {e}]"),
+                Err(e) => format!("[lsp_diagnostics se interrumpió: {e}]"),
+            };
+            ToolOutcome::Done(out)
+        }
         Ok(DpxCall::Write { path, content }) => {
             let w = crate::fs::FileWrite { path, content };
             let report = process_writes(cwd, std::slice::from_ref(&w), ask, auto);
@@ -1107,6 +1223,141 @@ async fn run_tool_call(
                 Err(e) => ToolOutcome::Done(format!("[error MCP {name}: {e}]")),
             }
         },
+    }
+}
+
+/// Rondas máximas de un subagente: es para investigar, no para épicas. Acotado
+/// para que no se desboque (su contexto y coste corren por cuenta de la sesión).
+const SUBAGENT_MAX_ROUNDS: usize = 6;
+
+/// Lanza un SUBAGENTE de investigación AISLADO: su propio historial y contexto,
+/// con las herramientas de SOLO LECTURA (read_file / search_project / web_search).
+/// Hace la tarea acotada y devuelve SOLO su conclusión al agente principal — el
+/// grueso de archivos que leyó NO contamina el contexto del padre (menos tokens,
+/// más foco). No puede escribir, ejecutar ni commitear (sin efectos secundarios),
+/// así que no necesita confirmaciones ni checkpoint. El consumo de tokens del
+/// subagente se contabiliza en el mismo ledger de la sesión (`/cost` lo refleja).
+async fn run_subagent(cwd: &Path, task: &str) -> String {
+    let Some(brain) = subagent_brain() else {
+        return "[no pude lanzar el subagente: ningún cerebro tiene API key]".to_string();
+    };
+    let preamble = subagent_preamble(cwd, task);
+    let mentor = match ModelRouter::new(brain).mentor(&preamble, active_mode()) {
+        Ok(m) => m,
+        Err(e) => return format!("[no pude lanzar el subagente: {e}]"),
+    };
+
+    println!(
+        "\n{} {}",
+        ui::accent("⏺ subagente lanzado"),
+        ui::dim(&truncate_log(task, 80))
+    );
+
+    let mut history: Vec<Message> = Vec::new();
+    let mut to_send = task.to_string();
+    let mut conclusion = String::new();
+
+    for round in 1..=SUBAGENT_MAX_ROUNDS {
+        let spinner = ui::Spinner::start("subagente investigando…");
+        let mut sink = |_: &str| {};
+        let reply = mentor.chat_stream(&to_send, &mut history, &mut sink).await;
+        spinner.stop();
+
+        let ChatReply { text, calls, usage } = match reply {
+            Ok(r) => r,
+            Err(e) => {
+                let note = format!("[el subagente falló a mitad: {}]", ui::friendly_error(&e.to_string()));
+                if conclusion.trim().is_empty() {
+                    return note;
+                }
+                conclusion.push_str(&format!("\n{note}"));
+                break;
+            }
+        };
+        crate::token::record(&usage);
+        if !text.trim().is_empty() {
+            conclusion = text.clone(); // la última narración es su conclusión
+        }
+        // Sin más herramientas: el subagente terminó y dio su respuesta.
+        if calls.is_empty() {
+            break;
+        }
+        // Atender SOLO lectura; cualquier intento de mutar se rechaza con un
+        // tool result que le recuerda su naturaleza (sin romper el protocolo).
+        for call in &calls {
+            let out = subagent_tool(cwd, call).await;
+            history.push(Message::tool_result(call.id.clone(), out));
+        }
+        // Empujarlo a cerrar conforme se acerca al tope de rondas.
+        to_send = if round + 1 >= SUBAGENT_MAX_ROUNDS {
+            "Te quedan pocas rondas: con lo que ya sabes, da AHORA tu conclusión en texto, \
+             sin pedir más herramientas.".to_string()
+        } else {
+            "Continúa según los resultados; cuando tengas la respuesta, dala en texto plano \
+             (será lo único que reciba el agente principal), sin pedir más herramientas."
+                .to_string()
+        };
+    }
+
+    println!("{}", ui::dim("⎿ subagente terminó"));
+
+    if conclusion.trim().is_empty() {
+        "[el subagente no produjo una conclusión]".to_string()
+    } else {
+        conclusion
+    }
+}
+
+/// System prompt del subagente: identidad de investigador aislado de solo
+/// lectura + árbol del proyecto + la tarea concreta.
+fn subagent_preamble(cwd: &Path, task: &str) -> String {
+    let mut p = String::from(
+        "Eres un SUBAGENTE de investigación de dpx, lanzado por el agente principal para una \
+         tarea ACOTADA. Trabajas en AISLAMIENTO: tu contexto NO se comparte con el agente \
+         principal, así que tu respuesta final debe ser AUTOSUFICIENTE y CONCISA.\n\n\
+         REGLAS:\n\
+         - Eres de SOLO LECTURA: solo puedes usar read_file, search_project y web_search. NO \
+           puedes escribir, editar, borrar, ejecutar comandos, commitear ni lanzar otros \
+           subagentes.\n\
+         - Investiga lo justo y NADA más; no te desvíes de la tarea.\n\
+         - Cuando tengas la respuesta, dala en TEXTO PLANO sin pedir más herramientas: será lo \
+           ÚNICO que reciba el agente principal.\n\
+         - Sé directo: hechos, rutas de archivo y fragmentos relevantes con su ubicación; nada \
+           de relleno ni cortesías.\n\n\
+         # Árbol del proyecto\n```\n",
+    );
+    p.push_str(&crate::fs::project_tree(cwd));
+    p.push_str("```\n\n# Tu tarea\n");
+    p.push_str(task);
+    p
+}
+
+/// Ejecuta una tool call DE UN SUBAGENTE: solo lectura. Cualquier otra cosa se
+/// rechaza con un mensaje (el subagente no tiene efectos secundarios).
+async fn subagent_tool(cwd: &Path, call: &rig_core::message::ToolCall) -> String {
+    match tools::parse_call(&call.function.name, &call.function.arguments) {
+        Ok(DpxCall::Read { path }) => {
+            println!("  {}", ui::dim(&format!("↳ subagente lee {path}")));
+            match crate::fs::read_file(cwd, &path) {
+                Ok(c) => c,
+                Err(e) => format!("[no pude leer `{path}`: {e}]"),
+            }
+        }
+        Ok(DpxCall::Search { pattern }) => {
+            println!("  {}", ui::dim(&format!("↳ subagente busca {pattern}")));
+            crate::fs::search_in_project(cwd, &pattern)
+        }
+        Ok(DpxCall::WebSearch { query }) => {
+            println!("  {}", ui::dim(&format!("↳ subagente busca en la web: {query}")));
+            match crate::agent::search::web_search(&query).await {
+                Ok(r) => r,
+                Err(e) => format!("[web_search falló: {e}]"),
+            }
+        }
+        _ => "[subagente de SOLO LECTURA: solo puedes usar read_file, search_project y \
+              web_search. No escribas, ejecutes, commitees ni lances subagentes aquí; \
+              limítate a investigar y devolver tu conclusión en texto.]"
+            .to_string(),
     }
 }
 
@@ -1490,6 +1741,9 @@ fn handle_command(
             ui::dim(&format!("comando desconocido: /{other} — escribe /help"))
         ),
     }
+    // Cualquier comando pudo cambiar cerebro/modo (/brain, /mode): refresca el
+    // estado global que usa un subagente para construirse.
+    set_active_session(*brain, *mode);
 }
 
 /// Estimación tosca de los tokens consumidos por el historial (≈ 4 chars/token).
@@ -2912,5 +3166,81 @@ mod tests {
         let (_, history) = fake_turn(&fake, &dir, "s").await;
         let serial = serde_json::to_string(&history).unwrap();
         assert!(serial.contains("desconocida"));
+    }
+
+    // ----- subagentes (spawn_agent) -----
+
+    #[tokio::test]
+    async fn subagente_lee_archivos() {
+        let dir = tmp("sub-read");
+        std::fs::write(dir.join("notas.txt"), "DATO_SUB").unwrap();
+        let call = test_call("s1", "read_file", serde_json::json!({ "path": "notas.txt" }));
+        let out = subagent_tool(&dir, &call).await;
+        assert!(out.contains("DATO_SUB"), "el subagente debe poder leer: {out}");
+    }
+
+    #[tokio::test]
+    async fn subagente_es_solo_lectura() {
+        let dir = tmp("sub-ro");
+        // Un write a través del subagente NO escribe y devuelve la negativa.
+        let w = test_call(
+            "s1",
+            "write_file",
+            serde_json::json!({ "path": "no.txt", "content": "x" }),
+        );
+        let out = subagent_tool(&dir, &w).await;
+        assert!(!dir.join("no.txt").exists(), "el subagente no debe escribir");
+        assert!(out.contains("SOLO LECTURA"), "debe rechazar con su naturaleza: {out}");
+
+        // Tampoco puede ejecutar comandos…
+        let r = test_call("s2", "run_command", serde_json::json!({ "command": "echo hola" }));
+        assert!(subagent_tool(&dir, &r).await.contains("SOLO LECTURA"));
+
+        // …ni anidar subagentes (sin recursión).
+        let n = test_call("s3", "spawn_agent", serde_json::json!({ "task": "otra cosa" }));
+        assert!(subagent_tool(&dir, &n).await.contains("SOLO LECTURA"));
+    }
+
+    #[test]
+    fn estado_de_sesion_round_trip() {
+        set_active_session(Brain::Kimi, Mode::Hack);
+        assert!(matches!(active_mode(), Mode::Hack));
+        set_active_session(Brain::Deepseek, Mode::Pro);
+        assert!(matches!(active_mode(), Mode::Pro));
+    }
+
+    // ----- compactación de tool-outputs viejos -----
+
+    #[test]
+    fn elide_tool_outputs_viejos_conserva_pairing_y_recientes() {
+        let big = "X".repeat(5000);
+        let mut history = vec![
+            Message::user("hola"),
+            Message::assistant("ok"),
+            Message::tool_result("c1", big.clone()), // viejo + gordo → elidir
+            Message::tool_result("c2", "corto"),     // viejo pero pequeño → intacto
+        ];
+        // 6 mensajes recientes que empujan lo anterior a la zona "vieja".
+        for i in 0..6 {
+            history.push(Message::user(format!("reciente {i}")));
+        }
+        // Un tool result reciente y gordo: NO debe elidirse (está en la cola).
+        let recent_big = "Y".repeat(5000);
+        history.push(Message::tool_result("c9", recent_big.clone()));
+
+        let n = prune_tool_outputs(&mut history);
+        assert_eq!(n, 1, "solo el tool result viejo y gordo se elide");
+
+        let serial = serde_json::to_string(&history).unwrap();
+        assert!(!serial.contains(&big), "el viejo gordo debe quedar elidido");
+        assert!(serial.contains("c1"), "el id se conserva → emparejamiento tool intacto");
+        assert!(serial.contains("salida elidida"));
+        assert!(serial.contains("corto"), "el viejo pequeño queda intacto");
+        assert!(serial.contains(&recent_big), "el tool result reciente NO se toca");
+
+        // Idempotente: una segunda pasada no re-elide (prefijo de historial estable).
+        assert_eq!(prune_tool_outputs(&mut history), 0);
+        // Nada se borró: el número de mensajes no cambia (sin huérfanos → sin 400).
+        assert_eq!(history.len(), 11);
     }
 }

@@ -19,6 +19,11 @@ pub enum DpxCall {
     Delete { path: String },
     Run { command: String },
     WebSearch { query: String },
+    /// Lanza un subagente de investigación aislado (solo lectura) para una tarea
+    /// acotada; solo su conclusión vuelve al agente principal (ahorra contexto).
+    Spawn { task: String },
+    /// Diagnósticos REALES de un archivo vía language server (errores/warnings).
+    LspDiagnostics { path: String },
     GitStatus,
     GitDiff { path: Option<String> },
     GitLog { n: Option<usize> },
@@ -28,7 +33,7 @@ pub enum DpxCall {
 }
 
 /// Las definiciones que se anuncian al modelo en cada petición.
-/// Fusiona las 11 tools nativas con las tools MCP cacheadas (si las hay).
+/// Fusiona las 13 tools nativas con las tools MCP cacheadas (si las hay).
 pub fn definitions() -> Vec<ToolDefinition> {
     let mut defs = native_definitions();
     for tool in crate::mcp::McpManager::cached_tools() {
@@ -41,7 +46,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
     defs
 }
 
-/// Solo las 11 definiciones nativas, sin MCP.
+/// Solo las 13 definiciones nativas, sin MCP.
 fn native_definitions() -> Vec<ToolDefinition> {
     fn def(name: &str, description: &str, props: Value, required: &[&str]) -> ToolDefinition {
         ToolDefinition {
@@ -119,6 +124,29 @@ fn native_definitions() -> Vec<ToolDefinition> {
             &["query"],
         ),
         def(
+            "spawn_agent",
+            "Lanza un SUBAGENTE de investigación AISLADO para una tarea de lectura acotada: \
+             explorar el código, localizar dónde se hace algo, recopilar contexto de varios \
+             archivos o investigar en la web. El subagente tiene su PROPIO contexto y solo te \
+             devuelve su conclusión — úsalo para no llenar TU contexto con archivos largos \
+             cuando solo necesitas el resumen. Es de SOLO LECTURA: no puede escribir, editar, \
+             ejecutar ni commitear (para eso usa tus propias herramientas). Dale una tarea \
+             clara y autosuficiente (no comparte tu conversación).",
+            json!({ "task": { "type": "string", "description": "La tarea de investigación, específica y autosuficiente, p.ej. 'Localiza dónde se valida el token JWT y resume el flujo'" } }),
+            &["task"],
+        ),
+        def(
+            "lsp_diagnostics",
+            "Devuelve los diagnósticos REALES (errores y warnings, con línea y columna) de un \
+             archivo según su language server (rust-analyzer, typescript-language-server, \
+             pyright, gopls). Es grounding de calidad de compilador SIN compilar el proyecto \
+             entero: úsala para verificar puntualmente un archivo que editaste o para ubicar un \
+             error con precisión. Si el language server no está instalado, te lo dice (no falla \
+             la tarea). Soporta .rs, .ts/.tsx, .js/.jsx, .py y .go.",
+            json!({ "path": path("Ruta relativa al archivo a diagnosticar, p.ej. src/main.rs") }),
+            &["path"],
+        ),
+        def(
             "git_status",
             "Muestra el estado de git: archivos modificados, staged y untracked. Solo lectura, \
              sin confirmación.",
@@ -171,6 +199,8 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
         "delete_file" => Ok(DpxCall::Delete { path: arg("path")? }),
         "run_command" => Ok(DpxCall::Run { command: arg("command")? }),
         "web_search" => Ok(DpxCall::WebSearch { query: arg("query")? }),
+        "spawn_agent" => Ok(DpxCall::Spawn { task: arg("task")? }),
+        "lsp_diagnostics" => Ok(DpxCall::LspDiagnostics { path: arg("path")? }),
         "git_status" => Ok(DpxCall::GitStatus),
         "git_diff" => {
             let path = args.get("path").and_then(Value::as_str).map(str::to_string);
@@ -187,8 +217,8 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
         }),
         other => Err(format!(
             "herramienta desconocida: `{other}`. Las disponibles son: read_file, search_project, \
-             write_file, edit_file, delete_file, run_command, web_search, git_status, git_diff, \
-             git_log, git_commit."
+             write_file, edit_file, delete_file, run_command, web_search, spawn_agent, \
+             lsp_diagnostics, git_status, git_diff, git_log, git_commit."
         )),
     }
 }
@@ -200,7 +230,7 @@ mod tests {
     #[test]
     fn definiciones_completas_y_con_schema() {
         let defs = definitions();
-        assert!(defs.len() >= 11, "esperaba al menos 11 tools nativas");
+        assert!(defs.len() >= 13, "esperaba al menos 13 tools nativas");
         for d in &defs {
             assert!(!d.description.is_empty());
             assert_eq!(d.parameters["type"], "object");
@@ -222,6 +252,9 @@ mod tests {
         // Argumento faltante → error explicable al modelo, no panic.
         let err = parse_call("write_file", &json!({ "path": "a.rs" })).unwrap_err();
         assert!(err.contains("content"));
+
+        let spawn = parse_call("spawn_agent", &json!({ "task": "investiga el flujo de auth" }));
+        assert_eq!(spawn, Ok(DpxCall::Spawn { task: "investiga el flujo de auth".into() }));
 
         let desconocida = parse_call("rm_rf", &json!({})).unwrap_err();
         assert!(desconocida.contains("desconocida"));
