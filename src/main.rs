@@ -14,6 +14,7 @@ mod focus;
 mod fs;
 mod lsp;
 mod mcp;
+mod memory;
 mod session;
 mod skill;
 mod token;

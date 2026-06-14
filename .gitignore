@@ -10,3 +10,19 @@
 
 # Contexto de proyecto generado por dpx al correrlo aquí
 .dpx/
+
+# Caché del modelo de embeddings local (fastembed/ONNX): ~128 MB, se descarga
+# sola la primera vez. Nunca se commitea.
+.fastembed_cache/
+# Modelos de ML descargados (por si fastembed/otra lib usan otra ruta)
+*.onnx
+*.safetensors
+*.gguf
+
+# Binario viejo que deja `/update` al reinstalarse en Windows
+*.old.exe
+
+# Cosas comunes de SO/editor que no son del proyecto
+Thumbs.db
+.DS_Store
+*.swp
