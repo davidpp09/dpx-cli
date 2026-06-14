@@ -103,6 +103,22 @@ impl ProjectStore {
         Ok(())
     }
 
+    /// Lee las habilidades aprendidas (modo learn), si las hay.
+    pub fn read_skills(&self) -> Vec<crate::skill::Skill> {
+        match fs::read_to_string(self.root.join("skills.md")) {
+            Ok(md) => crate::skill::from_markdown(&md),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Guarda el mapa de habilidades del usuario.
+    pub fn write_skills(&self, skills: &[crate::skill::Skill]) -> Result<()> {
+        let path = self.root.join("skills.md");
+        fs::write(&path, crate::skill::to_markdown(skills))
+            .with_context(|| format!("No se pudo escribir {}", path.display()))?;
+        Ok(())
+    }
+
     /// Borra el plan pendiente (no hay plan activo en esta sesión).
     pub fn remove_plan(&self) -> Result<()> {
         let path = self.root.join("plan.md");

@@ -241,6 +241,18 @@ pub fn resume_banner(project: &str, last_step: &str) {
     println!("\n  {} retomando: {} · {}", accent("⏺"), accent(project), last_step);
 }
 
+/// Cartel del modo APRENDER 🎓: deja claro que dpx cambia de actitud — te hace
+/// pensar y enseña, no escribe por ti. Se pinta al arrancar en modo learn.
+pub fn learn_banner() {
+    let title = grad("🎓 modo aprender activado");
+    println!("\n  {title}");
+    println!(
+        "  {}",
+        dim("te haré pensar y te enseñaré el porqué — tú escribes, yo te guío.")
+    );
+    println!("  {}", dim("mira tu avance cuando quieras con /progreso."));
+}
+
 /// Línea de estado del área de entrada (focus · modo · cerebro · persona · auto).
 pub fn format_input_status(
     focus: &str,
@@ -785,7 +797,8 @@ pub fn print_help() {
         ("/brainstorm <idea>", "alias de /comite · mismos 4 roles, mismo plan"),
         ("/context", "muestra la memoria guardada del proyecto"),
         ("/focus [id]", "cambia de enfoque (sin id: lista los disponibles)"),
-        ("/mode [pro|hack]", "cambia la actitud del mentor"),
+        ("/mode [pro|hack|learn]", "actitud del mentor (learn 🎓 = tutor socrático)"),
+        ("/progreso", "tu progreso de aprendizaje: nivel por tema y qué repasar"),
         ("/brain [modelo]", "cerebro (dpx usa solo deepseek)"),
         ("/mentor", "persona mentor: enseña y te deja escribir"),
         ("/code", "persona code: agente autónomo que hace e itera"),

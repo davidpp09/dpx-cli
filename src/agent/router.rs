@@ -345,10 +345,14 @@ impl ModelRouter {
         let temperature = match mode {
             Mode::Pro => 0.4,
             Mode::Hack => 0.7,
+            // Aprender: algo de calidez pedagógica sin desbocarse.
+            Mode::Learn => 0.5,
         };
         let effort = match mode {
             Mode::Pro => "max",
             Mode::Hack => "high",
+            // Enseñar bien (pistas graduales, analogías, anticipar dudas) exige razonar a fondo.
+            Mode::Learn => "max",
         };
         build_deepseek(DEEPSEEK_PRO, preamble, temperature, deepseek_thinking(effort))
     }

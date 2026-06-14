@@ -45,7 +45,12 @@ pub fn run(cwd: &Path) -> Result<()> {
     let config = ProjectConfig {
         focus: focus_id.clone(),
         brain: brain.name().to_string(),
-        mode: if matches!(mode, Mode::Pro) { "pro".to_string() } else { "hack".to_string() },
+        mode: match mode {
+            Mode::Pro => "pro",
+            Mode::Hack => "hack",
+            Mode::Learn => "learn",
+        }
+        .to_string(),
         auto,
     };
 
@@ -62,7 +67,12 @@ pub fn run(cwd: &Path) -> Result<()> {
         .unwrap_or("(general, sin stack específico)");
     println!("  {}   {}", ui::dim("enfoque"), focus_display);
     println!("  {}    {}", ui::dim("cerebro"), brain.label());
-    println!("  {}       {}", ui::dim("modo"), if matches!(mode, Mode::Pro) { "pro (metódico)" } else { "hack (rápido)" });
+    let mode_human = match mode {
+        Mode::Pro => "pro (metódico)",
+        Mode::Hack => "hack (rápido)",
+        Mode::Learn => "learn (tutor socrático)",
+    };
+    println!("  {}       {}", ui::dim("modo"), mode_human);
     let auto_label = AutoMode::parse(&config.auto).map(|a| a.label()).unwrap_or("off");
     println!("  {}   {}   {}", ui::dim("auto"), ui::accent(auto_label), ui::dim("· /auto para cambiar"));
     println!();
@@ -187,11 +197,13 @@ fn step_mode() -> Result<Mode> {
 
     println!("  {}   {}", ui::accent("pro"),  ui::dim("metódico: explica decisiones, código robusto con tests"));
     println!("  {}  {}", ui::accent("hack"), ui::dim("rápido: defaults sensatos, mínimo boilerplate, demo funcionando"));
+    println!("  {} {}", ui::accent("learn"), ui::dim("aprender: tutor socrático que te hace pensar y enseña conceptos"));
     println!();
 
     let answer = read_with_default("  Modo [pro]: ", "pro")?;
     let chosen = match answer.to_lowercase().as_str() {
         "hack" => Mode::Hack,
+        "learn" | "aprender" => Mode::Learn,
         _ => Mode::Pro,
     };
 

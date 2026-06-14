@@ -140,6 +140,7 @@ impl Cli {
         let resolve_mode = |cli: Option<Mode>| {
             cli.unwrap_or(match proj_cfg.mode.as_str() {
                 "hack" => Mode::Hack,
+                "learn" => Mode::Learn,
                 _ => Mode::Pro,
             })
         };

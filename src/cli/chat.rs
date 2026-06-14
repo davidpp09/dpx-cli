@@ -71,6 +71,10 @@ pub async fn run(
     if prior.is_some() {
         println!("  {}", ui::dim("memoria · retomando contexto de sesiones anteriores"));
     }
+    // En modo learn, un cartel propio: deja claro que esto es OTRO producto.
+    if mode == Mode::Learn {
+        ui::learn_banner();
+    }
     println!(
         "\n{}",
         ui::dim("escribe tu mensaje · @archivo lee código · Shift+Enter salto de línea · Ctrl-C cancela · /salir")
@@ -678,6 +682,22 @@ async fn run_turn(
         // Plan/checklist: si el modelo emitió un `dpx:plan`, lo pintamos vivo (☐/☑).
         if let Some(plan) = crate::fs::parse_plan(&reply) {
             ui::checklist(&plan);
+        }
+
+        // Modo learn: si el tutor registró habilidades (bloque `dpx:skill`), las
+        // fusiona con el progreso del usuario y las persiste (`/progreso` las ve).
+        let learned = crate::skill::parse_block(&reply, &crate::skill::today());
+        if !learned.is_empty() {
+            let merged = crate::skill::merge(store.read_skills(), learned.clone());
+            if store.write_skills(&merged).is_ok() {
+                println!(
+                    "{}",
+                    ui::dim(&format!(
+                        "⎿ progreso actualizado: {} concepto(s) · usa /progreso",
+                        learned.len()
+                    ))
+                );
+            }
         }
 
         // CUARENTENA: una respuesta con bloques dpx malformados no es de fiar —
@@ -1730,6 +1750,11 @@ fn handle_command(
             None => println!("{}", ui::dim("aún no hay memoria guardada para este proyecto")),
         },
 
+        "progreso" | "progress" => {
+            let skills = store.read_skills();
+            println!("\n{}", crate::skill::render(&skills, &crate::skill::today()));
+        }
+
         "focus" => match arg {
             None => {
                 println!("{} {}", ui::dim("enfoque actual:"), focus::display_name(focus_id.as_deref()));
@@ -1749,6 +1774,7 @@ fn handle_command(
             let new = match arg {
                 Some("pro") => Some(Mode::Pro),
                 Some("hack") => Some(Mode::Hack),
+                Some("learn") | Some("aprender") => Some(Mode::Learn),
                 _ => None,
             };
             match new {
@@ -2375,6 +2401,7 @@ fn mode_label(mode: Mode) -> &'static str {
     match mode {
         Mode::Pro => "pro (metódico)",
         Mode::Hack => "hack (rápido)",
+        Mode::Learn => "learn 🎓 (tutor socrático)",
     }
 }
 

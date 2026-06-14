@@ -15,6 +15,7 @@ mod fs;
 mod lsp;
 mod mcp;
 mod session;
+mod skill;
 mod token;
 mod ui;
 
