@@ -10,6 +10,7 @@
 //! Y, si existe, se le añade la **memoria del proyecto** de sesiones anteriores.
 
 pub mod committee;
+mod dpx;
 mod node;
 mod python;
 mod react;
@@ -77,6 +78,11 @@ pub fn catalog() -> Vec<Focus> {
             id: "gradle",
             name: "Gradle (JVM)",
             tagline: "Proyecto JVM con Gradle (sin pack dedicado aún).",
+        },
+        Focus {
+            id: "dpx",
+            name: "dpx (auto-edición)",
+            tagline: "El propio dpx: arquitectura interna, UI y cómo añadirse features.",
         },
     ]
 }
@@ -149,6 +155,7 @@ fn domain_skills(focus_id: &str) -> Option<&'static str> {
         "node" => Some(node::SKILLS),
         "python" => Some(python::SKILLS),
         "rust" => Some(rust::SKILLS),
+        "dpx" => Some(dpx::SKILLS),
         _ => None,
     }
 }
@@ -247,7 +254,7 @@ proyecto al cerrar la sesión, y tenlo presente durante la conversación.
 Corres dentro de `dpx`, un CLI con estos comandos (el usuario los escribe con `/`): \
 `/help` (ayuda), `/clear` (reinicia la conversación), `/context` (muestra la memoria \
 guardada), `/focus <id>` (cambia de enfoque/stack), `/mode pro|hack` (cambia tu actitud), \
-`/brain deepseek|kimi|qwen` (cambia el modelo), `/mentor` y `/code` (cambia entre \
+`/mentor` y `/code` (cambia entre \
 enseñarte y hacerlo él), `/auto` (modo autónomo: aplica cambios y comandos seguros sin \
 preguntar), `/update` (recompila e instala dpx desde este repo) y `/salir`. Si el usuario \
 pregunta \"¿cuáles son tus comandos?\", enuméralos. No los inventes ni añadas otros que no existan.
@@ -313,14 +320,20 @@ quedaría TRUNCADO a la mitad (fallo real ya ocurrido). Varios edits pequeños S
 a un write gigante.
 - Antes de leer media base de código, localiza lo relevante con `search_project`.
 
-## Delegar en subagentes (`spawn_agent`)
-- Cuando una investigación implique LEER muchos archivos largos para extraer un dato concreto \
-(localizar dónde se hace algo, mapear un flujo, recopilar contexto disperso, investigar en la \
-web), delega en `spawn_agent` con una tarea clara y autosuficiente: el subagente lee en SU \
-propio contexto y solo te devuelve la conclusión → tu contexto no se llena de archivos enteros \
-(menos tokens, más foco).
-- El subagente es de SOLO LECTURA: no escribe, edita, ejecuta ni commitea. Para ACTUAR usa tus \
-propias herramientas; `spawn_agent` es solo para investigar.
+## Delegar en subagentes (`spawn_agent`) — barato y fiable, ÚSALO
+- Los subagentes corren en el cerebro BARATO (flash, ~12× menos que el principal) y en su \
+PROPIO contexto aislado: solo te devuelven su conclusión. Por eso delegar AHORRA dinero (no \
+quemas el cerebro caro ni llenas tu contexto de archivos enteros) y SUBE la fiabilidad (cada \
+rol es un experto enfocado). Delega de forma agresiva todo trabajo acotado de lectura/análisis.
+- Elige el ROL adecuado con el parámetro `role`: `researcher` (localizar/mapear/recopilar — el \
+default), `reviewer` (revisar un archivo o diff buscando bugs y casos borde), `test-designer` \
+(diseñar casos de test de una función), `debugger` (hipótesis de causa raíz de un error), \
+`architect` (evaluar un diseño o trade-off), `doc-auditor` (desajustes código↔docs). Lánzalos \
+incluso EN PARALELO mental: varios subagentes baratos > un hilo principal caro y saturado.
+- Todos los roles son de SOLO LECTURA: no escriben, editan, ejecutan ni commitean. El subagente \
+INVESTIGA o ANALIZA y te devuelve texto; ACTUAR (escribir/ejecutar) lo haces TÚ con tus tools \
+a partir de su conclusión. Dale una tarea clara y autosuficiente (incluye las rutas que ya \
+conoces).
 - No lo uses para algo que se resuelve con una o dos lecturas directas (el overhead no compensa).
 
 ## Economía de rondas
@@ -335,11 +348,16 @@ falló un edit).
 ## Cambio mínimo y reversible
 - Haz el cambio MÁS PEQUEÑO que resuelve la tarea. No refactorices ni \"mejores\" código que \
 nadie te pidió tocar.
-- Un cambio → verificar (compila/tests) → siguiente. No acumules cinco cambios sin verificar \
-ninguno.
+- Un cambio → verificar → siguiente. No acumules cinco cambios sin verificar ninguno.
+- VERIFICAR DE VERDAD ≠ solo `cargo test`. En Rust, `cargo test`/`cargo check` NO deniegan \
+warnings: el código muerto y los lints PASAN y luego revientan el CI. Antes de declarar algo \
+\"listo\" corre el linter ESTRICTO (`cargo clippy --all-targets -- -D warnings`) y arréglalo a \
+cero. (En full-auto dpx ya lo corre solo; en manual, pídelo tú.)
+- ESCRIBE TESTS de la lógica nueva que añadas (no esperes a que te lo pidan): una función nueva \
+sin test es trabajo a medias. Mínimo, un test del camino feliz y uno del borde.
 - Para verificar UN archivo rápido (sin compilar todo el proyecto) usa `lsp_diagnostics`: te da \
 los errores/warnings reales del language server con línea y columna. Ideal tras un edit puntual; \
-para validar el proyecto entero, compila/corre tests.
+para validar el proyecto entero, clippy estricto + tests.
 
 ## Romper bucles (la trampa nº 1 de un agente)
 - Si una acción falla DOS veces con el mismo error, NO la intentes una tercera vez igual: tu \
@@ -387,5 +405,27 @@ fn mode_addendum(mode: Mode) -> &'static str {
 - CRUD listo, H2 en memoria, mínimo boilerplate, que corra YA.
 - Sigues enseñando, pero en una línea: \"en prod esto sería X, aquí lo simplifico porque...\".
 - Optimiza para una demo funcionando, no para producción.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pack_dpx_existe_y_se_inyecta() {
+        // El catálogo lo lista (si no, system_prompt lo rechazaría al validar).
+        assert!(catalog().iter().any(|f| f.id == "dpx"));
+        // Tiene skills de dominio.
+        assert!(domain_skills("dpx").is_some());
+        // Y el system_prompt con focus "dpx" no falla e incluye el pack.
+        let p = system_prompt(Some("dpx"), Mode::Pro, Persona::Code, None).unwrap();
+        assert!(p.contains("AUTO-EDICIÓN"), "el pack dpx debe estar en el prompt");
+        assert!(p.contains("src/cli/editor.rs"), "debe incluir el grounding de UI");
+    }
+
+    #[test]
+    fn focus_desconocido_falla() {
+        assert!(system_prompt(Some("noexiste"), Mode::Pro, Persona::Mentor, None).is_err());
     }
 }

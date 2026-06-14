@@ -12,7 +12,7 @@ use rig_core::agent::Agent;
 use rig_core::client::{CompletionClient, ProviderClient};
 use rig_core::completion::{AssistantContent, Message, Prompt};
 use rig_core::message::ToolCall;
-use rig_core::providers::{deepseek, moonshot, openrouter};
+use rig_core::providers::deepseek;
 use rig_core::streaming::{StreamedAssistantContent, StreamingCompletion};
 
 use crate::focus::Mode;
@@ -28,37 +28,21 @@ pub struct ChatReply {
     pub usage: Option<rig_core::completion::Usage>,
 }
 
-/// Proveedor que hace de cerebro mentor. Los tres del plan anti-suscripción:
-/// DeepSeek (principal), Kimi y Qwen — todos fuertes en tool-calling nativo.
+/// El cerebro mentor. dpx usa SOLO DeepSeek: el plan multi-modelo (Kimi/Qwen)
+/// se descartó — DeepSeek era el único con saldo y el único bueno en agéntico.
+/// Se mantiene como enum de una variante para conservar el punto de extensión
+/// del Model Router por si algún día vuelve otro proveedor.
 #[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
 pub enum Brain {
-    /// DeepSeek (razonador): el cerebro principal, fuerte en código y agéntico.
+    /// DeepSeek (razonador): el cerebro de dpx, fuerte en código y agéntico.
     Deepseek,
-    /// Kimi K2.5 (Moonshot): agéntico sólido y contexto largo.
-    Kimi,
-    /// Qwen3 Coder (vía OpenRouter): especializado en código, muy barato.
-    Qwen,
 }
 
-/// Model ID de Qwen en OpenRouter (no hay constante en rig-core para este).
-const QWEN_CODER: &str = "qwen/qwen3-coder";
-
 impl Brain {
-    /// ID de modelo a usar en cada proveedor (cf. constantes de `rig-core`).
-    fn model_id(self) -> &'static str {
-        match self {
-            Brain::Deepseek => DEEPSEEK_PRO,
-            Brain::Kimi => moonshot::KIMI_K2_5,
-            Brain::Qwen => QWEN_CODER,
-        }
-    }
-
     /// Nombre legible y completo del cerebro (para banners y `/status`).
     pub fn label(self) -> &'static str {
         match self {
             Brain::Deepseek => "DeepSeek Reasoner",
-            Brain::Kimi => "Kimi K2.5",
-            Brain::Qwen => "Qwen3 Coder",
         }
     }
 
@@ -66,29 +50,21 @@ impl Brain {
     pub fn name(self) -> &'static str {
         match self {
             Brain::Deepseek => "deepseek",
-            Brain::Kimi => "kimi",
-            Brain::Qwen => "qwen",
         }
     }
 
-    /// Superpoder del modelo en una frase (para que sepas a cuál cambiar y por qué).
+    /// Superpoder del modelo en una frase.
     pub fn capability(self) -> &'static str {
         match self {
             Brain::Deepseek => "principal · razona · agéntico fuerte",
-            Brain::Kimi => "agéntico · contexto largo",
-            Brain::Qwen => "código · barato (vía OpenRouter)",
         }
     }
 
     /// Ventana de contexto utilizable del modelo (tokens). Gobierna la barra
-    /// de `/status` y el umbral de compactación automática: con Kimi o Qwen
-    /// no tiene sentido compactar a los 128k de DeepSeek — cada cerebro
-    /// aprovecha su ventana real.
+    /// de `/status` y el umbral de compactación automática.
     pub fn context_budget(self) -> usize {
         match self {
             Brain::Deepseek => 128_000,
-            Brain::Kimi => 256_000,
-            Brain::Qwen => 256_000,
         }
     }
 
@@ -96,8 +72,6 @@ impl Brain {
     pub fn env_var(self) -> &'static str {
         match self {
             Brain::Deepseek => "DEEPSEEK_API_KEY",
-            Brain::Kimi => "MOONSHOT_API_KEY",
-            Brain::Qwen => "OPENROUTER_API_KEY",
         }
     }
 
@@ -106,42 +80,17 @@ impl Brain {
         std::env::var(self.env_var()).map(|v| !v.trim().is_empty()).unwrap_or(false)
     }
 
-    /// Todos los cerebros, en orden de utilidad para dpx (agéntico primero).
-    pub fn all() -> [Brain; 3] {
-        [Brain::Deepseek, Brain::Kimi, Brain::Qwen]
+    /// Todos los cerebros disponibles (hoy, solo DeepSeek).
+    pub fn all() -> [Brain; 1] {
+        [Brain::Deepseek]
     }
 
     /// Parsea el nombre de un cerebro (para el comando `/brain`).
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "deepseek" => Some(Brain::Deepseek),
-            "kimi" | "moonshot" => Some(Brain::Kimi),
-            "qwen" => Some(Brain::Qwen),
             _ => None,
         }
-    }
-
-    /// Construye un agente con este cerebro, el system prompt y la temperatura dados.
-    /// `extra` son campos adicionales para el body (p.ej. `thinking`/`reasoning_effort`
-    /// en DeepSeek); en otros proveedores debe ir `None`.
-    fn build(self, preamble: &str, temperature: f64, extra: Option<serde_json::Value>) -> Result<Mentor> {
-        Ok(match self {
-            Brain::Deepseek => {
-                let c = deepseek::Client::from_env()
-                    .map_err(|e| anyhow!("No pude iniciar DeepSeek (¿falta DEEPSEEK_API_KEY?): {e}"))?;
-                Mentor::Deepseek(agent(c.agent(self.model_id()), preamble, temperature, extra))
-            }
-            Brain::Kimi => {
-                let c = moonshot::Client::from_env()
-                    .map_err(|e| anyhow!("No pude iniciar Kimi (¿falta MOONSHOT_API_KEY?): {e}"))?;
-                Mentor::Kimi(agent(c.agent(self.model_id()), preamble, temperature, extra))
-            }
-            Brain::Qwen => {
-                let c = openrouter::Client::from_env()
-                    .map_err(|e| anyhow!("No pude iniciar Qwen (¿falta OPENROUTER_API_KEY?): {e}"))?;
-                Mentor::Qwen(agent(c.agent(self.model_id()), preamble, temperature, extra))
-            }
-        })
     }
 }
 
@@ -194,11 +143,10 @@ fn agent<M: rig_core::completion::CompletionModel>(
     builder.build()
 }
 
-/// Agente envuelto por proveedor, para despacho dinámico.
+/// Agente mentor. Una variante (DeepSeek); el enum se conserva como punto de
+/// extensión del Model Router por si vuelve otro proveedor.
 pub enum Mentor {
     Deepseek(Agent<deepseek::CompletionModel>),
-    Kimi(Agent<moonshot::CompletionModel>),
-    Qwen(Agent<openrouter::CompletionModel>),
 }
 
 /// Reintentos ante errores transitorios del proveedor (saturación).
@@ -312,8 +260,6 @@ impl Mentor {
     ) -> Result<ChatReply> {
         match self {
             Mentor::Deepseek(a) => stream_dispatch!(a, input, history, on_delta),
-            Mentor::Kimi(a) => stream_dispatch!(a, input, history, on_delta),
-            Mentor::Qwen(a) => stream_dispatch!(a, input, history, on_delta),
         }
     }
 
@@ -323,8 +269,6 @@ impl Mentor {
         loop {
             let r = match self {
                 Mentor::Deepseek(a) => a.prompt(content).await,
-                Mentor::Kimi(a) => a.prompt(content).await,
-                Mentor::Qwen(a) => a.prompt(content).await,
             };
             match r {
                 Ok(s) => return Ok(s),
@@ -402,42 +346,23 @@ impl ModelRouter {
             Mode::Pro => 0.4,
             Mode::Hack => 0.7,
         };
-        match self.brain {
-            Brain::Deepseek => {
-                let effort = match mode {
-                    Mode::Pro => "max",
-                    Mode::Hack => "high",
-                };
-                build_deepseek(DEEPSEEK_PRO, preamble, temperature, deepseek_thinking(effort))
-            }
-            other => other.build(preamble, temperature, None),
-        }
+        let effort = match mode {
+            Mode::Pro => "max",
+            Mode::Hack => "high",
+        };
+        build_deepseek(DEEPSEEK_PRO, preamble, temperature, deepseek_thinking(effort))
     }
 
     /// Mentor barato para subagentes: investigar es tarea mecánica, no necesita
-    /// el cerebro caro. En DeepSeek usa `flash` sin thinking (12× más barato que
-    /// el `pro`); Kimi y Qwen no tienen tier barato → mismo modelo, documentado.
+    /// el cerebro caro → DeepSeek `flash` sin thinking (12× más barato que el `pro`).
     pub fn subagent_mentor(&self, preamble: &str) -> Result<Mentor> {
-        match self.brain {
-            Brain::Deepseek => build_deepseek(
-                DEEPSEEK_FLASH,
-                preamble,
-                0.2,
-                deepseek_no_thinking(),
-            ),
-            // Kimi y Qwen no tienen un tier "flash": el subagente usa el mismo
-            // modelo. Su consumo se suma igualmente al ledger de /cost.
-            other => other.build(preamble, 0.2, None),
-        }
+        build_deepseek(DEEPSEEK_FLASH, preamble, 0.2, deepseek_no_thinking())
     }
 
     /// Resumen de cierre de sesión (un turno, baja temperatura). Tarea mecánica:
-    /// en DeepSeek usamos `flash` SIN thinking (12x más barato), no el caro `pro`.
+    /// DeepSeek `flash` SIN thinking (12x más barato), no el caro `pro`.
     pub async fn summarize(&self, preamble: &str, content: &str) -> Result<String> {
-        let mentor = match self.brain {
-            Brain::Deepseek => build_deepseek(DEEPSEEK_FLASH, preamble, 0.2, deepseek_no_thinking())?,
-            other => other.build(preamble, 0.2, None)?,
-        };
+        let mentor = build_deepseek(DEEPSEEK_FLASH, preamble, 0.2, deepseek_no_thinking())?;
         mentor.prompt(content).await
     }
 }

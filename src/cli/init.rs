@@ -3,7 +3,7 @@
 //! El flujo es:
 //! 1. Saludo y detección de stack (por archivos raíz como en `fs::detect_stack`).
 //! 2. Confirmación o cambio manual del focus pack.
-//! 3. Selección de cerebro por defecto (deepseek/kimi/qwen), con indicación de
+//! 3. Selección de cerebro por defecto (deepseek), con indicación de
 //!    si cada uno tiene API key configurada.
 //! 4. Modo (pro/hack).
 //! 5. Modo autónomo: off / reads / writes / all.
@@ -220,10 +220,9 @@ mod tests {
 
     #[test]
     fn brain_parse_coincide_con_router() {
-        // Los mismos valores que en el router, confirmamos consistencia.
+        // dpx usa solo DeepSeek; cualquier otro nombre no resuelve.
         assert!(matches!(Brain::parse("deepseek"), Some(Brain::Deepseek)));
-        assert!(matches!(Brain::parse("kimi"), Some(Brain::Kimi)));
-        assert!(matches!(Brain::parse("qwen"), Some(Brain::Qwen)));
+        assert!(Brain::parse("kimi").is_none());
         assert!(Brain::parse("claude").is_none());
     }
 

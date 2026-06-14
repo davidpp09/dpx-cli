@@ -1,12 +1,12 @@
 //! El agente y su Model Router.
 //!
-//! El router inicializa los clientes de `rig-core` disponibles y reparte el
-//! trabajo según el fuerte de cada modelo. DeepSeek es el cerebro principal;
-//! Kimi (Moonshot) y Qwen (vía OpenRouter) son los apoyos del plan
-//! anti-suscripción — los tres fuertes en tool-calling nativo.
+//! dpx usa SOLO DeepSeek como cerebro (razonador, fuerte en tool-calling nativo
+//! y agéntico). El Model Router se conserva como punto de extensión por si
+//! algún día vuelve otro proveedor, pero hoy solo enruta a DeepSeek.
 
 mod router;
 pub mod diagnostic;
+pub mod roles;
 pub mod search;
 pub mod tools;
 

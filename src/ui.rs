@@ -599,15 +599,12 @@ pub fn friendly_error(err: &str) -> String {
         || err.contains("Too Many Requests")
         || err.contains("quota")
     {
-        return "límite de cuota del modelo alcanzado. Cambia de cerebro: \
-                /brain deepseek · /brain kimi · /brain qwen (o espera al reset)."
+        return "límite de cuota de DeepSeek alcanzado. Espera al reset o revisa tu plan."
             .to_string();
     }
     if err.contains("402") || err.contains("Insufficient Balance") || err.contains("Payment Required")
     {
-        return "este modelo no tiene saldo. Cambia de cerebro: \
-                /brain kimi · /brain qwen."
-            .to_string();
+        return "DeepSeek no tiene saldo. Recarga en platform.deepseek.com.".to_string();
     }
     if err.contains("401") || err.contains("Unauthorized") || err.contains("invalid_api_key") {
         return "API key inválida o ausente para este modelo. Revisa tu .env.".to_string();
@@ -789,7 +786,7 @@ pub fn print_help() {
         ("/context", "muestra la memoria guardada del proyecto"),
         ("/focus [id]", "cambia de enfoque (sin id: lista los disponibles)"),
         ("/mode [pro|hack]", "cambia la actitud del mentor"),
-        ("/brain [modelo]", "cambia el cerebro: deepseek|kimi|qwen"),
+        ("/brain [modelo]", "cerebro (dpx usa solo deepseek)"),
         ("/mentor", "persona mentor: enseña y te deja escribir"),
         ("/code", "persona code: agente autónomo que hace e itera"),
         ("/auto [on|off]", "modo autónomo ⚡: cambios y comandos seguros sin preguntar"),

@@ -19,9 +19,10 @@ pub enum DpxCall {
     Delete { path: String },
     Run { command: String },
     WebSearch { query: String },
-    /// Lanza un subagente de investigación aislado (solo lectura) para una tarea
-    /// acotada; solo su conclusión vuelve al agente principal (ahorra contexto).
-    Spawn { task: String },
+    /// Lanza un subagente AISLADO de solo lectura para una tarea acotada; solo
+    /// su conclusión vuelve al agente principal (ahorra contexto). `role` elige
+    /// la especialidad (researcher por defecto); ver `agent::roles`.
+    Spawn { task: String, role: Option<String> },
     /// Diagnósticos REALES de un archivo vía language server (errores/warnings).
     LspDiagnostics { path: String },
     GitStatus,
@@ -133,14 +134,24 @@ fn native_definitions() -> Vec<ToolDefinition> {
         ),
         def(
             "spawn_agent",
-            "Lanza un SUBAGENTE de investigación AISLADO para una tarea de lectura acotada: \
-             explorar el código, localizar dónde se hace algo, recopilar contexto de varios \
-             archivos o investigar en la web. El subagente tiene su PROPIO contexto y solo te \
-             devuelve su conclusión — úsalo para no llenar TU contexto con archivos largos \
-             cuando solo necesitas el resumen. Es de SOLO LECTURA: no puede escribir, editar, \
-             ejecutar ni commitear (para eso usa tus propias herramientas). Dale una tarea \
-             clara y autosuficiente (no comparte tu conversación).",
-            json!({ "task": { "type": "string", "description": "La tarea de investigación, específica y autosuficiente, p.ej. 'Localiza dónde se valida el token JWT y resume el flujo'" } }),
+            &format!(
+                "Lanza un SUBAGENTE AISLADO para una tarea acotada de lectura/análisis. Corre en \
+                 el cerebro BARATO y en su PROPIO contexto: solo te devuelve su conclusión en \
+                 texto, sin llenar TU contexto con archivos largos (ahorra dinero y foco). \
+                 DELEGA de forma agresiva. Es de SOLO LECTURA: no escribe, edita, ejecuta ni \
+                 commitea — para ACTUAR usa tus propias herramientas a partir de su conclusión. \
+                 Elige el `role` adecuado: {roster}. Dale una tarea clara y autosuficiente \
+                 (incluye las rutas que ya conozcas; no comparte tu conversación).",
+                roster = crate::agent::roles::roster_blurb()
+            ),
+            json!({
+                "task": { "type": "string", "description": "La tarea, específica y autosuficiente, p.ej. 'Localiza dónde se valida el token JWT y resume el flujo'" },
+                "role": {
+                    "type": "string",
+                    "enum": crate::agent::roles::AgentRole::all().iter().map(|r| r.name()).collect::<Vec<_>>(),
+                    "description": "Especialidad del subagente (opcional; researcher por defecto)"
+                },
+            }),
             &["task"],
         ),
         def(
@@ -211,7 +222,10 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
         "delete_file" => Ok(DpxCall::Delete { path: arg("path")? }),
         "run_command" => Ok(DpxCall::Run { command: arg("command")? }),
         "web_search" => Ok(DpxCall::WebSearch { query: arg("query")? }),
-        "spawn_agent" => Ok(DpxCall::Spawn { task: arg("task")? }),
+        "spawn_agent" => Ok(DpxCall::Spawn {
+            task: arg("task")?,
+            role: args.get("role").and_then(Value::as_str).map(str::to_string),
+        }),
         "lsp_diagnostics" => Ok(DpxCall::LspDiagnostics { path: arg("path")? }),
         "git_status" => Ok(DpxCall::GitStatus),
         "git_diff" => {
@@ -273,7 +287,20 @@ mod tests {
         assert!(err.contains("content"));
 
         let spawn = parse_call("spawn_agent", &json!({ "task": "investiga el flujo de auth" }));
-        assert_eq!(spawn, Ok(DpxCall::Spawn { task: "investiga el flujo de auth".into() }));
+        assert_eq!(
+            spawn,
+            Ok(DpxCall::Spawn { task: "investiga el flujo de auth".into(), role: None })
+        );
+
+        // Con rol explícito.
+        let spawn_role = parse_call(
+            "spawn_agent",
+            &json!({ "task": "revisa fs/mod.rs", "role": "reviewer" }),
+        );
+        assert_eq!(
+            spawn_role,
+            Ok(DpxCall::Spawn { task: "revisa fs/mod.rs".into(), role: Some("reviewer".into()) })
+        );
 
         let desconocida = parse_call("rm_rf", &json!({})).unwrap_err();
         assert!(desconocida.contains("desconocida"));

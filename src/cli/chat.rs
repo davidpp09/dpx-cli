@@ -19,41 +19,9 @@ use crate::focus::{self, Mode, Persona};
 use crate::session::{self, ProjectStore, Turn};
 use crate::ui;
 
-use std::sync::atomic::{AtomicU8, Ordering};
-
-/// Cerebro ACTIVO de la sesión, guardado como global para que un subagente (que
-/// se lanza desde el fondo de una tool call) sepa con qué cerebro construirse sin
-/// enhebrar `Brain` por todo el hot path de `run_turn`. Mismo patrón que los
-/// globales de `token`/`checkpoint`/`ui::CANCEL`. Se actualiza al arrancar la
-/// sesión y en cada cambio de cerebro (incluido el fallback automático).
-static ACTIVE_BRAIN: AtomicU8 = AtomicU8::new(0);
-
-/// Registra el cerebro activo para que lo lea un subagente.
-fn set_active_brain(brain: Brain) {
-    let b = match brain {
-        Brain::Deepseek => 0,
-        Brain::Kimi => 1,
-        Brain::Qwen => 2,
-    };
-    ACTIVE_BRAIN.store(b, Ordering::Relaxed);
-}
-
-/// El cerebro activo registrado (sin mirar si tiene API key).
-fn active_brain_raw() -> Brain {
-    match ACTIVE_BRAIN.load(Ordering::Relaxed) {
-        1 => Brain::Kimi,
-        2 => Brain::Qwen,
-        _ => Brain::Deepseek,
-    }
-}
-
-/// El cerebro con el que lanzar un subagente: el activo si tiene API key, y si
-/// no, el primero disponible (el subagente investiga; necesita un cerebro vivo).
+/// El cerebro con el que lanzar un subagente: DeepSeek si tiene API key (el
+/// subagente investiga; necesita un cerebro vivo).
 fn subagent_brain() -> Option<Brain> {
-    let active = active_brain_raw();
-    if active.has_key() {
-        return Some(active);
-    }
     Brain::all().into_iter().find(|b| b.has_key())
 }
 
@@ -92,7 +60,6 @@ pub async fn run(
     let mut auto = auto;
     let mut router = ModelRouter::new(brain);
     let mut mentor = build_mentor(&router, focus_id.as_deref(), mode, persona, prior.as_deref())?;
-    set_active_brain(brain);
 
     ui::welcome(
         focus::display_name(focus_id.as_deref()),
@@ -265,7 +232,6 @@ pub async fn run(
                                 router = new_router;
                                 mentor = m;
                                 brain = next;
-                                set_active_brain(brain);
                                 outcome = run_turn(
                                     &mentor,
                                     &mut history,
@@ -444,7 +410,7 @@ enum TurnOutcome {
 
 /// Umbral de compactación automática: al superar el 75% de la ventana del
 /// cerebro ACTIVO, el historial se resume con el modelo barato. Depende del
-/// cerebro: Kimi/Qwen (256k) aguantan el doble que DeepSeek antes de compactar.
+/// cerebro (DeepSeek: 128k).
 fn compact_threshold(brain: Brain) -> usize {
     brain.context_budget() * 3 / 4
 }
@@ -861,16 +827,27 @@ async fn run_turn(
                 .iter()
                 .any(|r| r.contains("mvn") || r.contains("gradle") || r.contains("cargo"));
             if !already {
-                // Modo full-auto (`/auto all`): el agente verifica DE VERDAD —
-                // corre la suite de tests (que también compila) y se autocorrige
-                // con los fallos. En modos menos autónomos basta el compile-check,
-                // más rápido y sin los efectos secundarios de los tests.
-                if auto.commands()
-                    && let Some(test_cmd) = crate::fs::detect_test(cwd) {
+                // Modo full-auto (`/auto all`): el agente verifica DE VERDAD.
+                // En Rust corre clippy ESTRICTO (`detect_build` → `-D warnings`)
+                // ADEMÁS de la suite de tests: `cargo test` NO deniega warnings,
+                // así que sin clippy el agente deja pasar código muerto/lints que
+                // luego revienta el CI (pasó en vivo). En otros stacks la suite ya
+                // compila, no hace falta el paso extra.
+                if auto.commands() {
+                    if cwd.join("Cargo.toml").exists()
+                        && let Some(lint_cmd) = crate::fs::detect_build(cwd) {
+                            runs.push(lint_cmd);
+                            auto_built = true;
+                        }
+                    if let Some(test_cmd) = crate::fs::detect_test(cwd) {
                         runs.push(test_cmd);
                         auto_tested = true;
                     }
+                }
+                // Modos menos autónomos: basta el compile/lint-check, más rápido y
+                // sin los efectos secundarios de los tests.
                 if !auto_tested
+                    && !auto_built
                     && let Some(build_cmd) = crate::fs::detect_build(cwd) {
                         runs.push(build_cmd);
                         auto_built = true;
@@ -931,10 +908,12 @@ async fn run_turn(
                 let out = crate::fs::search_in_project(cwd, s);
                 ctx.push_str(&format!("\n--- resultados de búsqueda para `{s}` ---\n{out}\n--- fin ---\n"));
             }
-            if auto_tested {
+            if auto_tested && auto_built {
+                println!("\n{}", ui::dim("dpx verifica con el linter estricto y la suite de tests…"));
+            } else if auto_tested {
                 println!("\n{}", ui::dim("dpx verifica que el proyecto compile y pase los tests…"));
             } else if auto_built {
-                println!("\n{}", ui::dim("dpx verifica que el proyecto compile…"));
+                println!("\n{}", ui::dim("dpx verifica el proyecto (compila/linter)…"));
             }
             for cmd in &runs {
                 match confirm_run(&mut *ask, store, cwd, cmd, auto) {
@@ -1164,7 +1143,9 @@ async fn run_tool_call(
                 Err(e) => format!("[web_search falló: {e}]"),
             })
         }
-        Ok(DpxCall::Spawn { task }) => ToolOutcome::Done(run_subagent(cwd, &task).await),
+        Ok(DpxCall::Spawn { task, role }) => {
+            ToolOutcome::Done(run_subagent(cwd, &task, role.as_deref()).await)
+        }
         Ok(DpxCall::LspDiagnostics { path }) => {
             println!("{}", ui::accent(&format!("  ⚙ language server: {path}")));
             // El cliente LSP bloquea (espera diagnósticos con timeout): lo sacamos
@@ -1262,21 +1243,24 @@ const SUBAGENT_MAX_ROUNDS: usize = 6;
 /// más foco). No puede escribir, ejecutar ni commitear (sin efectos secundarios),
 /// así que no necesita confirmaciones ni checkpoint. El consumo de tokens del
 /// subagente se contabiliza en el mismo ledger de la sesión (`/cost` lo refleja).
-async fn run_subagent(cwd: &Path, task: &str) -> String {
+async fn run_subagent(cwd: &Path, task: &str, role: Option<&str>) -> String {
+    let role = crate::agent::roles::AgentRole::parse(role);
     let Some(brain) = subagent_brain() else {
         return "[no pude lanzar el subagente: ningún cerebro tiene API key]".to_string();
     };
-    let preamble = subagent_preamble(cwd, task);
-    // Subagente barato: investigar no necesita el cerebro caro. DeepSeek usa
-    // flash sin thinking (12× más barato); Kimi/Qwen no tienen tier flash.
+    let preamble = subagent_preamble(cwd, task, role);
+    // Subagente barato: investigar no necesita el cerebro caro → DeepSeek flash
+    // sin thinking (12× más barato que el pro).
     let mentor = match ModelRouter::new(brain).subagent_mentor(&preamble) {
         Ok(m) => m,
         Err(e) => return format!("[no pude lanzar el subagente: {e}]"),
     };
 
     println!(
-        "\n{} {}",
-        ui::accent("⏺ subagente lanzado"),
+        "\n{} {} {} {}",
+        ui::accent("⏺ subagente"),
+        role.emoji(),
+        role.label(),
         ui::dim(&truncate_log(task, 80))
     );
 
@@ -1337,16 +1321,18 @@ async fn run_subagent(cwd: &Path, task: &str) -> String {
 
 /// System prompt del subagente: identidad de investigador aislado de solo
 /// lectura + árbol del proyecto + la tarea concreta.
-fn subagent_preamble(cwd: &Path, task: &str) -> String {
-    let mut p = String::from(
-        "Eres un SUBAGENTE de investigación de dpx, lanzado por el agente principal para una \
-         tarea ACOTADA. Trabajas en AISLAMIENTO: tu contexto NO se comparte con el agente \
-         principal, así que tu respuesta final debe ser AUTOSUFICIENTE y CONCISA.\n\n\
+fn subagent_preamble(cwd: &Path, task: &str, role: crate::agent::roles::AgentRole) -> String {
+    let mut p = String::new();
+    p.push_str(role.identity());
+    p.push_str(
+        "\n\nFuiste lanzado por el agente principal de dpx para una tarea ACOTADA. Trabajas en \
+         AISLAMIENTO: tu contexto NO se comparte con el agente principal, así que tu respuesta \
+         final debe ser AUTOSUFICIENTE y CONCISA.\n\n\
          REGLAS:\n\
          - Eres de SOLO LECTURA: solo puedes usar read_file, search_project y web_search. NO \
            puedes escribir, editar, borrar, ejecutar comandos, commitear ni lanzar otros \
            subagentes.\n\
-         - Investiga lo justo y NADA más; no te desvíes de la tarea.\n\
+         - Cíñete a tu tarea y a tu rol; no te desvíes.\n\
          - Cuando tengas la respuesta, dala en TEXTO PLANO sin pedir más herramientas: será lo \
            ÚNICO que reciba el agente principal.\n\
          - Sé directo: hechos, rutas de archivo y fragmentos relevantes con su ubicación; nada \
@@ -1443,7 +1429,7 @@ async fn run_committee(cwd: &Path, idea: &str) -> String {
             ui::dim(role.label)
         );
         let task = crate::focus::committee::role_task(role, idea);
-        let contrib = run_subagent(cwd, &task).await;
+        let contrib = run_subagent(cwd, &task, None).await;
         contributions.push((role.emoji.to_string() + " " + role.label, contrib));
     }
 
@@ -1453,7 +1439,7 @@ async fn run_committee(cwd: &Path, idea: &str) -> String {
         synth = ui::dim("sintetizando aportes…")
     );
     let synthesis_task = crate::focus::committee::synthesis_prompt(&contributions, idea);
-    run_subagent(cwd, &synthesis_task).await
+    run_subagent(cwd, &synthesis_task, None).await
 }
 
 /// Ejecuta `git` con los args dados (cada uno SIN partir por espacios — clave
@@ -1807,7 +1793,7 @@ fn handle_command(
                     }
                     None => println!(
                         "{} (actual: {})",
-                        ui::dim("uso: /brain deepseek|kimi|qwen"),
+                        ui::dim("dpx usa solo DeepSeek"),
                         router.brain_label()
                     ),
                 }
@@ -1836,9 +1822,6 @@ fn handle_command(
             ui::dim(&format!("comando desconocido: /{other} — escribe /help"))
         ),
     }
-    // Un comando pudo cambiar el cerebro (/brain): refresca el estado global que
-    // usa un subagente para construirse.
-    set_active_brain(*brain);
 }
 
 /// Estimación tosca de los tokens consumidos por el historial (≈ 4 chars/token).
@@ -3297,11 +3280,16 @@ mod tests {
     }
 
     #[test]
-    fn estado_de_sesion_round_trip() {
-        set_active_brain(Brain::Kimi);
-        assert_eq!(active_brain_raw(), Brain::Kimi);
-        set_active_brain(Brain::Deepseek);
-        assert_eq!(active_brain_raw(), Brain::Deepseek);
+    fn subagent_preamble_aplica_la_identidad_del_rol() {
+        use crate::agent::roles::AgentRole;
+        let dir = tmp("sub-role");
+        // El rol elegido inyecta su identidad; el default es investigador.
+        let rev = subagent_preamble(&dir, "revisa fs/mod.rs", AgentRole::Reviewer);
+        assert!(rev.contains("REVISOR"), "debe llevar la identidad del revisor: {rev}");
+        let def = subagent_preamble(&dir, "x", AgentRole::parse(None));
+        assert!(def.contains("INVESTIGADOR"), "el default es investigador");
+        // En cualquier rol, las reglas de solo-lectura siguen presentes.
+        assert!(rev.contains("SOLO LECTURA") && def.contains("SOLO LECTURA"));
     }
 
     // ----- compactación de tool-outputs viejos -----

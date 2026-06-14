@@ -16,7 +16,7 @@ pub struct ProjectConfig {
     /// Focus pack detectado o elegido por el usuario (spring-boot, react, etc.).
     /// `None` si el usuario eligió mentor genérico.
     pub focus: Option<String>,
-    /// Modelo por defecto ("deepseek", "kimi", "qwen").
+    /// Modelo por defecto ("deepseek").
     #[serde(default = "default_brain")]
     pub brain: String,
     /// Modo por defecto ("pro" o "hack").
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn backward_compat_auto_bool_false() {
         let toml = r#"
-            brain = "kimi"
+            brain = "deepseek"
             auto = false
         "#;
         let cfg: ProjectConfig = toml::from_str(toml).unwrap();
@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn backward_compat_auto_bool_true() {
         let toml = r#"
-            brain = "qwen"
+            brain = "deepseek"
             auto = true
         "#;
         let cfg: ProjectConfig = toml::from_str(toml).unwrap();

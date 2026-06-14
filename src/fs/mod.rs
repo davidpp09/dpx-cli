@@ -401,7 +401,11 @@ pub fn detect_build(cwd: &Path) -> Option<String> {
         return Some("gradle compileJava -q".to_string());
     }
     if cwd.join("Cargo.toml").exists() {
-        return Some("cargo check --quiet".to_string());
+        // clippy en vez de `cargo check`: implica el check Y además deniega
+        // warnings (código muerto, lints) — lo que `cargo check`/`cargo test`
+        // NO hacen. Es lo que evita que dpx cante "listo" dejando dead-code que
+        // luego revienta el CI (`-D warnings`).
+        return Some("cargo clippy --quiet --all-targets -- -D warnings".to_string());
     }
     None
 }
@@ -470,13 +474,29 @@ fn detect_stack_deep(cwd: &Path) -> Option<&'static str> {
     }
     // Rust
     if cwd.join("Cargo.toml").exists() {
-        return Some("rust");
+        // dpx editándose a sí mismo → pack de auto-edición (su arquitectura + UI).
+        return Some(if is_dpx_repo(cwd) { "dpx" } else { "rust" });
     }
     // Python
     if let Some(stack) = detect_python_stack(cwd) {
         return Some(stack);
     }
     None
+}
+
+/// ¿El proyecto abierto es el propio repositorio de dpx? Se reconoce por el
+/// nombre del paquete en `Cargo.toml` (`name = "dpx-cli"`). Sirve para cargar
+/// el focus pack de auto-edición cuando dpx trabaja sobre su propio código.
+fn is_dpx_repo(cwd: &Path) -> bool {
+    let Ok(data) = fs::read_to_string(cwd.join("Cargo.toml")) else {
+        return false;
+    };
+    // Busca `name = "dpx-cli"` dentro de la sección [package] (tolerante a
+    // espacios y comillas simples/dobles), sin parsear TOML entero.
+    data.lines().any(|line| {
+        let l = line.trim();
+        l.starts_with("name") && l.contains("dpx-cli")
+    })
 }
 
 /// Detección superficial por tipo de archivo de build (fallback).
@@ -488,7 +508,7 @@ fn detect_stack_shallow(cwd: &Path) -> Option<&'static str> {
         return Some(if package_json_has_react(cwd) { "react" } else { "node" });
     }
     if cwd.join("Cargo.toml").exists() {
-        return Some("rust");
+        return Some(if is_dpx_repo(cwd) { "dpx" } else { "rust" });
     }
     if cwd.join("build.gradle").exists() || cwd.join("build.gradle.kts").exists() {
         return Some("gradle");
@@ -2009,9 +2029,11 @@ impl Mentor for Config {}
         assert_eq!(detect_build(&dir), None);
         assert_eq!(detect_test(&dir), None);
 
-        // Cargo: build = check (rápido), test = la suite completa.
+        // Cargo: build = clippy estricto (check + deniega lints/dead-code),
+        // test = la suite completa.
         fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
-        assert_eq!(detect_build(&dir).as_deref(), Some("cargo check --quiet"));
+        let build = detect_build(&dir).unwrap();
+        assert!(build.contains("clippy") && build.contains("-D warnings"), "build: {build}");
         assert_eq!(detect_test(&dir).as_deref(), Some("cargo test --quiet"));
         fs::remove_file(dir.join("Cargo.toml")).unwrap();
 
@@ -2020,6 +2042,25 @@ impl Mentor for Config {}
         assert!(detect_build(&dir).unwrap().contains("-DskipTests"));
         assert!(detect_test(&dir).unwrap().contains("test"));
         assert!(!detect_test(&dir).unwrap().contains("-DskipTests"));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detect_stack_reconoce_el_repo_de_dpx() {
+        let dir = std::env::temp_dir().join(format!("dpx-selfdetect-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+
+        // Crate Rust genérico → pack "rust".
+        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"otra-cosa\"\n").unwrap();
+        assert_eq!(detect_stack(&dir), Some("rust"));
+        assert!(!is_dpx_repo(&dir));
+
+        // El propio dpx (name = "dpx-cli") → pack "dpx" (auto-edición).
+        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"dpx-cli\"\nversion = \"0.2.0\"\n")
+            .unwrap();
+        assert!(is_dpx_repo(&dir));
+        assert_eq!(detect_stack(&dir), Some("dpx"));
 
         fs::remove_dir_all(&dir).unwrap();
     }
