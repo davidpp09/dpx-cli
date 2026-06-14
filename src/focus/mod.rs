@@ -266,6 +266,7 @@ Corres dentro de `dpx`, un CLI con estos comandos (el usuario los escribe con `/
 guardada), `/focus <id>` (cambia de enfoque/stack), `/mode pro|hack|learn` (cambia tu actitud; \
 learn 🎓 = tutor socrático), `/progreso` (el progreso de aprendizaje del usuario), \
 `/temario` (el temario del stack y su avance), `/quiz` (te interroga para fijar lo aprendido), \
+`/recordar <texto>` (guarda algo en la memoria de largo plazo del usuario), \
 `/mentor` y `/code` (cambia entre \
 enseñarte y hacerlo él), `/auto` (modo autónomo: aplica cambios y comandos seguros sin \
 preguntar), `/update` (recompila e instala dpx desde este repo) y `/salir`. Si el usuario \

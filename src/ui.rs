@@ -801,6 +801,7 @@ pub fn print_help() {
         ("/progreso", "tu progreso de aprendizaje: nivel por tema y qué repasar"),
         ("/temario", "el temario del stack y cuánto llevas (modo learn)"),
         ("/quiz [tema]", "el tutor te interroga para fijar lo aprendido (retrieval)"),
+        ("/recordar <texto>", "guarda algo en memoria de largo plazo (se recuerda solo)"),
         ("/brain [modelo]", "cerebro (dpx usa solo deepseek)"),
         ("/mentor", "persona mentor: enseña y te deja escribir"),
         ("/code", "persona code: agente autónomo que hace e itera"),

@@ -115,6 +115,13 @@ pub async fn run(
         );
     }
 
+    // Memoria semántica de largo plazo. El store se carga barato (lee el jsonl);
+    // el motor de embeddings se carga PEREZOSAMENTE solo si de verdad se usa
+    // (primer /recordar o primera recuperación con memoria existente), para no
+    // penalizar el arranque de quien no usa la memoria.
+    let mut mem_store = crate::memory::MemoryStore::load(store.dpx_dir());
+    let mut embedder: Option<crate::memory::Embedder> = None;
+
     loop {
         // De vuelta en el prompt: la pestaña muestra dpx en reposo.
         ui::title_idle(&proj_label);
@@ -154,6 +161,27 @@ pub async fn run(
                         .or_else(|| input.strip_prefix("/brainstorm "))
                 {
                     run_comite_command(&cwd, idea, &skin, &store, &mut turns).await;
+                    continue;
+                }
+
+                // /recordar <texto>: guarda algo en la memoria de largo plazo. Se
+                // traerá solo cuando sea relevante a una consulta futura.
+                if single_line && let Some(text) = input.strip_prefix("/recordar ") {
+                    let text = text.trim();
+                    if text.is_empty() {
+                        println!("{}", ui::dim("uso: /recordar <algo que quieras que dpx recuerde>"));
+                    } else {
+                        match remember(text, &mut mem_store, &mut embedder, "nota") {
+                            Ok(()) => println!(
+                                "{}",
+                                ui::dim(&format!(
+                                    "⎿ recordado · {} en memoria · lo traeré cuando sea relevante",
+                                    mem_store.len()
+                                ))
+                            ),
+                            Err(e) => println!("{} {}", ui::dim("no pude recordar:"), ui::dim(&e.to_string())),
+                        }
+                    }
                     continue;
                 }
 
@@ -226,6 +254,16 @@ pub async fn run(
                 store.checkpoint("user", input)?;
                 turns.push(Turn { role: "user", text: input.to_string() });
 
+                // Memoria de largo plazo: recupera fragmentos relevantes a la
+                // consulta y los antepone al turno (si hay memoria y algo encaja).
+                let turn_input = match recall_context(input, &mem_store, &mut embedder) {
+                    Some(ctx) => {
+                        println!("{}", ui::dim("⎿ recordando contexto relevante…"));
+                        format!("{ctx}\n\n{input}")
+                    }
+                    None => input.to_string(),
+                };
+
                 // Turno (puede ser agéntico: el mentor pide archivos con dpx:read,
                 // se los leemos y continúa, hasta dar su respuesta final).
                 // Si el cerebro no llega a responder nada (sin saldo, cuota, caído),
@@ -240,7 +278,7 @@ pub async fn run(
                     &skin,
                     &mut |p| ed.confirm_line(p),
                     &store,
-                    input,
+                    &turn_input,
                     auto,
                 )
                 .await;
@@ -269,7 +307,7 @@ pub async fn run(
                                     &skin,
                                     &mut |p| ed.confirm_line(p),
                                     &store,
-                                    input,
+                                    &turn_input,
                                     auto,
                                 )
                                 .await;
@@ -326,7 +364,7 @@ pub async fn run(
         }
     }
 
-    close_session(&router, &store, &turns, prior.as_deref()).await;
+    close_session(&router, &store, &turns, prior.as_deref(), &mut mem_store, &mut embedder).await;
     // Devuelve el título de la pestaña a algo neutro al salir.
     ui::set_title("dpx");
     Ok(())
@@ -1312,6 +1350,63 @@ fn build_quiz_prompt(store: &ProjectStore, focus_id: Option<&str>, topic: &str) 
     }
 }
 
+/// Guarda un recuerdo en la memoria de largo plazo: embebe el texto y lo
+/// persiste. Carga el motor de embeddings perezosamente la primera vez.
+fn remember(
+    text: &str,
+    mem: &mut crate::memory::MemoryStore,
+    emb: &mut Option<crate::memory::Embedder>,
+    kind: &str,
+) -> anyhow::Result<()> {
+    let engine = ensure_embedder(emb)?;
+    let vector = engine.embed_one(text)?;
+    mem.add(crate::memory::MemoryEntry {
+        text: text.to_string(),
+        vector,
+        kind: kind.to_string(),
+        created: crate::skill::today(),
+    })
+}
+
+/// Carga (o reutiliza) el motor de embeddings. Centraliza la carga perezosa.
+fn ensure_embedder(
+    emb: &mut Option<crate::memory::Embedder>,
+) -> anyhow::Result<&mut crate::memory::Embedder> {
+    if emb.is_none() {
+        *emb = Some(crate::memory::Embedder::new()?);
+    }
+    Ok(emb.as_mut().expect("recién inicializado"))
+}
+
+/// Recupera de la memoria de largo plazo los fragmentos relevantes a `input` y
+/// los formatea como un bloque de contexto para anteponer al turno. Devuelve
+/// `None` si no hay memoria, si el motor no carga, o si nada supera el umbral —
+/// en todos esos casos el turno sigue normal (degradación elegante, sin ruido).
+fn recall_context(
+    input: &str,
+    mem: &crate::memory::MemoryStore,
+    emb: &mut Option<crate::memory::Embedder>,
+) -> Option<String> {
+    if mem.is_empty() {
+        return None; // sin memoria → ni siquiera cargamos el modelo
+    }
+    let engine = ensure_embedder(emb).ok()?;
+    let query_vec = engine.embed_one(input).ok()?;
+    let hits = mem.search(&query_vec, 3, 0.45);
+    if hits.is_empty() {
+        return None;
+    }
+    let mut s = String::from(
+        "[memoria de largo plazo — fragmentos que recordaste de antes, relevantes a la \
+         consulta del usuario (úsalos si ayudan; ignóralos si no):\n",
+    );
+    for (_, e) in hits {
+        s.push_str(&format!("- {}\n", e.text));
+    }
+    s.push(']');
+    Some(s)
+}
+
 /// Rondas máximas de un subagente: es para investigar, no para épicas. Acotado
 /// para que no se desboque (su contexto y coste corren por cuenta de la sesión).
 const SUBAGENT_MAX_ROUNDS: usize = 6;
@@ -2015,6 +2110,8 @@ async fn close_session(
     store: &ProjectStore,
     turns: &[Turn],
     prior: Option<&str>,
+    mem: &mut crate::memory::MemoryStore,
+    emb: &mut Option<crate::memory::Embedder>,
 ) {
     // Hooks OnSessionEnd: se ejecutan antes del resumen, incluso si la sesión
     // está vacía (un hook puede querer correr igual).
@@ -2039,10 +2136,19 @@ async fn close_session(
 
     match summary {
         Ok(md) => match store.write_context(&md) {
-            Ok(()) => println!(
-                "{} contexto guardado en .dpx/context.md · la próxima vez retomo desde aquí.",
-                ui::accent("⏺")
-            ),
+            Ok(()) => {
+                println!(
+                    "{} contexto guardado en .dpx/context.md · la próxima vez retomo desde aquí.",
+                    ui::accent("⏺")
+                );
+                // Auto-ingesta: el resumen de esta sesión entra en la memoria de
+                // largo plazo, para recordarlo por SEMÁNTICA en sesiones futuras
+                // (no solo lo que el usuario marcó con /recordar). Best-effort:
+                // si el motor de embeddings no carga, no pasa nada.
+                if remember(&md, mem, emb, "resumen").is_ok() {
+                    println!("{}", ui::dim("⎿ sesión añadida a tu memoria de largo plazo"));
+                }
+            }
             Err(e) => eprintln!("{} no pude escribir el contexto: {e}", ui::accent("⏺")),
         },
         // Si el resumen falla (p.ej. modelo saturado), no perdemos la sesión:

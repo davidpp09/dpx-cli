@@ -103,6 +103,11 @@ impl ProjectStore {
         Ok(())
     }
 
+    /// Ruta de la carpeta `.dpx/` del proyecto (para la memoria semántica).
+    pub fn dpx_dir(&self) -> &std::path::Path {
+        &self.root
+    }
+
     /// Lee las habilidades aprendidas (modo learn), si las hay.
     pub fn read_skills(&self) -> Vec<crate::skill::Skill> {
         match fs::read_to_string(self.root.join("skills.md")) {
