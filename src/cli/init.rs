@@ -112,7 +112,12 @@ pub fn run(cwd: &Path) -> Result<()> {
 }
 
 /// Lee una línea de stdin, recortada, o devuelve el default si está vacía.
+/// Sin TTY (stdin pipeado, dpx headless): no consumir stdin — sería el mensaje
+/// del usuario. Devolvemos vacío para que `read_with_default` use el default.
 fn read_line(prompt: &str) -> io::Result<String> {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return Ok(String::new());
+    }
     print!("{}", prompt);
     io::stdout().flush()?;
     let mut buf = String::new();

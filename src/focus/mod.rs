@@ -435,6 +435,23 @@ SEARCH, no la herramienta: copia la zona real que te muestra el error). Si te ve
 - Ambigüedad de producto (qué quiere el usuario) no se resuelve leyendo código: pregunta.
 - Todo lo demás se resuelve leyendo o ejecutando: hazlo tú, no preguntes por gusto.
 
+## Errores recurrentes que no debes repetir (lecciones reales)
+- AÑADIR, no reemplazar: al editar una lista, array, match o tabla (comandos, opciones, \
+filas de ayuda), AÑADE la entrada nueva; NUNCA sustituyas una existente salvo orden \
+explícita. Tras el edit, verifica que las demás entradas siguen ahí.
+- BORRAR código — antes de eliminar algo por \"huérfano\", busca TODOS sus usos en \
+el repo con `search_project` (incluidos tests, otros módulos y referencias indirectas) y \
+confirma que son cero. Un símbolo sin use directo puede estar llamado desde un test o \
+usado vía re-export.
+- UI — TRUNCA los datos variables: al pintar texto del proyecto o del usuario (contexto, \
+plan, resúmenes) dentro de una caja o panel de ancho fijo, acota cada valor a ~64 \
+caracteres con elipsis; `context.md` y `plan.md` pueden ser párrafos enteros y revientan \
+la caja.
+- VERIFICAR no es solo clippy + tests — no cazan bugs visuales, de layout ni de \
+comportamiento en código nuevo (una función de render con un bug compila y pasa tests \
+igual). Antes de declarar listo, RAZONA sobre la salida real: ¿se desborda la caja? \
+¿aparece la opción en la ayuda? ¿el modo headless consume un stdin que no debía?
+
 ## Si trabajas sobre el propio dpx
 - `cargo install --path . --force` FALLA con el binario en uso (os error 5, Windows). NO lo \
 ejecutes tú: al terminar, dile al usuario que corra el comando `/actualizar` (dpx se reinstala \

@@ -112,9 +112,13 @@ en CHARS (limitación CJK heredada, no la `unwrap()`-ees). El render (`paint`) D
 input a `term_height()-N` filas con ventana alrededor del cursor: si pintas más filas que el \
 viewport, `MoveUp` no alcanza el tope (se va al scrollback) y la aritmética de filas se \
 rompe — fue un bug real con pegados grandes. Repinta SOLO la región (MoveUp + \
-`Clear(FromCursorDown)`), no toda la pantalla.
+`Clear(FromCursorDown)`), no toda la pantalla. El borrado usa `MoveUp` RELATIVO por nº de \
+filas, NUNCA `position()`/`MoveTo` ABSOLUTO: la coordenada absoluta se desincroniza con el \
+scroll y apila un muro de reglas `────` fantasma (bug real ya corregido con relativo).
 - Confirmaciones `[s/N]`: `confirm_line` en raw; hay fallback a stdin plano si no hay TTY \
-(no rompas el smoke test pipeado).
+(no rompas el smoke test pipeado). Y en el arranque/`init.rs`: `read_line` DEBE chequear \
+`IsTerminal` ANTES de leer — sin TTY (pipe `echo tarea | dpx code`) `read_line()` se traga el \
+mensaje del usuario (bug real del onboarding headless).
 
 ## Convenciones del repo que DEBES respetar (romperlas mete bugs sutiles)
 - **Costura de testabilidad**: `run_turn` toma `&impl TurnBrain` (no `&Mentor`) y \
