@@ -4,11 +4,9 @@
 //! ```` ```dpx:skill ```` con una habilidad por línea (`nivel | tema | stack`).
 //! El CLI lo parsea ([`parse_block`]), lo fusiona con lo ya sabido ([`merge`],
 //! que sube el nivel y refresca la fecha) y lo persiste en `.dpx/skills.md`
-//! ([`to_markdown`]/[`from_markdown`]). El comando `/progreso` lo muestra
-//! ([`render`]): nivel por tema, agrupado por stack, y qué toca repasar hoy
-//! (repaso espaciado). Mismo patrón de bloque que `dpx:plan`.
-
-use crate::ui;
+//! ([`to_markdown`]/[`from_markdown`]). La vista rica la pinta
+//! [`ui::learn_panel`], que muestra dots de nivel, badges y repaso espaciado.
+//! Mismo patrón de bloque que `dpx:plan`.
 
 /// Días desde la última vez que se vio una habilidad NO dominada antes de
 /// sugerir repasarla (repaso espaciado, simple y efectivo).
@@ -54,14 +52,6 @@ impl SkillLevel {
         }
     }
 
-    /// Etiqueta legible.
-    pub fn label(self) -> &'static str {
-        match self {
-            SkillLevel::Visto => "visto",
-            SkillLevel::Practicando => "practicando",
-            SkillLevel::Dominado => "dominado",
-        }
-    }
 }
 
 /// Una habilidad que el usuario ha tocado en modo learn.
@@ -211,75 +201,19 @@ pub fn from_markdown(md: &str) -> Vec<Skill> {
 }
 
 /// ¿Cuántos días han pasado entre dos fechas `YYYY-MM-DD`? `None` si no parsean.
-fn days_between(from: &str, to: &str) -> Option<i64> {
+pub fn days_between(from: &str, to: &str) -> Option<i64> {
     let f = chrono::NaiveDate::parse_from_str(from, "%Y-%m-%d").ok()?;
     let t = chrono::NaiveDate::parse_from_str(to, "%Y-%m-%d").ok()?;
     Some((t - f).num_days())
 }
 
 /// ¿Toca repasar esta habilidad hoy? (no dominada + vista hace ≥ N días).
-fn needs_review(skill: &Skill, today: &str) -> bool {
+pub fn needs_review(skill: &Skill, today: &str) -> bool {
     skill.level != SkillLevel::Dominado
         && days_between(&skill.last_seen, today).is_some_and(|d| d >= REVIEW_AFTER_DAYS)
 }
 
-/// Renderiza el tablero de progreso para `/progreso`: resumen, habilidades por
-/// stack con su nivel, y qué repasar hoy (repaso espaciado).
-pub fn render(skills: &[Skill], today: &str) -> String {
-    if skills.is_empty() {
-        return format!(
-            "{}\n  {}",
-            ui::accent("⏺ tu progreso de aprendizaje"),
-            ui::dim("aún no hay nada registrado. Entra en modo learn (/mode learn) y empieza a aprender.")
-        );
-    }
 
-    let dominadas = skills.iter().filter(|s| s.level == SkillLevel::Dominado).count();
-    let practicando = skills.iter().filter(|s| s.level == SkillLevel::Practicando).count();
-    let total = skills.len();
-
-    let mut out = String::new();
-    out.push_str(&format!("{}\n", ui::accent("⏺ tu progreso de aprendizaje")));
-    out.push_str(&format!(
-        "  {}\n\n",
-        ui::dim(&format!(
-            "{total} conceptos · {dominadas} dominados · {practicando} practicando"
-        ))
-    ));
-
-    // Agrupado por stack (la lista ya viene ordenada por stack+tema desde merge).
-    let mut current_stack = String::new();
-    for s in skills {
-        if s.stack != current_stack {
-            current_stack = s.stack.clone();
-            out.push_str(&format!("  {}\n", ui::accent(&current_stack)));
-        }
-        let icon = match s.level {
-            SkillLevel::Dominado => ui::green(s.level.icon()),
-            _ => ui::dim(s.level.icon()),
-        };
-        out.push_str(&format!(
-            "    {icon} {topic} {lvl}\n",
-            topic = s.topic,
-            lvl = ui::dim(&format!("· {}", s.level.label()))
-        ));
-    }
-
-    // Repaso espaciado: lo que toca refrescar hoy.
-    let to_review: Vec<&Skill> = skills.iter().filter(|s| needs_review(s, today)).collect();
-    if !to_review.is_empty() {
-        out.push_str(&format!("\n  {}\n", ui::accent("↻ para repasar hoy")));
-        for s in to_review {
-            out.push_str(&format!("    {} {}\n", ui::dim("·"), s.topic));
-        }
-        out.push_str(&format!(
-            "  {}\n",
-            ui::dim("pídele a dpx \"repasemos\" en modo learn para reforzarlos.")
-        ));
-    }
-
-    out
-}
 
 #[cfg(test)]
 mod tests {

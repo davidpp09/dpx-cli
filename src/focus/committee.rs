@@ -9,25 +9,21 @@ pub fn roles() -> [CommitteeRole; 4] {
     [
         CommitteeRole {
             id: "juez",
-            emoji: "⚖️",
             label: "Juez/a de hackathon",
             prompt: JUEZ,
         },
         CommitteeRole {
             id: "product",
-            emoji: "📋",
             label: "Product person",
             prompt: PRODUCT,
         },
         CommitteeRole {
             id: "tech-lead",
-            emoji: "🔧",
             label: "Tech lead",
             prompt: TECH_LEAD,
         },
         CommitteeRole {
             id: "skeptic",
-            emoji: "🤨",
             label: "Usuario/a escéptico/a",
             prompt: SKEPTIC,
         },
@@ -36,7 +32,6 @@ pub fn roles() -> [CommitteeRole; 4] {
 
 pub struct CommitteeRole {
     pub id: &'static str,
-    pub emoji: &'static str,
     pub label: &'static str,
     pub prompt: &'static str,
 }
@@ -185,8 +180,8 @@ mod tests {
     #[test]
     fn synthesis_prompt_incluye_idea_aportes_y_pide_plan() {
         let contribs = vec![
-            ("⚖️ Juez".to_string(), "tiene hack factor".to_string()),
-            ("🤨 Escéptico".to_string(), "¿quién lo usaría?".to_string()),
+            ("Juez".to_string(), "tiene hack factor".to_string()),
+            ("Escéptico".to_string(), "¿quién lo usaría?".to_string()),
         ];
         let p = synthesis_prompt(&contribs, "una app de notas con IA");
         assert!(p.contains("una app de notas con IA"), "falta la idea original");

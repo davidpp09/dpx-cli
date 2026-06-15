@@ -32,7 +32,7 @@ use crate::ui;
 pub const COMMANDS: &[&str] = &[
     "/ayuda", "/estado", "/costo", "/presupuesto", "/modelos", "/cambios", "/deshacer", "/limpiar",
     "/compactar", "/contexto", "/enfoque", "/modo", "/progreso", "/temario", "/examen", "/recordar",
-    "/habilidades", "/cerebro", "/comité", "/auto", "/actualizar", "/salir",
+    "/habilidades", "/cerebro", "/comité", "/auto", "/actualizar", "/salir", "/panel",
 ];
 
 const PROMPT: &str = " › ";

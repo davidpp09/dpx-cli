@@ -74,18 +74,6 @@ impl AgentRole {
         }
     }
 
-    /// Emoji para el banner del subagente.
-    pub fn emoji(self) -> &'static str {
-        match self {
-            AgentRole::Researcher => "🔎",
-            AgentRole::Planner => "🧭",
-            AgentRole::Reviewer => "🔬",
-            AgentRole::TestDesigner => "🧪",
-            AgentRole::Debugger => "🐛",
-            AgentRole::Architect => "📐",
-            AgentRole::DocAuditor => "📚",
-        }
-    }
 
     /// Etiqueta legible para el banner.
     pub fn label(self) -> &'static str {

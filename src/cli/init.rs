@@ -37,9 +37,9 @@ pub fn onboarding(cwd: &Path, mode: Mode, brain: Brain) -> Result<ProjectConfig>
         ui::dim("aún no hay .dpx/ aquí. Dos pasos rápidos (Enter acepta el default).")
     );
     let mode_human = match mode {
-        Mode::Code => "code 🤖 (agente autónomo)",
-        Mode::Hack => "hack ⚡ (construir rápido con criterio)",
-        Mode::Learn => "learn 🎓 (tutor socrático)",
+        Mode::Code => "code (agente autónomo)",
+        Mode::Hack => "hack (construir rápido con criterio)",
+        Mode::Learn => "learn (tutor socrático)",
     };
     println!("  {}   {}", ui::dim("modo"), ui::accent(mode_human));
 
@@ -96,9 +96,9 @@ pub fn run(cwd: &Path) -> Result<()> {
     println!("  {}   {}", ui::dim("enfoque"), focus_display);
     println!("  {}    {}", ui::dim("cerebro"), brain.label());
     let mode_human = match mode {
-        Mode::Code => "code 🤖 (agente autónomo)",
-        Mode::Hack => "hack ⚡ (construir rápido con criterio)",
-        Mode::Learn => "learn 🎓 (tutor socrático)",
+        Mode::Code => "code (agente autónomo)",
+        Mode::Hack => "hack (construir rápido con criterio)",
+        Mode::Learn => "learn (tutor socrático)",
     };
     println!("  {}       {}", ui::dim("modo"), mode_human);
     let auto_label = AutoMode::parse(&config.auto).map(|a| a.label()).unwrap_or("off");
@@ -223,9 +223,9 @@ fn step_mode() -> Result<Mode> {
     println!();
     println!("{}", ui::accent("⏺ 3. Modo de trabajo"));
 
-    println!("  {} {}", ui::accent("code 🤖"),  ui::dim("agente autónomo: escribe, ejecuta, itera y deja funcionando"));
-    println!("  {} {}", ui::accent("hack ⚡"), ui::dim("construir rápido CON criterio: demo sólida, mínimo boilerplate"));
-    println!("  {}{}", ui::accent("learn 🎓 "), ui::dim("tutor socrático: te enseña conceptos y arquitectura, tú escribes"));
+    println!("  {} {}", ui::accent("code"),  ui::dim("agente autónomo: escribe, ejecuta, itera y deja funcionando"));
+    println!("  {} {}", ui::accent("hack"), ui::dim("construir rápido CON criterio: demo sólida, mínimo boilerplate"));
+    println!("  {}{}", ui::accent("learn "), ui::dim("tutor socrático: te enseña conceptos y arquitectura, tú escribes"));
     println!();
 
     let answer = read_with_default("  Modo [code]: ", "code")?;

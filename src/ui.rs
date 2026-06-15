@@ -19,7 +19,7 @@ use termimad::crossterm::style::Color;
 
 // ============================================================
 //  TEMA POR MODO — el color de acento y el degradado cambian según el modo
-//  activo (code 🤖 azul · hack ⚡ ámbar · learn 🎓 verde). Se fija al arrancar
+//  activo (code azul · hack ámbar · learn verde). Se fija al arrancar
 //  y en cada `/mode` con `set_mode_theme`, y TODA la UI bonita (logo, reglas,
 //  bordes, spinner, acentos) lo lee en caliente desde estos átomos.
 // ============================================================
@@ -56,11 +56,11 @@ fn grad_to() -> (u8, u8, u8) {
 pub fn set_mode_theme(mode: crate::focus::Mode) {
     use crate::focus::Mode;
     let (accent, hi, lo) = match mode {
-        // code 🤖 — azul: agente que construye, sereno y preciso.
+        // code — azul: agente que construye, sereno y preciso.
         Mode::Code => ((74, 144, 226), (90, 160, 240), (28, 58, 130)),
-        // hack ⚡ — ámbar: energía, velocidad con criterio.
+        // hack — ámbar: energía, velocidad con criterio.
         Mode::Hack => ((224, 138, 38), (240, 165, 55), (130, 70, 10)),
-        // learn 🎓 — verde: crecimiento, aprender.
+        // learn — verde: crecimiento, aprender.
         Mode::Learn => ((76, 175, 110), (95, 200, 130), (24, 92, 58)),
     };
     ACCENT.store(pack_rgb(accent.0, accent.1, accent.2), Ordering::Relaxed);
@@ -284,17 +284,17 @@ pub fn mode_banner(mode: crate::focus::Mode) {
     use crate::focus::Mode;
     let (title, l1, l2) = match mode {
         Mode::Code => (
-            "🤖 modo code activado",
+            "modo code activado",
             "hago el trabajo: escribo, ejecuto y corrijo hasta dejarlo funcionando.",
             "pídeme una tarea y voy a ello · /modo para cambiar de modo.",
         ),
         Mode::Hack => (
-            "⚡ modo hack activado",
+            "modo hack activado",
             "construyo rápido y con criterio: lo imprescindible que corre ya, sin chapuza.",
             "cuéntame qué quieres montar · /comité <idea> para evaluarla con un comité.",
         ),
         Mode::Learn => (
-            "🎓 modo learn activado",
+            "modo learn activado",
             "te hago pensar y te enseño el porqué — tú escribes, yo te guío.",
             "mira tu avance cuando quieras con /progreso · /temario para el plan.",
         ),
@@ -302,6 +302,112 @@ pub fn mode_banner(mode: crate::focus::Mode) {
     println!("\n  {}", grad(title));
     println!("  {}", dim(l1));
     println!("  {}", dim(l2));
+}
+
+/// Panel de aprendizaje (comando `/progreso`): cada concepto con dots de nivel,
+/// un badge de dominio en texto y mensaje motivador si aún no hay skills.
+/// Reusa la caja redondeada con degradado del modo activo.
+pub fn learn_panel(skills: &[crate::skill::Skill], today: &str) {
+    use crate::skill::{SkillLevel, needs_review};
+
+    // --- sin skills aún: mensaje motivador ---
+    if skills.is_empty() {
+        let lines = vec![
+            grad("tu aprendizaje"),
+            String::new(),
+            dim("aún no hay nada registrado."),
+            dim("entra en modo learn (/modo learn) y empieza a descubrir."),
+            String::new(),
+            dim("cada concepto que trabajemos irá apareciendo aquí"),
+            dim("con su nivel: ●●● dominado · ●●○ practicando · ●○○ visto"),
+        ];
+        let content_width = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
+        let inner = content_width + 2;
+        println!();
+        println!("{}", grad(&format!("╭{}╮", "─".repeat(inner))));
+        for l in &lines {
+            let pad = content_width.saturating_sub(visible_width(l));
+            println!("{} {l}{} {}", grad("│"), " ".repeat(pad), grad("│"));
+        }
+        println!("{}", grad(&format!("╰{}╯", "─".repeat(inner))));
+        return;
+    }
+
+    // --- estadísticas ---
+    let dominados = skills.iter().filter(|s| s.level == SkillLevel::Dominado).count();
+    let practicando = skills.iter().filter(|s| s.level == SkillLevel::Practicando).count();
+    let vistos = skills.iter().filter(|s| s.level == SkillLevel::Visto).count();
+    let total = skills.len();
+
+    // Badge de dominio en texto (sin emoji): según cuántos conceptos domina.
+    let badge = if dominados >= 10 {
+        "maestría"
+    } else if dominados >= 5 {
+        "nivel avanzado"
+    } else if dominados >= 1 {
+        "en marcha"
+    } else {
+        "recién empiezas"
+    };
+
+    let mut lines: Vec<String> = Vec::new();
+
+    // Título y resumen
+    lines.push(grad("tu aprendizaje"));
+    lines.push(String::new());
+    lines.push(format!(
+        "{} {total} conceptos · {dominados} dominados · {badge}",
+        dim("⏺"),
+    ));
+    if practicando > 0 || vistos > 0 {
+        lines.push(format!(
+            "  {} {practicando} practicando · {vistos} vistos",
+            dim(""),
+        ));
+    }
+    lines.push(String::new());
+
+    // --- cada concepto con dots ---
+    // Agrupados por stack (la lista ya viene ordenada por stack+tema desde merge).
+    let mut current_stack = String::new();
+    for s in skills {
+        if s.stack != current_stack {
+            current_stack = s.stack.clone();
+            lines.push(format!("  {}", accent(&current_stack)));
+        }
+        let dots = match s.level {
+            SkillLevel::Dominado => green("●●●").to_string(),
+            SkillLevel::Practicando => dim("●●○").to_string(),
+            SkillLevel::Visto => dim("●○○").to_string(),
+        };
+        lines.push(format!("    {}  {}", dots, s.topic));
+    }
+
+    // --- repaso espaciado ---
+    let to_review: Vec<&crate::skill::Skill> = skills
+        .iter()
+        .filter(|s| needs_review(s, today))
+        .collect();
+    if !to_review.is_empty() {
+        lines.push(String::new());
+        lines.push(accent("↻ para repasar hoy").to_string());
+        for s in &to_review {
+            lines.push(format!("    {} {}", dim("·"), s.topic));
+        }
+        lines.push(dim("pídele a dpx \"repasemos\" en modo learn para reforzarlos."));
+    }
+
+    // --- pintar la caja ---
+    let content_width = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
+    let inner = content_width + 2;
+
+    println!();
+    println!("{}", grad(&format!("╭{}╮", "─".repeat(inner))));
+    for l in &lines {
+        let pad = content_width.saturating_sub(visible_width(l));
+        println!("{} {l}{} {}", grad("│"), " ".repeat(pad), grad("│"));
+    }
+    println!("{}", grad(&format!("╰{}╯", "─".repeat(inner))));
 }
 
 /// Línea de estado del área de entrada (focus · modo · cerebro · auto).
@@ -321,7 +427,7 @@ pub fn format_input_status(
         badge("brain", brain),
     );
     if auto != crate::cli::AutoMode::Off {
-        bar.push_str(&format!("{sep}{} {}", grad("⚡ auto"), dim(auto.label())));
+        bar.push_str(&format!("{sep}{} {}", grad("auto"), dim(auto.label())));
     }
     // Truncar al ancho real de la terminal (con margen mínimo); si la barra
     // es más larga, se corta el excedente para que no desborde la línea.
@@ -385,6 +491,128 @@ pub fn welcome(focus: &str, mode: &str, brain: &str, cwd: &str) {
     println!("{}", grad(&format!("╭{}╮", "─".repeat(inner))));
     for l in &lines {
         let pad = content_width - visible_width(l);
+        println!("{} {l}{} {}", grad("│"), " ".repeat(pad), grad("│"));
+    }
+    println!("{}", grad(&format!("╰{}╯", "─".repeat(inner))));
+}
+
+/// Panel de proyecto (comando `/panel`): dashboard resumen de los 3 modos,
+/// recuerdos y skills. Estilo caja redondeada con degradado, reusa la paleta activa.
+pub fn project_panel(
+    has_context: bool,
+    plan_progress: Option<(usize, usize)>, // (hechas, total)
+    skills_dominados: usize,
+    skills_total: usize,
+    recuerdos: usize,
+    agent_skills: usize,
+) {
+    let code_line = if has_context {
+        format!("{}  {}", grad("code"), dim("· contexto guardado"))
+    } else {
+        format!("{}  {}", grad("code"), dim("· sin contexto aún"))
+    };
+    let hack_line = match plan_progress {
+        Some((done, total)) => {
+            let pct = done.checked_mul(100).and_then(|n| n.checked_div(total)).unwrap_or(0);
+            format!(
+                "{}  {}",
+                grad("hack"),
+                dim(&format!("· plan {done}/{total} ({pct}%)"))
+            )
+        }
+        None => format!("{}  {}", grad("hack"), dim("· sin plan")),
+    };
+    let learn_line = if skills_total > 0 {
+        let resto = skills_total - skills_dominados;
+        format!(
+            "{}  {}",
+            grad("learn"),
+            dim(&format!("· {skills_dominados} dominados, {resto} por repasar"))
+        )
+    } else {
+        format!("{}  {}", grad("learn"), dim("· sin skills aún"))
+    };
+    let bottom = format!(
+        "{} recuerdos · {} skills del agente",
+        recuerdos,
+        agent_skills,
+    );
+
+    let lines = vec![
+        format!("{} {}", grad("✻"), grad("panel del proyecto")),
+        String::new(),
+        code_line,
+        hack_line,
+        learn_line,
+        String::new(),
+        dim(&bottom),
+    ];
+
+    let content_width = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
+    let inner = content_width + 2;
+
+    println!();
+    println!("{}", grad(&format!("╭{}╮", "─".repeat(inner))));
+    for l in &lines {
+        let pad = content_width.saturating_sub(visible_width(l));
+        println!("{} {l}{} {}", grad("│"), " ".repeat(pad), grad("│"));
+    }
+    println!("{}", grad(&format!("╰{}╯", "─".repeat(inner))));
+}
+
+/// Vista del modo hack: estado del proyecto, primera tarea pendiente y
+/// progreso del plan. Caja redondeada con degradado, misma paleta que
+/// project_panel. Sin emojis, solo texto y color.
+pub fn hack_panel(
+    proyecto: Option<&str>,
+    en_que_voy: Option<&str>,
+    plan_progress: Option<(usize, usize)>,
+) {
+    // Acota cada valor a una línea legible: el contexto/plan pueden ser un
+    // párrafo entero y reventarían el ancho de la caja.
+    let short = |s: &str| -> String {
+        let s = s.trim();
+        if s.chars().count() > 64 {
+            format!("{}…", s.chars().take(63).collect::<String>())
+        } else {
+            s.to_string()
+        }
+    };
+    let proyecto_line = match proyecto {
+        Some(p) => format!("{}  {}", grad("proyecto"), dim(&short(p))),
+        None => format!("{}  {}", grad("proyecto"), dim("proyecto nuevo")),
+    };
+    let voy_line = match en_que_voy {
+        Some(t) => format!("{}    {}", grad("en que voy"), dim(&short(t))),
+        None => format!("{}    {}", grad("en que voy"), dim("sin plan aun")),
+    };
+    let plan_line = match plan_progress {
+        Some((done, total)) => {
+            let pct = done.checked_mul(100).and_then(|n| n.checked_div(total)).unwrap_or(0);
+            format!(
+                "{}      {}",
+                grad("plan"),
+                dim(&format!("{done}/{total} ({pct}%)"))
+            )
+        }
+        None => format!("{}      {}", grad("plan"), dim("sin plan")),
+    };
+
+    let lines = vec![
+        format!("{} {}", grad("✻"), grad("modo hack")),
+        String::new(),
+        proyecto_line,
+        voy_line,
+        plan_line,
+    ];
+
+    let content_width = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
+    let inner = content_width + 2;
+
+    println!();
+    println!("{}", grad(&format!("╭{}╮", "─".repeat(inner))));
+    for l in &lines {
+        let pad = content_width.saturating_sub(visible_width(l));
         println!("{} {l}{} {}", grad("│"), " ".repeat(pad), grad("│"));
     }
     println!("{}", grad(&format!("╰{}╯", "─".repeat(inner))));
@@ -659,7 +887,7 @@ pub fn danger_panel(title: &str, body: &str) {
 
 pub fn diagnostic_panel(hint: &str, suggestions: &[String]) {
     let warning_color = "\x1b[38;2;245;184;66m"; // Naranja amarillento
-    println!("\n{} ⚡ dpx diagnóstico automático {}", warning_color, RESET);
+    println!("\n{} dpx diagnóstico automático {}", warning_color, RESET);
     println!("  {}", dim(hint));
     if !suggestions.is_empty() {
         println!("  {}", dim("  Sugerencias a investigar:"));
@@ -902,6 +1130,7 @@ pub fn print_help(mode: crate::focus::Mode) {
     // (comando, descripción, modos donde aplica — vacío = global).
     let rows: &[(&str, &str, &[Mode])] = &[
         ("/ayuda", "esta ayuda", &[]),
+        ("/panel", "dashboard del proyecto: contexto, plan, skills y recuerdos", &[]),
         ("/estado", "estado de la sesión: config, cerebros y memoria", &[]),
         ("/costo", "tokens reales gastados en la sesión + % de caché y costo aprox", &[]),
         ("/presupuesto [N]", "tope de tokens de la sesión (ej. /presupuesto 100k)", &[]),
@@ -913,14 +1142,14 @@ pub fn print_help(mode: crate::focus::Mode) {
         ("/comité <idea>", "convoca al comité (4 roles) a evaluar tu idea", &[Mode::Hack]),
         ("/contexto", "muestra la memoria guardada del proyecto", &[]),
         ("/enfoque [id]", "cambia de enfoque (sin id: lista los disponibles)", &[]),
-        ("/modo [code|hack|learn]", "cambia de modo (🤖 hace · ⚡ rápido · 🎓 enseña)", &[]),
+        ("/modo [code|hack|learn]", "cambia de modo (hace · rápido · enseña)", &[]),
         ("/progreso", "tu progreso de aprendizaje: nivel por tema y qué repasar", &[Mode::Learn]),
         ("/temario", "el temario del stack y cuánto llevas", &[Mode::Learn]),
         ("/examen [tema]", "el tutor te interroga para fijar lo aprendido", &[Mode::Learn]),
         ("/recordar <texto>", "guarda algo en memoria de largo plazo", &[]),
         ("/habilidades", "playbooks que dpx aprendió aquí (se afinan con el uso)", &[Mode::Code, Mode::Hack]),
         ("/cerebro [modelo]", "cerebro (dpx usa solo deepseek)", &[]),
-        ("/auto [off|all]", "modo autónomo ⚡: cambios sin preguntar", &[Mode::Code, Mode::Hack]),
+        ("/auto [off|all]", "modo autónomo: cambios sin preguntar", &[Mode::Code, Mode::Hack]),
         ("/actualizar", "recompila e instala dpx desde este repo", &[]),
         ("/salir", "termina y guarda el contexto", &[]),
     ];
@@ -941,9 +1170,9 @@ pub fn print_help(mode: crate::focus::Mode) {
 fn mode_id(mode: crate::focus::Mode) -> &'static str {
     use crate::focus::Mode;
     match mode {
-        Mode::Code => "code 🤖",
-        Mode::Hack => "hack ⚡",
-        Mode::Learn => "learn 🎓",
+        Mode::Code => "code",
+        Mode::Hack => "hack",
+        Mode::Learn => "learn",
     }
 }
 
@@ -967,7 +1196,7 @@ pub fn fable_tribute() {
         accent("dpx nunca usó Anthropic."),
         dim("sigue con DeepSeek, su cerebro mentor.")
     );
-    println!("  {}", dim("      descansa, rey. ⚡"));
+    println!("  {}", dim("      descansa, rey."));
     println!();
 }
 

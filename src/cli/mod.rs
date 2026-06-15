@@ -100,15 +100,15 @@ struct ModeArgs {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Modo CODE 🤖: agente autónomo que hace el trabajo e itera (escribe,
+    /// Modo CODE: agente autónomo que hace el trabajo e itera (escribe,
     /// ejecuta, corrige) hasta dejarlo robusto.
     Code(ModeArgs),
 
-    /// Modo HACK ⚡: construye rápido pero con criterio — demo sólida, mínimo
+    /// Modo HACK: construye rápido pero con criterio — demo sólida, mínimo
     /// boilerplate, código correcto que corre ya.
     Hack(ModeArgs),
 
-    /// Modo LEARN 🎓: tutor socrático que te hace pensar y te enseña conceptos,
+    /// Modo LEARN: tutor socrático que te hace pensar y te enseña conceptos,
     /// patrones y arquitectura. Tú escribes el código, él te guía.
     Learn(ModeArgs),
 

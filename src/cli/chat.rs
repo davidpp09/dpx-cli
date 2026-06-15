@@ -85,6 +85,26 @@ pub async fn run(
     }
     // Cada modo arranca con su propio cartel: deja claro en cuál estás.
     ui::mode_banner(mode);
+    // Modo hack: panel con el estado del proyecto, plan y progreso.
+    if mode == Mode::Hack {
+        let proyecto = store.prior_context().map(|ctx| {
+            ctx.lines()
+                .find(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+                .unwrap_or("proyecto nuevo")
+                .trim()
+                .to_string()
+        });
+        let proyecto_disp = proyecto.as_deref();
+        let plan_data = store.read_plan().and_then(|p| crate::fs::parse_plan(&p));
+        let en_que_voy = plan_data.as_ref().and_then(|plan| {
+            plan.iter().find(|(done, _)| !done).map(|(_, text)| text.as_str())
+        });
+        let plan_progress = plan_data.as_ref().map(|plan| {
+            let done = plan.iter().filter(|(d, _)| *d).count();
+            (done, plan.len())
+        });
+        ui::hack_panel(proyecto_disp, en_que_voy, plan_progress);
+    }
     println!(
         "\n{}",
         ui::dim("escribe tu mensaje · @archivo lee código · Shift+Enter salto de línea · Ctrl-C cancela · /salir")
@@ -115,7 +135,7 @@ pub async fn run(
     if pending_brainstorm {
         println!(
             "\n{}",
-            ui::accent("⚡ proyecto nuevo · cuéntame tu idea y la paso por el comité (lluvia de ideas)")
+            ui::accent("proyecto nuevo · cuéntame tu idea y la paso por el comité (lluvia de ideas)")
         );
         println!(
             "{}",
@@ -507,6 +527,13 @@ fn context_snippet(context: &str, heading: &str) -> Option<String> {
 /// Pregunta `¿continuar? [S/n]` por stdin (rustyline aún no existe en el arranque).
 /// Enter o cualquier cosa que no sea "n"/"no" cuenta como sí.
 fn ask_continue() -> bool {
+    // Sin TTY (stdin pipeado / dpx manejado por script): NO consumas una línea
+    // de stdin — sería el mensaje del usuario, no la respuesta a este prompt.
+    // Usa el default (continuar) y sigue, para que dpx sea manejable headless.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        println!("  {}", ui::dim("(sin TTY · retomo el contexto por defecto)"));
+        return true;
+    }
     print!("  ¿continuar? [S/n] ");
     let _ = std::io::Write::flush(&mut std::io::stdout());
     let mut answer = String::new();
@@ -783,7 +810,7 @@ async fn run_turn(
                     stream_retries += 1;
                     println!(
                         "{}",
-                        ui::dim("⚡ la conexión se cortó a mitad del turno · reintentando la ronda")
+                        ui::dim("la conexión se cortó a mitad del turno · reintentando la ronda")
                     );
                     to_send = "[Tu respuesta anterior se cortó a mitad por un error de red y \
                                NO quedó registrada: ninguna acción que pidieras en ella se \
@@ -1212,7 +1239,7 @@ fn extend_rounds(
         }
         println!(
             "\n{}",
-            ui::dim(&format!("auto ⚡ {round} rondas y la tarea sigue · ampliando presupuesto"))
+            ui::dim(&format!("auto {round} rondas y la tarea sigue · ampliando presupuesto"))
         );
         *budget += MAX_TURN_ROUNDS;
         return true;
@@ -1295,7 +1322,7 @@ async fn run_tool_call(
             ToolOutcome::Done(run_subagent(cwd, &task, role.as_deref()).await)
         }
         Ok(DpxCall::LspDiagnostics { path }) => {
-            println!("{}", ui::accent(&format!("  ⚙ language server: {path}")));
+            println!("{}", ui::accent(&format!("  language server: {path}")));
             // El cliente LSP bloquea (espera diagnósticos con timeout): lo sacamos
             // del hilo async para no congelar el runtime.
             let cwd2 = cwd.to_path_buf();
@@ -1371,7 +1398,7 @@ async fn run_tool_call(
             }
         },
         Ok(DpxCall::McpTool { name, args }) => {
-            println!("{}", ui::accent(&format!("  ⚙ MCP: {name}")));
+            println!("{}", ui::accent(&format!("  MCP: {name}")));
             match crate::mcp::McpManager::call_tool(&name, &args) {
                 Ok(out) => ToolOutcome::Done(out),
                 Err(e) => ToolOutcome::Done(format!("[error MCP {name}: {e}]")),
@@ -1613,9 +1640,8 @@ async fn run_subagent(cwd: &Path, task: &str, role: Option<&str>) -> String {
     };
 
     println!(
-        "\n{} {} {} {}",
+        "\n{} {} {}",
         ui::accent("⏺ subagente"),
-        role.emoji(),
         role.label(),
         ui::dim(&truncate_log(task, 80))
     );
@@ -1756,7 +1782,7 @@ async fn run_comite_command(
     println!("{}", ui::dim("  consultando 4 roles, uno por uno…"));
     let synthesis = run_committee(cwd, idea).await;
     println!();
-    ui::print_markdown(skin, "📋 veredicto del comité", &synthesis);
+    ui::print_markdown(skin, "veredicto del comité", &synthesis);
     let _ = store.checkpoint("user", &format!("/comite {idea}"));
     turns.push(Turn {
         role: "user",
@@ -1778,19 +1804,14 @@ async fn run_committee(cwd: &Path, idea: &str) -> String {
     let mut contributions: Vec<(String, String)> = Vec::new();
 
     for role in &roles {
-        println!(
-            "{} {}· {}",
-            ui::accent("  comité"),
-            role.emoji,
-            ui::dim(role.label)
-        );
+        println!("{} · {}", ui::accent("  comité"), ui::dim(role.label));
         let task = crate::focus::committee::role_task(role, idea);
         let contrib = run_subagent(cwd, &task, None).await;
-        contributions.push((role.emoji.to_string() + " " + role.label, contrib));
+        contributions.push((role.label.to_string(), contrib));
     }
 
     println!(
-        "{comite} 🧠· {synth}",
+        "{comite} · {synth}",
         comite = ui::accent("  comité"),
         synth = ui::dim("sintetizando aportes…")
     );
@@ -1828,7 +1849,7 @@ fn execute_run(cwd: &Path, cmd: &str) -> (String, bool) {
     let t = std::time::Instant::now();
     // La pestaña muestra el comando en curso (acotado para que quepa).
     let shown_cmd: String = cmd.chars().take(48).collect();
-    ui::title_busy(&format!("⚙ {shown_cmd}"));
+    ui::title_busy(&shown_cmd);
     ui::clear_cancel();
     let mut shown = 0usize;
     let out = crate::fs::run_command_streaming(
@@ -1978,7 +1999,7 @@ fn handle_command(
             if *auto != crate::cli::AutoMode::Off {
                 println!(
                     "{} {}",
-                    ui::accent(&format!("⏺ auto ⚡ ACTIVADO ({})", auto.label())),
+                    ui::accent(&format!("⏺ auto ACTIVADO ({})", auto.label())),
                     ui::dim("· usa /auto off para volver a manual")
                 );
             } else {
@@ -2047,7 +2068,7 @@ fn handle_command(
             Some((restored, deleted)) => {
                 println!(
                     "{} {}",
-                    ui::accent("⏺ deshecho ↩"),
+                    ui::accent("⏺ deshecho"),
                     ui::dim(&format!(
                         "{restored} archivo(s) restaurado(s), {deleted} borrado(s) · el modelo aún cree que los hizo: dile qué revertiste"
                     ))
@@ -2087,6 +2108,25 @@ fn handle_command(
             }
         }
 
+        "panel" => {
+            let has_context = store.prior_context().is_some();
+            let plan_progress = store.read_plan()
+                .as_deref()
+                .and_then(crate::fs::parse_plan)
+                .map(|items| {
+                    let done = items.iter().filter(|(d, _)| *d).count();
+                    (done, items.len())
+                });
+            let skills = store.read_skills();
+            let dominados = skills.iter()
+                .filter(|s| s.level == crate::skill::SkillLevel::Dominado)
+                .count();
+            let total_skills = skills.len();
+            let recuerdos = crate::memory::MemoryStore::load(store.dpx_dir()).len();
+            let agent_skills = crate::agent_skill::SkillBook::load(store.dpx_dir()).len();
+            ui::project_panel(has_context, plan_progress, dominados, total_skills, recuerdos, agent_skills);
+        }
+
         "context" => match store.prior_context() {
             Some(c) => ui::print_markdown(skin, "⏺ memoria del proyecto", &c),
             None => println!("{}", ui::dim("aún no hay memoria guardada para este proyecto")),
@@ -2094,7 +2134,7 @@ fn handle_command(
 
         "progreso" | "progress" => {
             let skills = store.read_skills();
-            println!("\n{}", crate::skill::render(&skills, &crate::skill::today()));
+            ui::learn_panel(&skills, &crate::skill::today());
         }
 
         "temario" | "curriculum" => {
@@ -2421,7 +2461,7 @@ fn process_writes(
             ui::preview_diff(current.as_deref(), &w.content);
             match crate::fs::apply(cwd, w) {
                 Ok(path) => {
-                    println!("{} escrito (auto ⚡): {}", ui::accent("⏺"), short_path(&path));
+                    println!("{} escrito (auto): {}", ui::accent("⏺"), short_path(&path));
                     report.ok(format!("[escrito: {}]", w.path));
                 }
                 Err(e) => {
@@ -2693,7 +2733,7 @@ fn confirm_run(
     // Modo auto: un comando clasificado como SEGURO corre sin preguntar (los
     // peligrosos/prohibidos ya retornaron arriba con sus puertas intactas).
     if auto.commands() {
-        println!("\n{} {}  {}", ui::grad("▸▸ ejecutar"), ui::accent(cmd), ui::dim("(auto ⚡)"));
+        println!("\n{} {}  {}", ui::grad("▸▸ ejecutar"), ui::accent(cmd), ui::dim("(auto)"));
         warn_outside_paths(cwd, cmd);
         return RunDecision::Run;
     }
@@ -2799,18 +2839,18 @@ fn reject_command(name: &str, mode: Mode) {
 
 fn mode_label(mode: Mode) -> &'static str {
     match mode {
-        Mode::Code => "code 🤖 (agente autónomo)",
-        Mode::Hack => "hack ⚡ (construir rápido con criterio)",
-        Mode::Learn => "learn 🎓 (tutor socrático)",
+        Mode::Code => "code (agente autónomo)",
+        Mode::Hack => "hack (construir rápido con criterio)",
+        Mode::Learn => "learn (tutor socrático)",
     }
 }
 
 /// Versión compacta para la barra de estado (sin paréntesis largos).
 fn mode_label_compact(mode: Mode) -> &'static str {
     match mode {
-        Mode::Code => "code 🤖",
-        Mode::Hack => "hack ⚡",
-        Mode::Learn => "learn 🎓",
+        Mode::Code => "code",
+        Mode::Hack => "hack",
+        Mode::Learn => "learn",
     }
 }
 
