@@ -134,6 +134,19 @@ impl ProjectStore {
         Ok(())
     }
 
+    /// Lee la síntesis del último comité de hack, si existe.
+    pub fn read_committee(&self) -> Option<String> {
+        fs::read_to_string(self.root.join("committee.md")).ok()
+    }
+
+    /// Guarda la síntesis del comité de hack para esta sesión.
+    pub fn write_committee(&self, markdown: &str) -> Result<()> {
+        let path = self.root.join("committee.md");
+        fs::write(&path, markdown)
+            .with_context(|| format!("No se pudo escribir {}", path.display()))?;
+        Ok(())
+    }
+
     /// Carga los hooks del proyecto desde `.dpx/hooks.toml`.
     pub fn load_hooks(&self) -> Vec<crate::cli::hooks::Hook> {
         crate::cli::hooks::load_hooks(&self.root)

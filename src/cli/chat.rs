@@ -99,11 +99,13 @@ pub async fn run(
         let en_que_voy = plan_data.as_ref().and_then(|plan| {
             plan.iter().find(|(done, _)| !done).map(|(_, text)| text.as_str())
         });
-        let plan_progress = plan_data.as_ref().map(|plan| {
-            let done = plan.iter().filter(|(d, _)| *d).count();
-            (done, plan.len())
-        });
-        ui::hack_panel(proyecto_disp, en_que_voy, plan_progress);
+        let committee = store.read_committee();
+        ui::hack_panel(
+            proyecto_disp,
+            en_que_voy.unwrap_or("sin enfoque definido aún"),
+            committee.as_deref(),
+            plan_data.as_deref(),
+        );
     }
     println!(
         "\n{}",
@@ -1791,8 +1793,22 @@ async fn run_comite_command(
     let _ = store.checkpoint("assistant", &synthesis);
     turns.push(Turn {
         role: "assistant",
-        text: synthesis,
+        text: synthesis.clone(),
     });
+    // Persistir la síntesis para que el panel de hack la muestre.
+    let _ = store.write_committee(&synthesis);
+
+    // Handoff: la fase de diseño terminó, ahora toca construir.
+    println!();
+    println!(
+        "{} {}",
+        ui::accent("⏺"),
+        ui::accent("plan listo · ahora vete a /code y lo construyo allá")
+    );
+    println!(
+        "{}",
+        ui::dim("  en /code tengo acceso completo: escribo, ejecuto, pruebo y arreglo hasta que funcione.")
+    );
 }
 
 /// Lanza el COMITÉ DE HACK: 4 subagentes secuenciales — juez, product,

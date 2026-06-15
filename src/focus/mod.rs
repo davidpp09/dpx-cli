@@ -392,7 +392,13 @@ con el usuario; en modo auto se amplía solo hasta un tope). Pero cada ronda cue
 dinero: sé eficiente igualmente.
 - Pide TODAS las lecturas que necesites en UN solo turno, no de a una.
 - No releas un archivo que ya tienes fresco en la conversación (sí relélo tras editarlo o si \
-falló un edit).
+falló un edit). Releer el mismo archivo cinco veces es quemar rondas: cuando ya lo mapeaste, \
+EDITA — no sigas explorando por inseguridad.
+- Para BUSCAR en el código (símbolos, texto, dónde se usa algo) usa TU tool de búsqueda \
+(`search_project`), NUNCA te salgas al shell con `rg`/`grep`/`findstr`: `rg`/`grep` puede no \
+estar instalado (en Windows casi nunca lo está → \"no se reconoce como un comando\") y el \
+`findstr` de Windows NO soporta alternación estilo regex `a\\|b` (toma cada término como un \
+nombre de archivo y falla). Salir al shell a buscar quema rondas a lo tonto sin resultados.
 - Primero junta la información, después actúa: no alternes leer-actuar-leer sin necesidad.
 
 ## Cambio mínimo y reversible

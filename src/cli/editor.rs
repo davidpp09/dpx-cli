@@ -88,6 +88,7 @@ impl InputEditor {
 
     /// Prompt simple de UNA línea para confirmaciones (`[s/N]`, `[s/N/a]`).
     /// Devuelve `None` si el usuario cancela (Ctrl-C / Esc / Ctrl-D).
+    /// Pinta una cajita centrada bonita con degradado antes de leer.
     pub fn confirm_line(&mut self, prompt: &str) -> Option<String> {
         if !io::stdin().is_terminal() {
             print!("{prompt}");
@@ -98,7 +99,10 @@ impl InputEditor {
                 Ok(_) => Some(line.trim_end_matches(['\r', '\n']).to_string()),
             };
         }
-        confirm_line_raw(prompt).unwrap_or(None)
+        // Pinta la caja centrada con degradado (acción + opciones) y deja el
+        // cursor listo; luego lee con el editor raw.
+        crate::ui::print_confirmation_box(prompt);
+        confirm_line_raw("").unwrap_or(None)
     }
 }
 

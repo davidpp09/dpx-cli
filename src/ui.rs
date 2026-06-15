@@ -5,6 +5,9 @@
 //! piensa y colores de acento. El área de entrada (editor propio en modo raw)
 //! vive en `cli::editor`.
 
+mod prompts;
+pub use prompts::print_confirmation_box;
+
 use std::io::{self, IsTerminal, Write};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -231,7 +234,7 @@ pub fn rule() -> String {
 }
 
 /// Ancho visible de una cadena, ignorando las secuencias ANSI (para padding).
-fn visible_width(s: &str) -> usize {
+pub(crate) fn visible_width(s: &str) -> usize {
     let mut width = 0;
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -496,8 +499,9 @@ pub fn welcome(focus: &str, mode: &str, brain: &str, cwd: &str) {
     println!("{}", grad(&format!("╰{}╯", "─".repeat(inner))));
 }
 
-/// Panel de proyecto (comando `/panel`): dashboard resumen de los 3 modos,
-/// recuerdos y skills. Estilo caja redondeada con degradado, reusa la paleta activa.
+/// Dashboard de proyecto (comando `/panel`): 3 tarjetas de modo con el color
+/// de su propia identidad visual (code azul, hack ámbar, learn verde), más un
+/// contador de recuerdos y skills del agente. Todo centrado en una caja.
 pub fn project_panel(
     has_context: bool,
     plan_progress: Option<(usize, usize)>, // (hechas, total)
@@ -506,46 +510,52 @@ pub fn project_panel(
     recuerdos: usize,
     agent_skills: usize,
 ) {
-    let code_line = if has_context {
-        format!("{}  {}", grad("code"), dim("· contexto guardado"))
-    } else {
-        format!("{}  {}", grad("code"), dim("· sin contexto aún"))
+    // ── colores de identidad FIJA de cada modo (no el tema activo) ──
+    let mode_accent = |r: u8, g: u8, b: u8, s: &str| -> String {
+        format!("\x1b[38;2;{r};{g};{b}m{s}{RESET}")
     };
-    let hack_line = match plan_progress {
+    let (cr, cg, cb) = (74u8, 144u8, 226u8); // code — azul
+    let (hr, hg, hb) = (224u8, 138u8, 38u8); // hack — ámbar
+    let (lr, lg, lb) = (76u8, 175u8, 110u8); // learn — verde
+
+    // ── tarjeta code ──
+    let code_header = mode_accent(cr, cg, cb, "code");
+    let code_status = if has_context {
+        "contexto guardado · listo para construir"
+    } else {
+        "sin contexto aún · inicia una tarea"
+    };
+
+    // ── tarjeta hack ──
+    let hack_header = mode_accent(hr, hg, hb, "hack");
+    let hack_status = match plan_progress {
         Some((done, total)) => {
             let pct = done.checked_mul(100).and_then(|n| n.checked_div(total)).unwrap_or(0);
-            format!(
-                "{}  {}",
-                grad("hack"),
-                dim(&format!("· plan {done}/{total} ({pct}%)"))
-            )
+            format!("plan {done}/{total} ({pct}%) · en marcha")
         }
-        None => format!("{}  {}", grad("hack"), dim("· sin plan")),
+        None => "sin plan · lanza una idea en modo hack".to_string(),
     };
-    let learn_line = if skills_total > 0 {
-        let resto = skills_total - skills_dominados;
-        format!(
-            "{}  {}",
-            grad("learn"),
-            dim(&format!("· {skills_dominados} dominados, {resto} por repasar"))
-        )
-    } else {
-        format!("{}  {}", grad("learn"), dim("· sin skills aún"))
-    };
-    let bottom = format!(
-        "{} recuerdos · {} skills del agente",
-        recuerdos,
-        agent_skills,
-    );
 
-    let lines = vec![
-        format!("{} {}", grad("✻"), grad("panel del proyecto")),
+    // ── tarjeta learn ──
+    let learn_header = mode_accent(lr, lg, lb, "learn");
+    let learn_status = if skills_total > 0 {
+        let resto = skills_total.saturating_sub(skills_dominados);
+        format!("{skills_total} conceptos · {skills_dominados} dominados · {resto} por repasar")
+    } else {
+        "sin skills aún · explora en modo learn".to_string()
+    };
+
+    let lines: Vec<String> = vec![
+        grad("panel del proyecto"),
         String::new(),
-        code_line,
-        hack_line,
-        learn_line,
+        format!("  {code_header}   {}", dim(code_status)),
+        format!("  {hack_header}   {}", dim(&hack_status)),
+        format!("  {learn_header}  {}", dim(&learn_status)),
         String::new(),
-        dim(&bottom),
+        dim(&format!(
+            "{} recuerdos · {} skills del agente",
+            recuerdos, agent_skills
+        )),
     ];
 
     let content_width = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
@@ -560,16 +570,14 @@ pub fn project_panel(
     println!("{}", grad(&format!("╰{}╯", "─".repeat(inner))));
 }
 
-/// Vista del modo hack: estado del proyecto, primera tarea pendiente y
-/// progreso del plan. Caja redondeada con degradado, misma paleta que
-/// project_panel. Sin emojis, solo texto y color.
+/// Vista del modo hack: resumen del proyecto, enfoque activo, ideas del
+/// comité y checklist de tareas. Caja redondeada con degradado, sin emojis.
 pub fn hack_panel(
     proyecto: Option<&str>,
-    en_que_voy: Option<&str>,
-    plan_progress: Option<(usize, usize)>,
+    enfoque: &str,
+    committee: Option<&str>,
+    plan_items: Option<&[(bool, String)]>,
 ) {
-    // Acota cada valor a una línea legible: el contexto/plan pueden ser un
-    // párrafo entero y reventarían el ancho de la caja.
     let short = |s: &str| -> String {
         let s = s.trim();
         if s.chars().count() > 64 {
@@ -578,34 +586,55 @@ pub fn hack_panel(
             s.to_string()
         }
     };
-    let proyecto_line = match proyecto {
-        Some(p) => format!("{}  {}", grad("proyecto"), dim(&short(p))),
-        None => format!("{}  {}", grad("proyecto"), dim("proyecto nuevo")),
+
+    let mut lines: Vec<String> = Vec::new();
+
+    // Título
+    lines.push(grad("modo hack"));
+    lines.push(String::new());
+
+    // Proyecto
+    let proj = match proyecto {
+        Some(p) => short(p),
+        None => "proyecto nuevo".to_string(),
     };
-    let voy_line = match en_que_voy {
-        Some(t) => format!("{}    {}", grad("en que voy"), dim(&short(t))),
-        None => format!("{}    {}", grad("en que voy"), dim("sin plan aun")),
-    };
-    let plan_line = match plan_progress {
-        Some((done, total)) => {
-            let pct = done.checked_mul(100).and_then(|n| n.checked_div(total)).unwrap_or(0);
-            format!(
-                "{}      {}",
-                grad("plan"),
-                dim(&format!("{done}/{total} ({pct}%)"))
-            )
+    lines.push(format!("{}  {}", grad("proyecto"), dim(&proj)));
+
+    // Enfoque
+    lines.push(format!("{}   {}", grad("enfoque"), dim(enfoque)));
+
+    // Ideas del comité (si hay)
+    if let Some(c) = committee {
+        let summary = committee_summary(c);
+        if !summary.is_empty() {
+            lines.push(String::new());
+            lines.push(grad("── ideas del comité ──"));
+            lines.push(dim(&summary));
         }
-        None => format!("{}      {}", grad("plan"), dim("sin plan")),
-    };
+    }
 
-    let lines = vec![
-        format!("{} {}", grad("✻"), grad("modo hack")),
-        String::new(),
-        proyecto_line,
-        voy_line,
-        plan_line,
-    ];
+    // Plan: checklist
+    if let Some(items) = plan_items
+        && !items.is_empty()
+    {
+        lines.push(String::new());
+        let done = items.iter().filter(|(d, _)| *d).count();
+        lines.push(format!(
+            "{}  {}",
+            grad("plan"),
+            dim(&format!("({done}/{})", items.len()))
+        ));
+        for (is_done, text) in items {
+            let t = short(text);
+            if *is_done {
+                lines.push(format!("  {} {}", acc_checked(), dim(&t)));
+            } else {
+                lines.push(format!("  {} {}", dim("☐"), dim(&t)));
+            }
+        }
+    }
 
+    // Caja redondeada con degradado
     let content_width = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
     let inner = content_width + 2;
 
@@ -616,6 +645,52 @@ pub fn hack_panel(
         println!("{} {l}{} {}", grad("│"), " ".repeat(pad), grad("│"));
     }
     println!("{}", grad(&format!("╰{}╯", "─".repeat(inner))));
+}
+
+/// Extrae el resumen del comité: primera línea sustancial tras "idea refinada"
+/// o "veredicto", acotada a 72 chars.
+fn committee_summary(committee_md: &str) -> String {
+    let mut found_key = false;
+    for line in committee_md.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') || t.starts_with("```") {
+            continue;
+        }
+        let lower = t.to_lowercase();
+        if lower.contains("idea refinada") || lower.contains("veredicto") {
+            found_key = true;
+            continue;
+        }
+        if found_key {
+            let s: String = t.chars().take(72).collect();
+            if t.chars().count() > 72 {
+                return format!("{s}…");
+            }
+            return s;
+        }
+    }
+    // Fallback: primera línea no vacía que no sea header ni fence
+    committee_md
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("```"))
+        .map(|l| {
+            if l.chars().count() > 72 {
+                format!("{}…", l.chars().take(71).collect::<String>())
+            } else {
+                l.to_string()
+            }
+        })
+        .unwrap_or_default()
+}
+
+/// ☑ en color de acento (tarea completada).
+fn acc_checked() -> String {
+    acc("☑")
+}
+
+fn acc(s: &str) -> String {
+    accent(s)
 }
 
 /// Skin de Markdown con el acento del CLI.
@@ -1273,5 +1348,27 @@ impl Spinner {
             print!("\r\x1b[2K\x1b[?25h"); // limpiar línea + mostrar cursor
             io::stdout().flush().ok();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::committee_summary;
+
+    #[test]
+    fn committee_summary_toma_la_linea_tras_la_clave() {
+        // Devuelve la primera línea sustancial DESPUÉS de "idea refinada"/"veredicto".
+        let md = "# Comité\n\n## Idea refinada\nUn CLI mentor por stack con focus packs.\n";
+        assert_eq!(committee_summary(md), "Un CLI mentor por stack con focus packs.");
+        let md2 = "Veredicto:\nArrancar por el MVP de Spring Boot.";
+        assert_eq!(committee_summary(md2), "Arrancar por el MVP de Spring Boot.");
+    }
+
+    #[test]
+    fn committee_summary_sin_clave_usa_la_primera_linea_real() {
+        // Fallback: ignora headers y toma la primera línea con contenido real.
+        let md = "# titulo\n\nPrimera idea concreta.";
+        assert_eq!(committee_summary(md), "Primera idea concreta.");
+        assert_eq!(committee_summary(""), "");
     }
 }
