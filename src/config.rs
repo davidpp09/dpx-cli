@@ -19,7 +19,7 @@ pub struct ProjectConfig {
     /// Modelo por defecto ("deepseek").
     #[serde(default = "default_brain")]
     pub brain: String,
-    /// Modo por defecto ("pro" o "hack").
+    /// Modo por defecto ("code", "hack" o "learn").
     #[serde(default = "default_mode")]
     pub mode: String,
     /// Modo autónomo por defecto: "off", "reads", "writes", "all".
@@ -32,7 +32,7 @@ fn default_brain() -> String {
     "deepseek".to_string()
 }
 fn default_mode() -> String {
-    "pro".to_string()
+    "code".to_string()
 }
 fn default_auto() -> String {
     "off".to_string()
@@ -130,7 +130,7 @@ mod tests {
     fn config_defaults_son_consistentes() {
         let cfg = ProjectConfig::default();
         assert_eq!(cfg.brain, "deepseek");
-        assert_eq!(cfg.mode, "pro");
+        assert_eq!(cfg.mode, "code");
         assert!(cfg.focus.is_none());
         assert_eq!(cfg.auto, "off");
     }

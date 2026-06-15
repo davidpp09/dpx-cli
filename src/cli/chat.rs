@@ -15,7 +15,7 @@ use super::editor::{InputEditor, ReadResult};
 use crate::agent::tools::{self, DpxCall};
 use crate::agent::{Brain, ChatReply, Mentor, ModelRouter};
 use crate::cli::AutoMode;
-use crate::focus::{self, Mode, Persona};
+use crate::focus::{self, Mode};
 use crate::session::{self, ProjectStore, Turn};
 use crate::ui;
 
@@ -29,21 +29,36 @@ pub async fn run(
     focus: Option<String>,
     mode: Mode,
     brain: Brain,
-    persona: Persona,
     auto: AutoMode,
 ) -> Result<()> {
     let cwd = env::current_dir()?;
+    // ¿Es la PRIMERA vez en este proyecto? (antes de crear `.dpx/`). De esto
+    // dependen el onboarding de configuración y el brainstorm inicial de hack.
+    let fresh_project = !cwd.join(".dpx").exists();
     let store = ProjectStore::init(&cwd)?;
+    // Tiñe TODA la UI con el color del modo activo antes de pintar nada (logo
+    // incluido): cada modo tiene su propia identidad visual.
+    ui::set_mode_theme(mode);
     let skin = ui::skin();
 
     ui::install_ctrl_c_handler();
     ui::logo();
 
-    // Con `--focus` explícito se respeta tal cual; sin él, el arranque inteligente
-    // resuelve el enfoque (detección de stack) y si se retoma el contexto previo.
-    let (focus_id, prior) = match focus {
-        Some(f) => (Some(f), store.prior_context()),
-        None => startup_flow(&cwd, &store),
+    let mut auto = auto;
+    // Primer arranque: pantalla de configuración (como `init`); el modo ya lo
+    // fijó el subcomando. Adopta el focus/auto elegidos. Sin `.dpx` no hay
+    // memoria previa, así que `prior = None` y no se corre `startup_flow`.
+    let (focus_id, prior) = if fresh_project {
+        let cfg = crate::cli::init::onboarding(&cwd, mode, brain)?;
+        auto = AutoMode::parse(&cfg.auto).unwrap_or(auto);
+        (focus.or(cfg.focus), None)
+    } else {
+        // Con `--focus` explícito se respeta tal cual; sin él, el arranque
+        // inteligente resuelve el enfoque y si se retoma el contexto previo.
+        match focus {
+            Some(f) => (Some(f), store.prior_context()),
+            None => startup_flow(&cwd, &store),
+        }
     };
 
     // Plan pendiente de la sesión anterior (`.dpx/plan.md`): se muestra como
@@ -56,10 +71,8 @@ pub async fn run(
     let mut focus_id = focus_id;
     let mut mode = mode;
     let mut brain = brain;
-    let mut persona = persona;
-    let mut auto = auto;
     let mut router = ModelRouter::new(brain);
-    let mut mentor = build_mentor(&router, focus_id.as_deref(), mode, persona, prior.as_deref())?;
+    let mut mentor = build_mentor(&router, focus_id.as_deref(), mode, prior.as_deref())?;
 
     ui::welcome(
         focus::display_name(focus_id.as_deref()),
@@ -67,14 +80,11 @@ pub async fn run(
         router.brain_label(),
         &short_path(&cwd),
     );
-    println!("  {}", ui::dim(&format!("persona   {}", persona_label(persona))));
     if prior.is_some() {
         println!("  {}", ui::dim("memoria · retomando contexto de sesiones anteriores"));
     }
-    // En modo learn, un cartel propio: deja claro que esto es OTRO producto.
-    if mode == Mode::Learn {
-        ui::learn_banner();
-    }
+    // Cada modo arranca con su propio cartel: deja claro en cuál estás.
+    ui::mode_banner(mode);
     println!(
         "\n{}",
         ui::dim("escribe tu mensaje · @archivo lee código · Shift+Enter salto de línea · Ctrl-C cancela · /salir")
@@ -98,20 +108,18 @@ pub async fn run(
     // Editor de entrada propio (crossterm): multilínea, Tab, pegados, historial.
     let mut ed = InputEditor::new(cwd.clone());
 
-    // Modo hack sin contexto previo: arranca preguntando el tema y ofreciendo
-    // el comité para generar un plan (F2 · comité de hack).
-    if mode == Mode::Hack && prior.is_none() {
+    // Modo HACK en proyecto NUEVO: la primera idea que escribas pasa por el
+    // comité (lluvia de ideas) antes de ponerse a construir. De ahí sale un
+    // plan y se deciden las siguientes cosas.
+    let mut pending_brainstorm = fresh_project && mode == Mode::Hack;
+    if pending_brainstorm {
         println!(
             "\n{}",
-            ui::accent("⚡ modo hack · ¿qué quieres construir? Cuéntame tu idea y la evalúo con un comité.")
+            ui::accent("⚡ proyecto nuevo · cuéntame tu idea y la paso por el comité (lluvia de ideas)")
         );
         println!(
             "{}",
-            ui::dim("  o usa /comite <idea> para que 4 roles (juez, product, tech lead, escéptico) la analicen y te den un plan dpx:plan")
-        );
-        println!(
-            "{}",
-            ui::dim("  también puedes empezar a codear directo: dime qué archivo crear y voy a ello.")
+            ui::dim("  4 roles (juez · product · tech lead · escéptico) la evalúan y te devuelven un plan; de ahí decidimos el resto.")
         );
     }
 
@@ -122,6 +130,10 @@ pub async fn run(
     let mut mem_store = crate::memory::MemoryStore::load(store.dpx_dir());
     let mut embedder: Option<crate::memory::Embedder> = None;
 
+    // Skills auto-mejorables del agente (playbooks de este proyecto). Como la
+    // memoria, se carga barato; el motor de embeddings solo si de verdad se usa.
+    let mut skillbook = crate::agent_skill::SkillBook::load(store.dpx_dir());
+
     loop {
         // De vuelta en el prompt: la pestaña muestra dpx en reposo.
         ui::title_idle(&proj_label);
@@ -129,7 +141,6 @@ pub async fn run(
             focus::display_name(focus_id.as_deref()),
             mode_label_compact(mode),
             router.brain_label(),
-            persona_label_compact(persona),
             auto,
         );
 
@@ -148,19 +159,24 @@ pub async fn run(
                 }
                 // /compact es async (llama al modelo barato): se atiende aquí,
                 // no en handle_command (que es síncrono).
-                if single_line && input == "/compact" {
+                if single_line && (input == "/compactar" || input == "/compact") {
                     compact_now(&router, &mut history, &turns).await;
                     continue;
                 }
 
                 // /comite (alias /brainstorm): lanza el comité de hack para
-                // evaluar una idea desde 4 roles y devolver un plan.
+                // evaluar una idea desde 4 roles y devolver un plan. SOLO en modo hack.
                 if single_line
                     && let Some(idea) = input
-                        .strip_prefix("/comite ")
+                        .strip_prefix("/comité ")
+                        .or_else(|| input.strip_prefix("/comite "))
                         .or_else(|| input.strip_prefix("/brainstorm "))
                 {
-                    run_comite_command(&cwd, idea, &skin, &store, &mut turns).await;
+                    if command_in_mode("comite", mode) {
+                        run_comite_command(&cwd, idea, &skin, &store, &mut turns).await;
+                    } else {
+                        reject_command("comite", mode);
+                    }
                     continue;
                 }
 
@@ -185,11 +201,29 @@ pub async fn run(
                     continue;
                 }
 
+                // /skills: las skills (playbooks) que dpx ha aprendido y refinado
+                // en este proyecto, con sus usos y confianza.
+                if single_line
+                    && matches!(input, "/habilidades" | "/skills" | "/skill")
+                {
+                    ui::skills_list(&skillbook.ranked());
+                    continue;
+                }
+
                 // /quiz [tema]: el tutor te interroga (retrieval practice) sobre lo
                 // que ya viste. Es un turno normal con un prompt sintético, así que
                 // la conversación sigue (puedes responder y te da feedback).
-                if single_line && (input == "/quiz" || input.starts_with("/quiz ")) {
-                    let topic = input.strip_prefix("/quiz").unwrap_or("").trim();
+                if single_line
+                    && let Some(rest) = input
+                        .strip_prefix("/examen")
+                        .or_else(|| input.strip_prefix("/quiz"))
+                    && (rest.is_empty() || rest.starts_with(' '))
+                {
+                    if !command_in_mode("quiz", mode) {
+                        reject_command("quiz", mode);
+                        continue;
+                    }
+                    let topic = rest.trim();
                     let prompt = build_quiz_prompt(&store, focus_id.as_deref(), topic);
                     store.checkpoint("user", input)?;
                     turns.push(Turn { role: "user", text: input.to_string() });
@@ -245,9 +279,17 @@ pub async fn run(
                     }
                     handle_command(
                         cmd, &skin, &store, &prior, &mut router, &mut mentor, &mut focus_id,
-                        &mut mode, &mut brain, &mut persona, &mut auto, &mut history, &cwd,
+                        &mut mode, &mut brain, &mut auto, &mut history, &cwd,
                         turns.len(),
                     );
+                    continue;
+                }
+
+                // Modo hack recién creado: la PRIMERA idea pasa por el comité
+                // (lluvia de ideas) en vez de un turno normal. De ahí sale el plan.
+                if pending_brainstorm {
+                    pending_brainstorm = false;
+                    run_comite_command(&cwd, input, &skin, &store, &mut turns).await;
                     continue;
                 }
 
@@ -256,13 +298,30 @@ pub async fn run(
 
                 // Memoria de largo plazo: recupera fragmentos relevantes a la
                 // consulta y los antepone al turno (si hay memoria y algo encaja).
-                let turn_input = match recall_context(input, &mem_store, &mut embedder) {
+                let mut turn_input = match recall_context(input, &mem_store, &mut embedder) {
                     Some(ctx) => {
                         println!("{}", ui::dim("⎿ recordando contexto relevante…"));
                         format!("{ctx}\n\n{input}")
                     }
                     None => input.to_string(),
                 };
+                // Skills aprendidas (code/hack): trae los playbooks de este
+                // proyecto que encajan con la petición y los antepone, para que
+                // dpx los aplique y los mejore. En learn no aplica (no ejecuta).
+                if mode != Mode::Learn
+                    && let Some(sk) = recall_skills(input, &skillbook, &mut embedder)
+                {
+                    println!("{}", ui::dim("⎿ aplicando skills aprendidas…"));
+                    turn_input = format!("{sk}\n\n{turn_input}");
+                }
+                // Auto-delegación: si la petición es de investigación, un subagente
+                // FLASH (barato, contexto aislado) la resuelve y antepone su
+                // conclusión — el trabajo de lectura NO lo paga el cerebro caro.
+                if mode != Mode::Learn
+                    && let Some(research) = maybe_auto_delegate(input, &cwd).await
+                {
+                    turn_input = format!("{research}\n\n{turn_input}");
+                }
 
                 // Turno (puede ser agéntico: el mentor pide archivos con dpx:read,
                 // se los leemos y continúa, hasta dar su respuesta final).
@@ -294,7 +353,7 @@ pub async fn run(
                         println!("  {}", ui::dim(&ui::friendly_error(&err)));
                         let new_router = ModelRouter::new(next);
                         match build_mentor(
-                            &new_router, focus_id.as_deref(), mode, persona, prior.as_deref(),
+                            &new_router, focus_id.as_deref(), mode, prior.as_deref(),
                         ) {
                             Ok(m) => {
                                 router = new_router;
@@ -318,6 +377,11 @@ pub async fn run(
                 }
                 match outcome {
                     TurnOutcome::Reply(full) => {
+                        // Skills auto-mejorables: si dpx declaró un `dpx:learned`,
+                        // lo embebe y refina/crea la skill del proyecto (code/hack).
+                        if mode != Mode::Learn {
+                            learn_skill(&full, focus_id.as_deref(), &mut skillbook, &mut embedder);
+                        }
                         store.checkpoint("assistant", &full)?;
                         turns.push(Turn { role: "assistant", text: full });
                     }
@@ -1065,7 +1129,7 @@ fn self_update(cwd: &Path) {
     if !manifest.contains("name = \"dpx-cli\"") {
         println!(
             "{}",
-            ui::dim("/update solo funciona dentro del repo de dpx (este proyecto no es dpx-cli)")
+            ui::dim("/actualizar solo funciona dentro del repo de dpx (este proyecto no es dpx-cli)")
         );
         return;
     }
@@ -1407,6 +1471,123 @@ fn recall_context(
     Some(s)
 }
 
+/// Recupera los playbooks (skills aprendidas) que encajan con `input` y los
+/// formatea para anteponerlos al turno. `None` si no hay skills, el motor no
+/// carga, o nada supera el umbral (degradación elegante, igual que la memoria).
+fn recall_skills(
+    input: &str,
+    book: &crate::agent_skill::SkillBook,
+    emb: &mut Option<crate::memory::Embedder>,
+) -> Option<String> {
+    if book.is_empty() {
+        return None; // sin skills → ni cargamos el modelo
+    }
+    let engine = ensure_embedder(emb).ok()?;
+    let query_vec = engine.embed_one(input).ok()?;
+    let hits = book.search(&query_vec, 3, 0.55);
+    if hits.is_empty() {
+        return None;
+    }
+    let mut s = String::from(
+        "[skills que dpx aprendió en ESTE proyecto y que aplican a la petición. Síguelas y, \
+         si descubres una forma mejor, decláralo con un bloque dpx:learned para refinarlas:\n",
+    );
+    for sk in hits {
+        s.push_str(&format!("• {} — {}\n", sk.name, sk.body));
+    }
+    s.push(']');
+    Some(s)
+}
+
+/// Si dpx declaró un bloque `dpx:learned` en su respuesta, lo embebe y lo
+/// incorpora al libro de skills (refina la parecida o crea una nueva). Best
+/// effort: si no hay bloque o el motor no carga, no pasa nada.
+fn learn_skill(
+    reply: &str,
+    focus_id: Option<&str>,
+    book: &mut crate::agent_skill::SkillBook,
+    emb: &mut Option<crate::memory::Embedder>,
+) {
+    let Some((name, body)) = crate::agent_skill::parse_learned_block(reply) else {
+        return;
+    };
+    let Ok(engine) = ensure_embedder(emb) else {
+        return;
+    };
+    let Ok(vector) = engine.embed_one(&format!("{name}\n{body}")) else {
+        return;
+    };
+    let today = crate::skill::today();
+    let skill = crate::agent_skill::AgentSkill {
+        name,
+        body,
+        focus: focus_id.unwrap_or("").to_string(),
+        uses: 0,
+        confidence: 0.0,
+        created: today.clone(),
+        updated: today,
+        vector,
+    };
+    match book.reinforce_or_add(skill) {
+        Ok(crate::agent_skill::Learned::New(n)) => {
+            println!("{}", ui::dim(&format!("⎿ nueva skill aprendida: {n} · {} en total", book.len())))
+        }
+        Ok(crate::agent_skill::Learned::Refined(n)) => {
+            println!("{}", ui::dim(&format!("⎿ skill refinada: {n}")))
+        }
+        Err(_) => {}
+    }
+}
+
+/// Heurística: ¿esta petición "huele" a trabajo de investigación/exploración que
+/// un subagente FLASH (barato) puede resolver y devolver ya digerido, ahorrando
+/// tokens del cerebro caro? Devuelve el ROL adecuado, o `None` si no conviene
+/// (peticiones de cambio, triviales o ambiguas → las hace el agente principal).
+fn classify_delegation(input: &str) -> Option<&'static str> {
+    let t = input.trim().to_lowercase();
+    // Demasiado corto: no compensa el overhead del subagente.
+    if t.split_whitespace().count() < 4 {
+        return None;
+    }
+    // Señales de CAMBIO → NO delegar (eso lo hace el agente principal, que escribe).
+    const CHANGE: [&str; 14] = [
+        "crea", "créa", "agrega", "añade", "anade", "cambia", "arregla", "implementa",
+        "escribe", "haz ", "borra", "elimina", "refactoriza", "renombra",
+    ];
+    if CHANGE.iter().any(|w| t.contains(w)) {
+        return None;
+    }
+    // Señales de INVESTIGACIÓN/EXPLORACIÓN → delegar a un researcher flash.
+    const RESEARCH: [&str; 19] = [
+        "dónde", "donde", "cómo funciona", "como funciona", "qué hace", "que hace", "para qué",
+        "busca", "encuentra", "localiza", "revisa", "explica", "entiende", "investiga", "analiza",
+        "where", "how does", "find ", "locate",
+    ];
+    RESEARCH.iter().any(|w| t.contains(w)).then_some("researcher")
+}
+
+/// Auto-delegación: si la petición es de investigación, lanza un subagente FLASH
+/// (barato, contexto aislado) que la resuelve y devuelve su conclusión, para
+/// anteponerla al turno. Así el trabajo de lectura/búsqueda NO lo paga el cerebro
+/// caro `pro`. Devuelve `None` si no se delega (cambios, triviales, ambiguas).
+async fn maybe_auto_delegate(input: &str, cwd: &Path) -> Option<String> {
+    let role = classify_delegation(input)?;
+    println!("{}", ui::dim(&format!("⎿ delegando en subagente flash ({role}) para ahorrar…")));
+    let task = format!(
+        "El usuario preguntó: \"{input}\". Investiga en el proyecto y devuelve una conclusión \
+         CONCISA con los archivos/funciones y datos concretos que respondan o ubiquen lo pedido. \
+         No propongas cambios; solo informa lo que encuentres."
+    );
+    let conclusion = run_subagent(cwd, &task, Some(role)).await;
+    if conclusion.trim().is_empty() || conclusion.contains("no pude lanzar el subagente") {
+        return None;
+    }
+    Some(format!(
+        "[investigación previa de un subagente flash sobre la petición (úsala como base y \
+         verifica lo que necesites; ahorra que releas todo tú):\n{conclusion}\n]"
+    ))
+}
+
 /// Rondas máximas de un subagente: es para investigar, no para épicas. Acotado
 /// para que no se desboque (su contexto y coste corren por cuenta de la sesión).
 const SUBAGENT_MAX_ROUNDS: usize = 6;
@@ -1563,7 +1744,7 @@ async fn run_comite_command(
         println!(
             "{} {}",
             ui::dim("uso:"),
-            ui::dim("/comite <descripción de la idea>")
+            ui::dim("/comité <descripción de la idea>")
         );
         return;
     }
@@ -1685,10 +1866,9 @@ fn build_mentor(
     router: &ModelRouter,
     focus_id: Option<&str>,
     mode: Mode,
-    persona: Persona,
     prior: Option<&str>,
 ) -> Result<Mentor> {
-    let mut preamble = focus::system_prompt(focus_id, mode, persona, prior)?;
+    let mut preamble = focus::system_prompt(focus_id, mode, prior)?;
     // Le damos el árbol del proyecto para que sepa qué archivos puede pedir leer.
     let cwd = env::current_dir().unwrap_or_default();
     preamble.push_str(
@@ -1742,25 +1922,32 @@ fn handle_command(
     focus_id: &mut Option<String>,
     mode: &mut Mode,
     brain: &mut Brain,
-    persona: &mut Persona,
     auto: &mut crate::cli::AutoMode,
     history: &mut Vec<Message>,
     cwd: &Path,
     turn_count: usize,
 ) {
     let mut parts = cmd.splitn(2, char::is_whitespace);
-    let name = parts.next().unwrap_or("");
+    // Normaliza el comando a su clave canónica: los nombres son en ESPAÑOL
+    // (`/ayuda`, `/enfoque`, `/cerebro`…) y los ingleses quedan como alias.
+    let name = canonical_cmd(parts.next().unwrap_or(""));
     let arg = parts.next().map(str::trim).filter(|s| !s.is_empty());
 
+    // Filtro por modo: los comandos específicos de un modo (p.ej. /auto en
+    // code/hack, /progreso en learn) se rechazan con una pista en los demás.
+    if !command_in_mode(name, *mode) {
+        reject_command(name, *mode);
+        return;
+    }
+
     match name {
-        "help" | "?" | "" => ui::print_help(),
+        "help" | "?" | "" => ui::print_help(*mode),
 
         "status" => ui::status_panel(
             env!("CARGO_PKG_VERSION"),
             &short_path(cwd),
             focus::display_name(focus_id.as_deref()),
             mode_label(*mode),
-            persona_label(*persona),
             router.brain_label(),
             &brain_rows(*brain),
             turn_count,
@@ -1923,7 +2110,7 @@ fn handle_command(
                 println!("{} {}", ui::dim("enfoque actual:"), focus::display_name(focus_id.as_deref()));
                 focus::print_catalog();
             }
-            Some(f) => match build_mentor(router, Some(f), *mode, *persona, prior.as_deref()) {
+            Some(f) => match build_mentor(router, Some(f), *mode, prior.as_deref()) {
                 Ok(m) => {
                     *mentor = m;
                     *focus_id = Some(f.to_string());
@@ -1933,25 +2120,31 @@ fn handle_command(
             },
         },
 
-        "mode" => {
-            let new = match arg {
-                Some("pro") => Some(Mode::Pro),
-                Some("hack") => Some(Mode::Hack),
-                Some("learn") | Some("aprender") => Some(Mode::Learn),
-                _ => None,
+        // Cambia de modo en caliente. `/mentor` y `/code` son alias históricos:
+        // `/mentor` → learn (enseña), `/code` → code (hace).
+        "mode" | "mentor" | "code" => {
+            let new = match name {
+                "mentor" => Some(Mode::Learn),
+                "code" => Some(Mode::Code),
+                _ => arg.and_then(Mode::parse),
             };
             match new {
-                Some(m) => match build_mentor(router, focus_id.as_deref(), m, *persona, prior.as_deref()) {
+                Some(m) if m == *mode => {
+                    println!("{} {}", ui::dim("ya estás en modo:"), mode_label(m));
+                }
+                Some(m) => match build_mentor(router, focus_id.as_deref(), m, prior.as_deref()) {
                     Ok(agent) => {
                         *mentor = agent;
                         *mode = m;
+                        // Retiñe la UI al color del nuevo modo y anúncialo.
+                        ui::set_mode_theme(m);
                         println!("{} {}", ui::accent("⏺ modo →"), mode_label(m));
                     }
                     Err(e) => println!("{} {e}", ui::dim("error:")),
                 },
                 None => println!(
                     "{} (actual: {})",
-                    ui::dim("uso: /mode pro|hack"),
+                    ui::dim("uso: /modo code|hack|learn"),
                     mode_label(*mode)
                 ),
             }
@@ -1970,7 +2163,7 @@ fn handle_command(
                 match arg.and_then(Brain::parse) {
                     Some(b) => {
                         let new_router = ModelRouter::new(b);
-                        match build_mentor(&new_router, focus_id.as_deref(), *mode, *persona, prior.as_deref()) {
+                        match build_mentor(&new_router, focus_id.as_deref(), *mode, prior.as_deref()) {
                             Ok(agent) => {
                                 *router = new_router;
                                 *mentor = agent;
@@ -1985,23 +2178,6 @@ fn handle_command(
                         ui::dim("dpx usa solo DeepSeek"),
                         router.brain_label()
                     ),
-                }
-            }
-        }
-
-        // Cambia de persona en caliente (enseña ↔ hace).
-        "mentor" | "code" => {
-            let new_persona = if name == "code" { Persona::Code } else { Persona::Mentor };
-            if *persona == new_persona {
-                println!("{} {}", ui::dim("ya estás en persona:"), persona_label(new_persona));
-            } else {
-                match build_mentor(router, focus_id.as_deref(), *mode, new_persona, prior.as_deref()) {
-                    Ok(agent) => {
-                        *mentor = agent;
-                        *persona = new_persona;
-                        println!("{} {}", ui::accent("⏺ persona →"), persona_label(new_persona));
-                    }
-                    Err(e) => println!("{} {e}", ui::dim("error:")),
                 }
             }
         }
@@ -2049,21 +2225,6 @@ fn brain_rows(active: Brain) -> Vec<ui::BrainRow> {
             active: b.name() == active.name(),
         })
         .collect()
-}
-
-fn persona_label(persona: Persona) -> &'static str {
-    match persona {
-        Persona::Mentor => "mentor (enseña)",
-        Persona::Code => "code (agente autónomo)",
-    }
-}
-
-/// Versión compacta para la barra de estado.
-fn persona_label_compact(persona: Persona) -> &'static str {
-    match persona {
-        Persona::Mentor => "mentor (enseña)",
-        Persona::Code => "code (hace)",
-    }
 }
 
 /// Cierre limpio: genera y persiste el contexto del proyecto.
@@ -2579,19 +2740,76 @@ fn is_yes(answer: &str) -> bool {
     )
 }
 
+/// Mapea cualquier alias de comando (español o inglés) a su clave canónica
+/// interna. Los nombres OFICIALES son en español; el inglés queda como alias
+/// oculto (no rompe la memoria muscular de quien ya usaba `/help`, `/focus`…).
+fn canonical_cmd(name: &str) -> &str {
+    match name {
+        "ayuda" => "help",
+        "estado" => "status",
+        "costo" | "coste" => "cost",
+        "presupuesto" => "budget",
+        "modelos" => "models",
+        "cambios" => "diff",
+        "deshacer" => "undo",
+        "limpiar" => "clear",
+        "compactar" => "compact",
+        "contexto" => "context",
+        "enfoque" => "focus",
+        "modo" => "mode",
+        "examen" => "quiz",
+        "habilidades" => "skills",
+        "cerebro" => "brain",
+        "comité" => "comite",
+        "actualizar" => "update",
+        other => other,
+    }
+}
+
+/// ¿Está disponible el comando `name` (clave canónica) en el modo activo? Los
+/// comandos no listados aquí son GLOBALES (los tres modos los tienen). El
+/// reparto: `auto` solo en code/hack (learn no escribe), `comite`/`brainstorm`
+/// solo en hack (lluvia de ideas), `quiz`/`progreso`/`temario` solo en learn.
+fn command_in_mode(name: &str, mode: Mode) -> bool {
+    match name {
+        "auto" => matches!(mode, Mode::Code | Mode::Hack),
+        "comite" | "brainstorm" => mode == Mode::Hack,
+        "quiz" | "progreso" | "temario" => mode == Mode::Learn,
+        _ => true,
+    }
+}
+
+/// Avisa (con una pista) que un comando no pertenece al modo activo.
+fn reject_command(name: &str, mode: Mode) {
+    let needed = match name {
+        "auto" => "code o hack",
+        "comite" | "brainstorm" => "hack",
+        "quiz" | "progreso" | "temario" => "learn",
+        _ => "otro",
+    };
+    println!(
+        "{}",
+        ui::dim(&format!(
+            "/{name} no está en modo {} · es de modo {needed} — cambia con /modo {}",
+            mode.name(),
+            needed.split(' ').next().unwrap_or(needed)
+        ))
+    );
+}
+
 fn mode_label(mode: Mode) -> &'static str {
     match mode {
-        Mode::Pro => "pro (metódico)",
-        Mode::Hack => "hack (rápido)",
+        Mode::Code => "code 🤖 (agente autónomo)",
+        Mode::Hack => "hack ⚡ (construir rápido con criterio)",
         Mode::Learn => "learn 🎓 (tutor socrático)",
     }
 }
 
-/// Versión compacta para la barra de estado (sin emojis ni paréntesis largos).
+/// Versión compacta para la barra de estado (sin paréntesis largos).
 fn mode_label_compact(mode: Mode) -> &'static str {
     match mode {
-        Mode::Pro => "pro (metódico)",
-        Mode::Hack => "hack (rápido)",
+        Mode::Code => "code 🤖",
+        Mode::Hack => "hack ⚡",
         Mode::Learn => "learn 🎓",
     }
 }
@@ -2617,6 +2835,38 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dpx-chat-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn auto_delegacion_solo_en_investigacion() {
+        // Investigación → delega a researcher (ahorra: lo hace el flash barato).
+        assert_eq!(classify_delegation("¿dónde se valida el token de sesión?"), Some("researcher"));
+        assert_eq!(classify_delegation("explica cómo funciona el editor de entrada"), Some("researcher"));
+        assert_eq!(classify_delegation("busca todos los usos de run_turn en el proyecto"), Some("researcher"));
+        // Cambios → NO delega (lo hace el agente principal, que escribe).
+        assert_eq!(classify_delegation("crea un endpoint nuevo para usuarios"), None);
+        assert_eq!(classify_delegation("arregla el bug del muro de reglas"), None);
+        // Trivial/corto → no compensa el overhead.
+        assert_eq!(classify_delegation("hola"), None);
+        assert_eq!(classify_delegation("gracias crack"), None);
+    }
+
+    #[test]
+    fn comandos_filtrados_por_modo() {
+        // /auto en code/hack, no en learn.
+        assert!(command_in_mode("auto", Mode::Code));
+        assert!(command_in_mode("auto", Mode::Hack));
+        assert!(!command_in_mode("auto", Mode::Learn));
+        // comité solo en hack; quiz/progreso/temario solo en learn.
+        assert!(command_in_mode("comite", Mode::Hack));
+        assert!(!command_in_mode("comite", Mode::Code));
+        assert!(command_in_mode("quiz", Mode::Learn));
+        assert!(!command_in_mode("quiz", Mode::Code));
+        // Globales: disponibles en los tres.
+        for m in [Mode::Code, Mode::Hack, Mode::Learn] {
+            assert!(command_in_mode("status", m));
+            assert!(command_in_mode("focus", m));
+        }
     }
 
     #[test]

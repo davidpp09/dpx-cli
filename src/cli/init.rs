@@ -25,6 +25,39 @@ use crate::focus::Mode;
 use crate::cli::AutoMode;
 use crate::ui;
 
+/// Configuración de PRIMER ARRANQUE: se dispara cuando se abre `dpx <modo>` en
+/// un proyecto que aún no tiene `.dpx/`. Es como `dpx init` pero el MODO ya lo
+/// fijó el subcomando (no se pregunta), y al terminar la sesión continúa.
+/// Devuelve la config guardada para que el REPL la adopte (focus + auto).
+pub fn onboarding(cwd: &Path, mode: Mode, brain: Brain) -> Result<ProjectConfig> {
+    println!();
+    println!("  {} primer arranque · vamos a configurar este proyecto", ui::accent("✻"));
+    println!(
+        "  {}",
+        ui::dim("aún no hay .dpx/ aquí. Dos pasos rápidos (Enter acepta el default).")
+    );
+    let mode_human = match mode {
+        Mode::Code => "code 🤖 (agente autónomo)",
+        Mode::Hack => "hack ⚡ (construir rápido con criterio)",
+        Mode::Learn => "learn 🎓 (tutor socrático)",
+    };
+    println!("  {}   {}", ui::dim("modo"), ui::accent(mode_human));
+
+    let stack = fs::detect_stack(cwd);
+    let focus_id = step_focus(stack)?;
+    let auto = step_auto()?;
+
+    let config = ProjectConfig {
+        focus: focus_id,
+        brain: brain.name().to_string(),
+        mode: mode.name().to_string(),
+        auto,
+    };
+    config.save(cwd).context("No se pudo guardar la configuración")?;
+    println!("\n  {}", ui::dim("⎿ configuración guardada en .dpx/config.toml · ya puedes empezar"));
+    Ok(config)
+}
+
 /// Arranca el asistente interactivo de inicialización.
 pub fn run(cwd: &Path) -> Result<()> {
     ui::logo();
@@ -45,12 +78,7 @@ pub fn run(cwd: &Path) -> Result<()> {
     let config = ProjectConfig {
         focus: focus_id.clone(),
         brain: brain.name().to_string(),
-        mode: match mode {
-            Mode::Pro => "pro",
-            Mode::Hack => "hack",
-            Mode::Learn => "learn",
-        }
-        .to_string(),
+        mode: mode.name().to_string(),
         auto,
     };
 
@@ -68,9 +96,9 @@ pub fn run(cwd: &Path) -> Result<()> {
     println!("  {}   {}", ui::dim("enfoque"), focus_display);
     println!("  {}    {}", ui::dim("cerebro"), brain.label());
     let mode_human = match mode {
-        Mode::Pro => "pro (metódico)",
-        Mode::Hack => "hack (rápido)",
-        Mode::Learn => "learn (tutor socrático)",
+        Mode::Code => "code 🤖 (agente autónomo)",
+        Mode::Hack => "hack ⚡ (construir rápido con criterio)",
+        Mode::Learn => "learn 🎓 (tutor socrático)",
     };
     println!("  {}       {}", ui::dim("modo"), mode_human);
     let auto_label = AutoMode::parse(&config.auto).map(|a| a.label()).unwrap_or("off");
@@ -195,17 +223,13 @@ fn step_mode() -> Result<Mode> {
     println!();
     println!("{}", ui::accent("⏺ 3. Modo de trabajo"));
 
-    println!("  {}   {}", ui::accent("pro"),  ui::dim("metódico: explica decisiones, código robusto con tests"));
-    println!("  {}  {}", ui::accent("hack"), ui::dim("rápido: defaults sensatos, mínimo boilerplate, demo funcionando"));
-    println!("  {} {}", ui::accent("learn"), ui::dim("aprender: tutor socrático que te hace pensar y enseña conceptos"));
+    println!("  {} {}", ui::accent("code 🤖"),  ui::dim("agente autónomo: escribe, ejecuta, itera y deja funcionando"));
+    println!("  {} {}", ui::accent("hack ⚡"), ui::dim("construir rápido CON criterio: demo sólida, mínimo boilerplate"));
+    println!("  {}{}", ui::accent("learn 🎓 "), ui::dim("tutor socrático: te enseña conceptos y arquitectura, tú escribes"));
     println!();
 
-    let answer = read_with_default("  Modo [pro]: ", "pro")?;
-    let chosen = match answer.to_lowercase().as_str() {
-        "hack" => Mode::Hack,
-        "learn" | "aprender" => Mode::Learn,
-        _ => Mode::Pro,
-    };
+    let answer = read_with_default("  Modo [code]: ", "code")?;
+    let chosen = Mode::parse(&answer).unwrap_or(Mode::Code);
 
     Ok(chosen)
 }
@@ -242,7 +266,7 @@ mod tests {
     fn config_defaults_son_consistentes() {
         let cfg = ProjectConfig::default();
         assert_eq!(cfg.brain, "deepseek");
-        assert_eq!(cfg.mode, "pro");
+        assert_eq!(cfg.mode, "code");
         assert!(cfg.focus.is_none());
         assert_eq!(cfg.auto, "off");
     }

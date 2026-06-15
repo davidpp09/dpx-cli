@@ -7,7 +7,7 @@
 
 use std::io::{self, IsTerminal, Write};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use syntect::easy::HighlightLines;
@@ -18,13 +18,55 @@ use termimad::MadSkin;
 use termimad::crossterm::style::Color;
 
 // ============================================================
-//  COLOR DE ACENTO — cámbialo aquí (R, G, B de 0 a 255)
-//  Por defecto: naranja tipo Claude (215, 119, 87).
-//  Ejemplos: verde (80, 200, 120) · azul (90, 150, 255) · morado (180, 120, 230)
+//  TEMA POR MODO — el color de acento y el degradado cambian según el modo
+//  activo (code 🤖 azul · hack ⚡ ámbar · learn 🎓 verde). Se fija al arrancar
+//  y en cada `/mode` con `set_mode_theme`, y TODA la UI bonita (logo, reglas,
+//  bordes, spinner, acentos) lo lee en caliente desde estos átomos.
 // ============================================================
-const ACCENT_R: u8 = 158;
-const ACCENT_G: u8 = 0;
-const ACCENT_B: u8 = 0;
+/// Empaqueta un color RGB en un `u32` (0x00RRGGBB) para guardarlo en un átomo.
+const fn pack_rgb(r: u8, g: u8, b: u8) -> u32 {
+    ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+}
+
+/// Desempaqueta un `u32` 0x00RRGGBB en su terna `(r, g, b)`.
+fn unpack_rgb(v: u32) -> (u8, u8, u8) {
+    (((v >> 16) & 0xff) as u8, ((v >> 8) & 0xff) as u8, (v & 0xff) as u8)
+}
+
+// Tema por defecto (rojo dpx), por si se pinta algo antes de elegir modo.
+static ACCENT: AtomicU32 = AtomicU32::new(pack_rgb(158, 0, 0));
+static GRAD_HI: AtomicU32 = AtomicU32::new(pack_rgb(188, 46, 40));
+static GRAD_LO: AtomicU32 = AtomicU32::new(pack_rgb(66, 10, 14));
+
+/// Color de acento activo (lo fija `set_mode_theme`).
+fn accent_rgb() -> (u8, u8, u8) {
+    unpack_rgb(ACCENT.load(Ordering::Relaxed))
+}
+/// Extremo claro del degradado activo.
+fn grad_from() -> (u8, u8, u8) {
+    unpack_rgb(GRAD_HI.load(Ordering::Relaxed))
+}
+/// Extremo oscuro del degradado activo.
+fn grad_to() -> (u8, u8, u8) {
+    unpack_rgb(GRAD_LO.load(Ordering::Relaxed))
+}
+
+/// Fija el tema visual (acento + degradado) según el modo activo. Cada modo
+/// tiene su propia identidad de color: code azul, hack ámbar, learn verde.
+pub fn set_mode_theme(mode: crate::focus::Mode) {
+    use crate::focus::Mode;
+    let (accent, hi, lo) = match mode {
+        // code 🤖 — azul: agente que construye, sereno y preciso.
+        Mode::Code => ((74, 144, 226), (90, 160, 240), (28, 58, 130)),
+        // hack ⚡ — ámbar: energía, velocidad con criterio.
+        Mode::Hack => ((224, 138, 38), (240, 165, 55), (130, 70, 10)),
+        // learn 🎓 — verde: crecimiento, aprender.
+        Mode::Learn => ((76, 175, 110), (95, 200, 130), (24, 92, 58)),
+    };
+    ACCENT.store(pack_rgb(accent.0, accent.1, accent.2), Ordering::Relaxed);
+    GRAD_HI.store(pack_rgb(hi.0, hi.1, hi.2), Ordering::Relaxed);
+    GRAD_LO.store(pack_rgb(lo.0, lo.1, lo.2), Ordering::Relaxed);
+}
 
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
@@ -95,12 +137,14 @@ pub fn clear_cancel() {
 
 /// Color de acento para el render de Markdown (termimad).
 fn accent_color() -> Color {
-    Color::Rgb { r: ACCENT_R, g: ACCENT_G, b: ACCENT_B }
+    let (r, g, b) = accent_rgb();
+    Color::Rgb { r, g, b }
 }
 
-/// Envuelve un texto con el color de acento (truecolor ANSI).
+/// Envuelve un texto con el color de acento (truecolor ANSI) del modo activo.
 pub fn accent(s: &str) -> String {
-    format!("\x1b[38;2;{ACCENT_R};{ACCENT_G};{ACCENT_B}m{s}{RESET}")
+    let (r, g, b) = accent_rgb();
+    format!("\x1b[38;2;{r};{g};{b}m{s}{RESET}")
 }
 
 pub fn dim(s: &str) -> String {
@@ -116,13 +160,6 @@ pub fn green(s: &str) -> String {
 pub fn red(s: &str) -> String {
     format!("\x1b[38;2;224;108;117m{s}{RESET}")
 }
-
-// ============================================================
-//  DEGRADADOS DINÁMICOS — los extremos del color de los adornos (logo, reglas,
-//  bordes, spinner). Cámbialos aquí para reteñir toda la UI bonita.
-// ============================================================
-const GRAD_FROM: (u8, u8, u8) = (188, 46, 40); // rojo oscuro
-const GRAD_TO: (u8, u8, u8) = (66, 10, 14); // rojo casi negro (vino/sangre seca)
 
 /// Interpola dos colores RGB con `t ∈ [0,1]`.
 fn lerp_rgb(a: (u8, u8, u8), b: (u8, u8, u8), t: f64) -> (u8, u8, u8) {
@@ -154,9 +191,9 @@ pub fn gradient(s: &str, from: (u8, u8, u8), to: (u8, u8, u8)) -> String {
     out
 }
 
-/// Atajo: degradado con la paleta por defecto de la UI.
+/// Atajo: degradado con la paleta del modo activo.
 pub fn grad(s: &str) -> String {
-    gradient(s, GRAD_FROM, GRAD_TO)
+    gradient(s, grad_from(), grad_to())
 }
 
 /// Pone el título de la pestaña/ventana de la terminal (secuencia OSC). No-op
@@ -225,8 +262,8 @@ pub fn logo() {
     let last = lines.len().saturating_sub(1).max(1);
     println!();
     for (i, line) in lines.iter().enumerate() {
-        // Degradado VERTICAL: el color baja de GRAD_FROM a GRAD_TO por fila.
-        let color = lerp_rgb(GRAD_FROM, GRAD_TO, i as f64 / last as f64);
+        // Degradado VERTICAL: el color baja del extremo claro al oscuro por fila.
+        let color = lerp_rgb(grad_from(), grad_to(), i as f64 / last as f64);
         println!("  {}", rgb(line, color));
     }
 }
@@ -241,35 +278,47 @@ pub fn resume_banner(project: &str, last_step: &str) {
     println!("\n  {} retomando: {} · {}", accent("⏺"), accent(project), last_step);
 }
 
-/// Cartel del modo APRENDER 🎓: deja claro que dpx cambia de actitud — te hace
-/// pensar y enseña, no escribe por ti. Se pinta al arrancar en modo learn.
-pub fn learn_banner() {
-    let title = grad("🎓 modo aprender activado");
-    println!("\n  {title}");
-    println!(
-        "  {}",
-        dim("te haré pensar y te enseñaré el porqué — tú escribes, yo te guío.")
-    );
-    println!("  {}", dim("mira tu avance cuando quieras con /progreso."));
+/// Cartel de arranque PROPIO de cada modo: deja claro en cuál estás y qué
+/// esperar. Se pinta al iniciar la sesión y se reúsa el color del tema activo.
+pub fn mode_banner(mode: crate::focus::Mode) {
+    use crate::focus::Mode;
+    let (title, l1, l2) = match mode {
+        Mode::Code => (
+            "🤖 modo code activado",
+            "hago el trabajo: escribo, ejecuto y corrijo hasta dejarlo funcionando.",
+            "pídeme una tarea y voy a ello · /modo para cambiar de modo.",
+        ),
+        Mode::Hack => (
+            "⚡ modo hack activado",
+            "construyo rápido y con criterio: lo imprescindible que corre ya, sin chapuza.",
+            "cuéntame qué quieres montar · /comité <idea> para evaluarla con un comité.",
+        ),
+        Mode::Learn => (
+            "🎓 modo learn activado",
+            "te hago pensar y te enseño el porqué — tú escribes, yo te guío.",
+            "mira tu avance cuando quieras con /progreso · /temario para el plan.",
+        ),
+    };
+    println!("\n  {}", grad(title));
+    println!("  {}", dim(l1));
+    println!("  {}", dim(l2));
 }
 
-/// Línea de estado del área de entrada (focus · modo · cerebro · persona · auto).
+/// Línea de estado del área de entrada (focus · modo · cerebro · auto).
 /// Trunca al ancho REAL de la terminal para evitar que desborde y corte la barra.
 pub fn format_input_status(
     focus: &str,
     mode: &str,
     brain: &str,
-    persona: &str,
     auto: crate::cli::AutoMode,
 ) -> String {
     let badge = |label: &str, val: &str| format!("{} {}", dim(label), grad(val));
     let sep = dim(" · ");
     let mut bar = format!(
-        "  {}{sep}{}{sep}{}{sep}{}",
+        "  {}{sep}{}{sep}{}",
         badge("focus", focus),
         badge("mode", mode),
         badge("brain", brain),
-        badge("persona", persona)
     );
     if auto != crate::cli::AutoMode::Off {
         bar.push_str(&format!("{sep}{} {}", grad("⚡ auto"), dim(auto.label())));
@@ -772,7 +821,6 @@ pub fn status_panel(
     cwd: &str,
     focus: &str,
     mode: &str,
-    persona: &str,
     active_brain: &str,
     brains: &[BrainRow],
     turns: usize,
@@ -787,7 +835,6 @@ pub fn status_panel(
     row("carpeta", cwd);
     row("enfoque", focus);
     row("modo", mode);
-    row("persona", persona);
     println!("  {}   {}  {}", dim(&format!("{:<8}", "cerebro")), active_brain, accent("● activo"));
 
     println!("\n  {}", dim("cerebros disponibles"));
@@ -803,9 +850,42 @@ pub fn status_panel(
     );
 }
 
+/// Lista las skills (playbooks) que dpx ha aprendido en el proyecto (`/skills`).
+pub fn skills_list(skills: &[&crate::agent_skill::AgentSkill]) {
+    if skills.is_empty() {
+        println!("\n{}", accent("⏺ skills del proyecto"));
+        println!(
+            "  {}",
+            dim("aún ninguna · dpx las irá aprendiendo (y refinando) según trabajes en code/hack")
+        );
+        return;
+    }
+    println!(
+        "\n{} {}",
+        accent("⏺ skills aprendidas"),
+        dim(&format!("· {} en este proyecto · se afinan con el uso", skills.len()))
+    );
+    println!();
+    for s in skills {
+        // Barra de confianza (0–1) en 5 bloques.
+        let filled = (s.confidence * 5.0).round() as usize;
+        let bar: String = "●".repeat(filled.min(5)) + &"○".repeat(5usize.saturating_sub(filled));
+        let usos = if s.uses == 1 { "1 uso".to_string() } else { format!("{} usos", s.uses) };
+        let stack = if s.focus.is_empty() { String::new() } else { format!(" · {}", s.focus) };
+        println!("  {} {}   {}", grad(&bar), accent(&s.name), dim(&format!("{usos}{stack}")));
+        // Cuerpo recortado a una línea para la vista de lista.
+        let body = s.body.replace('\n', " ");
+        let body: String = body.chars().take(96).collect();
+        if !body.trim().is_empty() {
+            println!("     {}", dim(&body));
+        }
+    }
+    println!("\n  {}", dim("dpx las recupera por significado y las aplica cuando encajan con tu tarea"));
+}
+
 /// Lista de cerebros con su superpoder (comando `/models`).
 pub fn models_list(brains: &[BrainRow]) {
-    println!("\n{}", accent("⏺ cerebros · /brain <id> para cambiar"));
+    println!("\n{}", accent("⏺ cerebros · /cerebro <id> para cambiar"));
     println!();
     print_brain_rows(brains);
     println!(
@@ -814,43 +894,57 @@ pub fn models_list(brains: &[BrainRow]) {
     );
 }
 
-/// Ayuda de comandos del REPL (comando `/help`).
-pub fn print_help() {
-    println!("\n{}", accent("dpx · comandos"));
-    let rows = [
-        ("/help", "esta ayuda"),
-        ("/status", "estado de la sesión: config, cerebros y memoria"),
-        ("/cost", "tokens reales gastados en la sesión + % de caché y costo aprox"),
-        ("/budget [N]", "tope de tokens de la sesión (ej. /budget 100k); auto se pausa al superarlo"),
-        ("/models", "lista los cerebros y cuál tiene API key"),
-        ("/diff", "muestra todo lo que dpx cambió en la sesión (base vs. actual)"),
-        ("/undo", "deshace los cambios de archivos del último turno de dpx"),
-        ("/clear", "reinicia la conversación (el mentor olvida esta sesión)"),
-        ("/compact", "resume la conversación para liberar contexto (también automático)"),
-        ("/comite <idea>", "convoca al comité de hack (4 roles) a evaluar tu idea"),
-        ("/brainstorm <idea>", "alias de /comite · mismos 4 roles, mismo plan"),
-        ("/context", "muestra la memoria guardada del proyecto"),
-        ("/focus [id]", "cambia de enfoque (sin id: lista los disponibles)"),
-        ("/mode [pro|hack|learn]", "actitud del mentor (learn 🎓 = tutor socrático)"),
-        ("/progreso", "tu progreso de aprendizaje: nivel por tema y qué repasar"),
-        ("/temario", "el temario del stack y cuánto llevas (modo learn)"),
-        ("/quiz [tema]", "el tutor te interroga para fijar lo aprendido (retrieval)"),
-        ("/recordar <texto>", "guarda algo en memoria de largo plazo (se recuerda solo)"),
-        ("/brain [modelo]", "cerebro (dpx usa solo deepseek)"),
-        ("/mentor", "persona mentor: enseña y te deja escribir"),
-        ("/code", "persona code: agente autónomo que hace e itera"),
-        ("/auto [on|off]", "modo autónomo ⚡: cambios y comandos seguros sin preguntar"),
-        ("/update", "recompila e instala dpx desde este repo (corre al reabrir)"),
-        ("/salir", "termina y guarda el contexto"),
+/// Ayuda de comandos del REPL (comando `/help`). Filtra los comandos según el
+/// modo activo: cada fila declara en qué modos aplica (`""` = todos).
+pub fn print_help(mode: crate::focus::Mode) {
+    use crate::focus::Mode;
+    println!("\n{} {}", accent("dpx · comandos"), dim(&format!("· modo {}", mode_id(mode))));
+    // (comando, descripción, modos donde aplica — vacío = global).
+    let rows: &[(&str, &str, &[Mode])] = &[
+        ("/ayuda", "esta ayuda", &[]),
+        ("/estado", "estado de la sesión: config, cerebros y memoria", &[]),
+        ("/costo", "tokens reales gastados en la sesión + % de caché y costo aprox", &[]),
+        ("/presupuesto [N]", "tope de tokens de la sesión (ej. /presupuesto 100k)", &[]),
+        ("/modelos", "lista los cerebros y cuál tiene API key", &[]),
+        ("/cambios", "muestra todo lo que dpx cambió en la sesión", &[Mode::Code, Mode::Hack]),
+        ("/deshacer", "deshace los cambios de archivos del último turno", &[Mode::Code, Mode::Hack]),
+        ("/limpiar", "reinicia la conversación (olvida esta sesión)", &[]),
+        ("/compactar", "resume la conversación para liberar contexto", &[]),
+        ("/comité <idea>", "convoca al comité (4 roles) a evaluar tu idea", &[Mode::Hack]),
+        ("/contexto", "muestra la memoria guardada del proyecto", &[]),
+        ("/enfoque [id]", "cambia de enfoque (sin id: lista los disponibles)", &[]),
+        ("/modo [code|hack|learn]", "cambia de modo (🤖 hace · ⚡ rápido · 🎓 enseña)", &[]),
+        ("/progreso", "tu progreso de aprendizaje: nivel por tema y qué repasar", &[Mode::Learn]),
+        ("/temario", "el temario del stack y cuánto llevas", &[Mode::Learn]),
+        ("/examen [tema]", "el tutor te interroga para fijar lo aprendido", &[Mode::Learn]),
+        ("/recordar <texto>", "guarda algo en memoria de largo plazo", &[]),
+        ("/habilidades", "playbooks que dpx aprendió aquí (se afinan con el uso)", &[Mode::Code, Mode::Hack]),
+        ("/cerebro [modelo]", "cerebro (dpx usa solo deepseek)", &[]),
+        ("/auto [off|all]", "modo autónomo ⚡: cambios sin preguntar", &[Mode::Code, Mode::Hack]),
+        ("/actualizar", "recompila e instala dpx desde este repo", &[]),
+        ("/salir", "termina y guarda el contexto", &[]),
     ];
-    for (cmd, desc) in rows {
+    for (cmd, desc, modes) in rows {
+        if !modes.is_empty() && !modes.contains(&mode) {
+            continue; // no aplica a este modo: se oculta
+        }
         // Padding sobre el texto plano (dentro del color) para que alinee.
         println!("  {} {}", accent(&format!("{cmd:<18}")), dim(desc));
     }
     println!(
         "\n{}",
-        dim("tip · usa @ruta/al/archivo para que el mentor lo lea (Tab autocompleta)")
+        dim("tip · usa @ruta/al/archivo para que dpx lo lea (Tab autocompleta)")
     );
+}
+
+/// Identificador corto del modo, para cabeceras de la UI.
+fn mode_id(mode: crate::focus::Mode) -> &'static str {
+    use crate::focus::Mode;
+    match mode {
+        Mode::Code => "code 🤖",
+        Mode::Hack => "hack ⚡",
+        Mode::Learn => "learn 🎓",
+    }
 }
 
 /// Easter egg: homenaje a Claude Fable 5 (q.e.p.d. 9–12 jun 2026), jalado por
@@ -923,7 +1017,7 @@ impl Spinner {
                 // El glifo PULSA entre los dos colores del degradado (oscilación
                 // suave con seno) para que la espera se sienta viva.
                 let pulse = ((i as f64) * 0.18).sin() * 0.5 + 0.5;
-                let glyph = rgb(FRAMES[i % FRAMES.len()], lerp_rgb(GRAD_FROM, GRAD_TO, pulse));
+                let glyph = rgb(FRAMES[i % FRAMES.len()], lerp_rgb(grad_from(), grad_to(), pulse));
                 // Adornos que "respiran": un trío de rombos cuyo brillo corre al
                 // ritmo del spinner, en el degradado rojo oscuro.
                 let spark = ["◆◇◇", "◇◆◇", "◇◇◆", "◇◆◇"][(i / 3) % 4];

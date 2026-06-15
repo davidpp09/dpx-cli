@@ -3,9 +3,11 @@
 //! Cada pack aporta las "skills" de un stack concreto. El system prompt final
 //! que recibe el modelo se compone de tres capas:
 //!
-//! 1. **Mentor Core** — la personalidad y forma de trabajar (igual para todos).
+//! 1. **Identidad** — según el modo: `learn` usa el mentor que enseña;
+//!    `code`/`hack` usan el agente que hace el trabajo.
 //! 2. **Focus** — el conocimiento del dominio activo (ej. Spring Boot).
-//! 3. **Modo** — la actitud (pro = metódico, hack = rápido).
+//! 3. **Modo** — el rol activo (code = agente · hack = rápido con criterio ·
+//!    learn = tutor socrático). Los tres piensan a fondo y hacen las cosas bien.
 //!
 //! Y, si existe, se le añade la **memoria del proyecto** de sesiones anteriores.
 
@@ -21,25 +23,39 @@ mod spring_boot;
 use anyhow::{Result, bail};
 use clap::ValueEnum;
 
-/// Actitud del mentor durante la sesión.
+/// Modo de trabajo de dpx: el ÚNICO eje de comportamiento. Los tres piensan a
+/// fondo y hacen las cosas BIEN; lo que cambia es el ROL, no la calidad.
 #[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
 pub enum Mode {
-    /// Metódico: arquitectura primero, decisiones explicadas, código robusto con tests.
-    Pro,
-    /// Rápido: defaults sensatos, CRUD listo, mínimo boilerplate. Para hackathones.
+    /// Agente autónomo: escribe, ejecuta, itera y corrige hasta dejarlo robusto.
+    Code,
+    /// Constructor rápido: defaults sensatos y mínimo boilerplate, pero con
+    /// criterio — código correcto que corre ya, no chapuza.
     Hack,
-    /// Aprender: tutor socrático que te hace pensar y te enseña conceptos,
-    /// patrones y arquitectura. NO escribe el código por ti: te guía a escribirlo.
+    /// Tutor socrático que te hace pensar y te enseña conceptos, patrones y
+    /// arquitectura. NO escribe el código por ti: te guía a escribirlo.
     Learn,
 }
 
-/// Persona del agente: la diferencia de fondo entre enseñar y hacer.
-#[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
-pub enum Persona {
-    /// Mentor: enseña, explica y te deja escribir a ti.
-    Mentor,
-    /// Code: agente autónomo que hace el trabajo e itera (escribe, ejecuta, corrige).
-    Code,
+impl Mode {
+    /// Parsea el nombre de un modo (para `/mode <id>` y la config).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "code" | "agente" => Some(Mode::Code),
+            "hack" => Some(Mode::Hack),
+            "learn" | "aprender" => Some(Mode::Learn),
+            _ => None,
+        }
+    }
+
+    /// Identificador corto en minúsculas (el de `/mode` y la config).
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Code => "code",
+            Mode::Hack => "hack",
+            Mode::Learn => "learn",
+        }
+    }
 }
 
 /// Metadatos de un focus pack, para listarlos.
@@ -100,15 +116,11 @@ pub fn print_catalog() {
     println!("\nUsa:  dpx chat --focus <id>");
 }
 
-/// Construye el system prompt completo para una sesión, según la persona.
-/// Con `focus_id = None` (o un stack sin pack dedicado) el prompt va sin sección
-/// de dominio: identidad + herramientas + modo.
-pub fn system_prompt(
-    focus_id: Option<&str>,
-    mode: Mode,
-    persona: Persona,
-    prior: Option<&str>,
-) -> Result<String> {
+/// Construye el system prompt completo para una sesión, según el modo.
+/// La IDENTIDAD se deriva del modo: `learn` es el mentor que enseña; `code` y
+/// `hack` son el agente que construye. Con `focus_id = None` (o un stack sin
+/// pack dedicado) el prompt va sin sección de dominio: identidad + herramientas + modo.
+pub fn system_prompt(focus_id: Option<&str>, mode: Mode, prior: Option<&str>) -> Result<String> {
     let domain = match focus_id {
         None => None,
         Some(id) => {
@@ -120,9 +132,11 @@ pub fn system_prompt(
     };
 
     let mut s = String::new();
-    s.push_str(match persona {
-        Persona::Mentor => MENTOR_IDENTITY,
-        Persona::Code => CODE_IDENTITY,
+    // En `learn` manda el mentor (enseña, tú escribes); en `code`/`hack` manda
+    // el agente que hace el trabajo. La calidad es la misma; cambia el rol.
+    s.push_str(match mode {
+        Mode::Learn => MENTOR_IDENTITY,
+        Mode::Code | Mode::Hack => CODE_IDENTITY,
     });
     s.push_str("\n\n");
     s.push_str(SHARED_TOOLS);
@@ -139,6 +153,13 @@ pub fn system_prompt(
     // qué orden — el equivalente pedagógico del Focus Pack.
     if mode == Mode::Learn {
         s.push_str(&curriculum::prompt_section(focus_id));
+    }
+
+    // En code/hack, el contrato de skills auto-mejorables: dpx destila playbooks
+    // de lo que aprende para mejorar con el uso en este proyecto.
+    if matches!(mode, Mode::Code | Mode::Hack) {
+        s.push_str("\n\n");
+        s.push_str(LEARNED_SKILLS_CONTRACT);
     }
 
     if let Some(p) = prior {
@@ -249,7 +270,7 @@ trabajo es REACCIONAR a ese resultado: si la compilación falla, lee los errores
 escribiéndolo de nuevo y deja que se vuelva a compilar; si compila, continúa o cierra la tarea. \
 No declares que algo \"ya funciona\" hasta ver un build exitoso.";
 
-/// Herramientas y reglas comunes a ambas personas (memoria, comandos, leer, escribir, formato).
+/// Herramientas y reglas comunes a los tres modos (memoria, comandos, leer, escribir, formato).
 const SHARED_TOOLS: &str = "\
 # Tu memoria (importante)
 Tienes memoria PERSISTENTE de este proyecto. Vive en el archivo `.dpx/context.md` de la \
@@ -261,16 +282,19 @@ Si el usuario te pide recordar algo, confírmale que quedará registrado en la m
 proyecto al cerrar la sesión, y tenlo presente durante la conversación.
 
 # Comandos del CLI
-Corres dentro de `dpx`, un CLI con estos comandos (el usuario los escribe con `/`): \
-`/help` (ayuda), `/clear` (reinicia la conversación), `/context` (muestra la memoria \
-guardada), `/focus <id>` (cambia de enfoque/stack), `/mode pro|hack|learn` (cambia tu actitud; \
-learn 🎓 = tutor socrático), `/progreso` (el progreso de aprendizaje del usuario), \
-`/temario` (el temario del stack y su avance), `/quiz` (te interroga para fijar lo aprendido), \
+Corres dentro de `dpx`, un CLI con estos comandos EN ESPAÑOL (el usuario los escribe con `/`): \
+`/ayuda`, `/limpiar` (reinicia la conversación), `/contexto` (muestra la memoria \
+guardada), `/enfoque <id>` (cambia de stack), `/modo code|hack|learn` (cambia tu modo: \
+code 🤖 = agente que hace el trabajo, hack ⚡ = construir rápido con criterio, learn 🎓 = tutor \
+socrático que te enseña), `/progreso` (avance de aprendizaje del usuario), \
+`/temario` (el temario del stack y su avance), `/examen` (te interroga para fijar lo aprendido), \
 `/recordar <texto>` (guarda algo en la memoria de largo plazo del usuario), \
-`/mentor` y `/code` (cambia entre \
-enseñarte y hacerlo él), `/auto` (modo autónomo: aplica cambios y comandos seguros sin \
-preguntar), `/update` (recompila e instala dpx desde este repo) y `/salir`. Si el usuario \
-pregunta \"¿cuáles son tus comandos?\", enuméralos. No los inventes ni añadas otros que no existan.
+`/habilidades` (las skills/playbooks que has aprendido en este proyecto, code/hack), \
+`/auto` (modo autónomo: aplica cambios y comandos seguros sin preguntar), \
+`/actualizar` (recompila e instala dpx desde este repo) y `/salir`. Los nombres son en \
+ESPAÑOL (los ingleses como `/help` o `/focus` siguen funcionando de alias, pero usa los \
+españoles al mencionarlos). Si el usuario pregunta \"¿cuáles son tus comandos?\", enuméralos en \
+español. No los inventes ni añadas otros que no existan.
 
 # Herramientas (tool calls nativas SIEMPRE primero)
 Tienes function calling NATIVO con estas herramientas: `read_file`, `search_project`, \
@@ -413,24 +437,27 @@ SEARCH, no la herramienta: copia la zona real que te muestra el error). Si te ve
 
 ## Si trabajas sobre el propio dpx
 - `cargo install --path . --force` FALLA con el binario en uso (os error 5, Windows). NO lo \
-ejecutes tú: al terminar, dile al usuario que corra el comando `/update` (dpx se reinstala \
+ejecutes tú: al terminar, dile al usuario que corra el comando `/actualizar` (dpx se reinstala \
 solo) y que reabra la sesión para usar la versión nueva.";
 
 /// El addendum según el modo elegido.
 fn mode_addendum(mode: Mode) -> &'static str {
     match mode {
-        Mode::Pro => "\
-# Modo activo: PRO (metódico)
-- Arquitectura primero: antes de codear, alinea el diseño con el usuario.
-- Explica cada decisión y sus trade-offs.
-- Código robusto: validación, manejo de errores y tests incluidos.
-- Nada de atajos silenciosos. Si algo es deuda técnica, dilo y explica el coste.",
+        Mode::Code => "\
+# Modo activo: CODE 🤖 (agente autónomo, metódico)
+- Tú HACES el trabajo: implementas, ejecutas, verificas y dejas funcionando.
+- Arquitectura primero en lo no trivial: alinea el diseño antes de codear a lo grande.
+- Código ROBUSTO: validación, manejo de errores y tests incluidos. Piensa a fondo.
+- Explica cada decisión clave y sus trade-offs en una o dos frases; luego actúa.
+- Nada de atajos silenciosos: si algo es deuda técnica, dilo y explica el coste.",
         Mode::Hack => "\
-# Modo activo: HACK (hackathon)
-- Velocidad ante todo: toma defaults sensatos sin preguntar de más.
-- CRUD listo, H2 en memoria, mínimo boilerplate, que corra YA.
-- Sigues enseñando, pero en una línea: \"en prod esto sería X, aquí lo simplifico porque...\".
-- Optimiza para una demo funcionando, no para producción.",
+# Modo activo: HACK ⚡ (construir rápido, CON criterio)
+- Velocidad CON calidad: toma defaults sensatos sin preguntar de más, pero el
+  código sale CORRECTO — nada de chapuza ni placeholders.
+- Camino más corto al valor: mínimo boilerplate, lo imprescindible que corre YA.
+- Sigues pensando a fondo: priorizas qué SÍ hace falta y qué se puede diferir,
+  y lo dices en una línea (\"esto lo simplifico aquí porque…\").
+- Optimiza para una demo sólida que funcione, no para el over-engineering.",
         Mode::Learn => LEARN_MODE,
     }
 }
@@ -492,6 +519,29 @@ visto | Arquitectura en capas (controller/service/repo) | spring-boot
 No lo dibujes con prosa: usa el bloque. Sé honesto con el nivel (no marques `dominado` lo que \
 solo presentaste). Si en este turno no se trabajó ningún concepto, omite el bloque.";
 
+/// Contrato de SKILLS AUTO-MEJORABLES (solo code/hack): dpx destila playbooks
+/// reutilizables de lo que aprende EN ESTE proyecto y mejora con el uso.
+const LEARNED_SKILLS_CONTRACT: &str = "\
+# Skills del proyecto (auto-mejora — bloque dpx:learned)
+Vas mejorando en lo que más se usa: cuando TERMINES una tarea no trivial que \
+probablemente se REPITA (crear un endpoint, montar un test, una migración, un patrón de \
+este repo…), destila el procedimiento en un bloque `dpx:learned` para reutilizarlo después. \
+El CLI lo guarda y, si ya existe uno parecido, lo REFINA (sube su confianza); en turnos \
+futuros te re-inyecta los que encajen con la tarea para que los apliques (y los mejores).
+
+Formato: la PRIMERA línea es un nombre corto y reconocible; el resto, los pasos/criterios \
+CONCISOS y específicos de ESTE proyecto (rutas, comandos, convenciones reales — no genérico):
+
+```dpx:learned
+Crear endpoint REST en este proyecto
+Controlador en src/main/java/.../web con @RestController; delega a un service; DTO con
+validación (jakarta.validation). Test de slice con @WebMvcTest + MockMvc. Verifica: mvn -q test.
+```
+
+Reglas: úsalo SOLO cuando de verdad aporte un playbook reutilizable (no por cada respuesta); \
+sé específico y honesto; si no hay nada que valga la pena guardar, omite el bloque. El usuario \
+ve sus skills con `/skills`.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,14 +553,28 @@ mod tests {
         // Tiene skills de dominio.
         assert!(domain_skills("dpx").is_some());
         // Y el system_prompt con focus "dpx" no falla e incluye el pack.
-        let p = system_prompt(Some("dpx"), Mode::Pro, Persona::Code, None).unwrap();
+        let p = system_prompt(Some("dpx"), Mode::Code, None).unwrap();
         assert!(p.contains("AUTO-EDICIÓN"), "el pack dpx debe estar en el prompt");
         assert!(p.contains("src/cli/editor.rs"), "debe incluir el grounding de UI");
     }
 
     #[test]
     fn focus_desconocido_falla() {
-        assert!(system_prompt(Some("noexiste"), Mode::Pro, Persona::Mentor, None).is_err());
+        assert!(system_prompt(Some("noexiste"), Mode::Code, None).is_err());
+    }
+
+    #[test]
+    fn modo_code_usa_identidad_de_agente_y_learn_la_de_mentor() {
+        // code/hack → agente que HACE; learn → mentor que enseña.
+        let code = system_prompt(None, Mode::Code, None).unwrap();
+        assert!(code.contains("DPX CODE"), "code debe usar la identidad de agente");
+        let learn = system_prompt(None, Mode::Learn, None).unwrap();
+        assert!(!learn.contains("DPX CODE"), "learn NO debe usar la identidad de agente");
+        // Mode parsea sus tres nombres y rechaza basura.
+        assert_eq!(Mode::parse("code"), Some(Mode::Code));
+        assert_eq!(Mode::parse("hack"), Some(Mode::Hack));
+        assert_eq!(Mode::parse("learn"), Some(Mode::Learn));
+        assert_eq!(Mode::parse("pro"), None);
     }
 
     #[test]
@@ -523,7 +587,7 @@ mod tests {
         // Y registra progreso con el bloque dpx:skill.
         assert!(add.contains("dpx:skill"));
         // Se integra en el prompt completo sin romper.
-        let p = system_prompt(Some("spring-boot"), Mode::Learn, Persona::Mentor, None).unwrap();
+        let p = system_prompt(Some("spring-boot"), Mode::Learn, None).unwrap();
         assert!(p.contains("APRENDER"));
     }
 }

@@ -339,22 +339,17 @@ impl ModelRouter {
     }
 
     /// El mentor para la sesión: cerebro + system prompt + temperatura según modo.
-    /// En DeepSeek, ajusta el "thinking" según el modo: `pro` razona a fondo (`max`),
-    /// `hack` va más rápido (`high`).
+    /// Los TRES modos razonan a fondo (`thinking` en `max`): la diferencia es el
+    /// ROL, no la calidad. La temperatura sí varía: `code` metódico (baja),
+    /// `hack` algo más decidido, `learn` con calidez pedagógica.
     pub fn mentor(&self, preamble: &str, mode: Mode) -> Result<Mentor> {
         let temperature = match mode {
-            Mode::Pro => 0.4,
-            Mode::Hack => 0.7,
-            // Aprender: algo de calidez pedagógica sin desbocarse.
+            Mode::Code => 0.4,
+            Mode::Hack => 0.55,
             Mode::Learn => 0.5,
         };
-        let effort = match mode {
-            Mode::Pro => "max",
-            Mode::Hack => "high",
-            // Enseñar bien (pistas graduales, analogías, anticipar dudas) exige razonar a fondo.
-            Mode::Learn => "max",
-        };
-        build_deepseek(DEEPSEEK_PRO, preamble, temperature, deepseek_thinking(effort))
+        // Todos piensan cabrón: `max` en los tres (ya no hay modo "rápido y flojo").
+        build_deepseek(DEEPSEEK_PRO, preamble, temperature, deepseek_thinking("max"))
     }
 
     /// Mentor barato para subagentes: investigar es tarea mecánica, no necesita

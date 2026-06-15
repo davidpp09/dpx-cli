@@ -139,7 +139,7 @@ pub fn render(focus_id: Option<&str>, skills: &[crate::skill::Skill]) -> String 
             "{}\n  {}",
             ui::accent("⏺ temario"),
             ui::dim(&format!(
-                "el enfoque «{name}» no tiene temario guiado. Cambia de /focus o aprende libre en /mode learn."
+                "el enfoque «{name}» no tiene temario guiado. Cambia de /enfoque o aprende libre en /modo learn."
             ))
         );
     }
@@ -180,7 +180,7 @@ pub fn render(focus_id: Option<&str>, skills: &[crate::skill::Skill]) -> String 
     if let Some(next) = next_suggested {
         out.push_str(&format!(
             "\n  {}\n",
-            ui::dim(&format!("en /mode learn, pídele: «enséñame {next}»"))
+            ui::dim(&format!("en /modo learn, pídele: «enséñame {next}»"))
         ));
     } else {
         out.push_str(&format!("\n  {}\n", ui::green("¡completaste el temario! 🎉")));

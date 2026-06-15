@@ -7,6 +7,7 @@
 //! disponibles, con DeepSeek como cerebro.
 
 mod agent;
+mod agent_skill;
 mod checkpoint;
 mod cli;
 mod config;

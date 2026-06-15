@@ -10,7 +10,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::agent::Brain;
-use crate::focus::{self, Mode, Persona};
+use crate::focus::{self, Mode};
 
 // ── AutoMode granular ──────────────────────────────────────────────
 /// Nivel de autonomía del modo auto. Acumulativo: `All` ⊃ `Writes` ⊃ `Reads` ⊃ `Off`.
@@ -79,48 +79,38 @@ pub struct Cli {
     command: Option<Commands>,
 }
 
+/// Opciones comunes a los tres modos (`code`/`hack`/`learn`). El MODO lo fija
+/// el subcomando; aquí solo van enfoque, cerebro y autonomía.
+#[derive(clap::Args)]
+struct ModeArgs {
+    /// Enfoque (focus pack) a usar. Sin él, dpx detecta el stack del proyecto.
+    #[arg(short, long)]
+    focus: Option<String>,
+
+    /// Cerebro (modelo) a usar. DeepSeek por defecto (el más capaz).
+    #[arg(short, long, value_enum)]
+    brain: Option<Brain>,
+
+    /// Modo autónomo: `off`, `reads` (auto-extiende rondas), `writes` (o
+    /// +auto-apply), `all` (o +comandos seguros). `/auto` en el REPL.
+    /// Acepta `--auto` (= `all`), `--auto writes`, etc.; o ausente (usa config).
+    #[arg(long, num_args = 0..=1, default_missing_value = "all")]
+    auto: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum Commands {
-    /// Inicia una sesión conversacional con el mentor en la carpeta actual.
-    Chat {
-        /// Enfoque (focus pack) a usar. Sin él, dpx detecta el stack del proyecto.
-        #[arg(short, long)]
-        focus: Option<String>,
+    /// Modo CODE 🤖: agente autónomo que hace el trabajo e itera (escribe,
+    /// ejecuta, corrige) hasta dejarlo robusto.
+    Code(ModeArgs),
 
-        /// Actitud del mentor: `pro` (metódico) o `hack` (rápido, para hackathones).
-        #[arg(short, long, value_enum)]
-        mode: Option<Mode>,
+    /// Modo HACK ⚡: construye rápido pero con criterio — demo sólida, mínimo
+    /// boilerplate, código correcto que corre ya.
+    Hack(ModeArgs),
 
-        /// Cerebro (modelo) a usar. DeepSeek por defecto (el más capaz).
-        #[arg(short, long, value_enum)]
-        brain: Option<Brain>,
-
-        /// Modo autónomo: `off`, `reads` (auto-extiende rondas), `writes` (o
-        /// +auto-apply), `all` (o +comandos seguros). `/auto` en el REPL.
-        /// Acepta `--auto` (= `all`), `--auto writes`, etc.; o ausente (usa config).
-        #[arg(long, num_args = 0..=1, default_missing_value = "all")]
-        auto: Option<String>,
-    },
-
-    /// Agente autónomo: hace el trabajo e itera (escribe, ejecuta, corrige).
-    Code {
-        /// Enfoque (focus pack) a usar. Sin él, dpx detecta el stack del proyecto.
-        #[arg(short, long)]
-        focus: Option<String>,
-
-        /// Actitud: `pro` (metódico) o `hack` (rápido).
-        #[arg(short, long, value_enum)]
-        mode: Option<Mode>,
-
-        /// Cerebro (modelo) a usar.
-        #[arg(short, long, value_enum)]
-        brain: Option<Brain>,
-
-        /// Modo autónomo: `off`, `reads`, `writes`, `all`. Misma semántica que en Chat.
-        /// Acepta `--auto` (= `all`), `--auto writes`, etc.
-        #[arg(long, num_args = 0..=1, default_missing_value = "all")]
-        auto: Option<String>,
-    },
+    /// Modo LEARN 🎓: tutor socrático que te hace pensar y te enseña conceptos,
+    /// patrones y arquitectura. Tú escribes el código, él te guía.
+    Learn(ModeArgs),
 
     /// Lista los enfoques (focus packs) disponibles.
     Focus,
@@ -136,14 +126,8 @@ impl Cli {
         let cwd = std::env::current_dir()?;
         let proj_cfg = crate::config::ProjectConfig::load(&cwd).unwrap_or_default();
 
-        // Helper: CLI flag → si es None, usa la config.
-        let resolve_mode = |cli: Option<Mode>| {
-            cli.unwrap_or(match proj_cfg.mode.as_str() {
-                "hack" => Mode::Hack,
-                "learn" => Mode::Learn,
-                _ => Mode::Pro,
-            })
-        };
+        // Modo por defecto (cuando se abre `dpx` a secas): de la config, o `code`.
+        let default_mode = Mode::parse(&proj_cfg.mode).unwrap_or(Mode::Code);
         let resolve_brain = |cli: Option<Brain>| {
             cli.unwrap_or_else(|| Brain::parse(&proj_cfg.brain).unwrap_or(Brain::Deepseek))
         };
@@ -154,25 +138,35 @@ impl Cli {
         // focus: CLI flag gana; si es None, la config; si también None, detecta.
         let resolve_focus = |cli: Option<String>| cli.or_else(|| proj_cfg.focus.clone());
 
+        // Lanza el REPL con el modo del subcomando y las opciones comunes.
+        let launch = |mode: Mode, a: ModeArgs| {
+            chat::run(
+                resolve_focus(a.focus),
+                mode,
+                resolve_brain(a.brain),
+                resolve_auto(a.auto),
+            )
+        };
+
         match self.command {
-            // `dpx` a secas abre el mentor: config o detección de stack.
+            // `dpx` a secas abre el modo por defecto de la config.
             None => {
-                let focus = resolve_focus(None);
-                chat::run(focus, resolve_mode(None), resolve_brain(None), Persona::Mentor, resolve_auto(None)).await
+                chat::run(
+                    resolve_focus(None),
+                    default_mode,
+                    resolve_brain(None),
+                    resolve_auto(None),
+                )
+                .await
             }
-            Some(Commands::Chat { focus, mode, brain, auto }) => {
-                chat::run(resolve_focus(focus), resolve_mode(mode), resolve_brain(brain), Persona::Mentor, resolve_auto(auto)).await
-            }
-            Some(Commands::Code { focus, mode, brain, auto }) => {
-                chat::run(resolve_focus(focus), resolve_mode(mode), resolve_brain(brain), Persona::Code, resolve_auto(auto)).await
-            }
+            Some(Commands::Code(a)) => launch(Mode::Code, a).await,
+            Some(Commands::Hack(a)) => launch(Mode::Hack, a).await,
+            Some(Commands::Learn(a)) => launch(Mode::Learn, a).await,
             Some(Commands::Focus) => {
                 focus::print_catalog();
                 Ok(())
             }
-            Some(Commands::Init) => {
-                init::run(&cwd)
-            }
+            Some(Commands::Init) => init::run(&cwd),
         }
     }
 }

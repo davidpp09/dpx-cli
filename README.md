@@ -2,20 +2,20 @@
   <h1>🚀 dpx</h1>
   <p><b>Tu mentor senior de desarrollo, directamente en tu terminal.</b></p>
 
-  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
   [![Rust](https://img.shields.io/badge/Rust-2024-orange.svg)](https://www.rust-lang.org)
+  [![Estado](https://img.shields.io/badge/versión-0.3.0-blue.svg)](#)
+  [![Privado](https://img.shields.io/badge/proyecto-privado-lightgrey.svg)](#-licencia)
 </div>
 
 ---
 
-> **dpx** es un mentor de ingeniería de software que vive en tu terminal. No es un autocompletador ni un generador de scaffolding: es un agente que **enseña, explica y te deja escribir a ti**, o bien **toma el teclado y resuelve la tarea** en modo autónomo. Se hiper-enfoca según el stack en el que trabajas y recuerda el contexto de tu proyecto entre sesiones.
+> **dpx** es un agente de ingeniería que vive en tu terminal. No es un autocompletador ni un generador de scaffolding: según el **modo** que elijas, **hace el trabajo por ti**, **construye rápido con criterio**, o **te enseña a pensar como un senior**. Se hiper-enfoca según tu stack, **recuerda** el contexto de tu proyecto entre sesiones, y **mejora con el uso** aprendiendo skills propias de tu repo.
 
 ```bash
-dpx chat                     # el mentor te enseña
-dpx code                     # el agente autónomo hace el trabajo
-dpx chat --mode hack         # modo rápido, para hackathones
-dpx chat --focus spring-boot # enfocado en Spring Boot
-dpx chat --brain kimi        # otro cerebro (modelo LLM)
+dpx code     # 🤖 agente autónomo: escribe, ejecuta, corrige
+dpx hack     # ⚡ construir rápido CON criterio (demo sólida, sin chapuza)
+dpx learn    # 🎓 tutor socrático: te enseña, tú escribes
+dpx          # abre el modo por defecto de la config del proyecto
 ```
 
 ---
@@ -23,30 +23,20 @@ dpx chat --brain kimi        # otro cerebro (modelo LLM)
 ## 📖 Tabla de contenidos
 
 - [⚡ Instalación](#-instalación)
-- [🏗️ Arquitectura](#-arquitectura)
-- [🎭 Modos y personas — las combinaciones](#-modos-y-personas--las-combinaciones)
-  - [Personas: mentor vs code](#personas-mentor-vs-code)
-  - [Modos: pro vs hack](#modos-pro-vs-hack)
-  - [Matriz de combinaciones](#matriz-de-combinaciones)
-- [🧠 Cerebros (modelos)](#-cerebros-modelos)
+- [🎛️ Los tres modos](#️-los-tres-modos)
+- [🧠 El cerebro (DeepSeek)](#-el-cerebro-deepseek)
 - [🎯 Focus Packs (enfoques por stack)](#-focus-packs-enfoques-por-stack)
-- [🤖 Modo autónomo (`--auto` / `/auto`)](#-modo-autónomo---auto--auto)
-- [⌨️ Comandos del REPL](#-comandos-del-repl)
-- [🛠️ Herramientas (function calling)](#-herramientas-function-calling)
-- [💰 Tokens, costo y presupuesto](#-tokens-costo-y-presupuesto)
-- [↩️ Deshacer y revisar cambios](#️-deshacer-y-revisar-cambios)
+- [💬 Memoria de largo plazo](#-memoria-de-largo-plazo)
+- [🧩 Skills auto-mejorables](#-skills-auto-mejorables)
+- [💸 Auto-delegación a subagentes (ahorro)](#-auto-delegación-a-subagentes-ahorro)
+- [🤖 Modo autónomo (`/auto`)](#-modo-autónomo-auto)
+- [⌨️ Comandos del REPL](#️-comandos-del-repl)
+- [🛠️ Herramientas (function calling)](#️-herramientas-function-calling)
+- [⚙️ Cómo funciona](#️-cómo-funciona)
 - [🔌 Extensibilidad (MCP, comandos y hooks)](#-extensibilidad-mcp-comandos-y-hooks)
-- [⚙️ Cómo funciona](#-cómo-funciona)
-  - [Ciclo de un turno](#ciclo-de-un-turno)
-  - [Verificación automática de build y tests](#verificación-automática-de-build-y-tests)
-  - [Mapa de símbolos (repo-map)](#mapa-de-símbolos-repo-map)
-  - [Diagnósticos LSP](#diagnósticos-lsp)
-  - [Subagentes](#subagentes)
-  - [Persistencia y memoria](#persistencia-y-memoria)
-  - [Seguridad](#seguridad)
 - [📂 Estructura del proyecto](#-estructura-del-proyecto)
 - [🔧 Configuración](#-configuración)
-- [💻 Desarrollo (hackear dpx)](#-desarrollo-hackear-dpx)
+- [💻 Desarrollo](#-desarrollo)
 - [⚖️ Licencia](#-licencia)
 
 ---
@@ -54,310 +44,199 @@ dpx chat --brain kimi        # otro cerebro (modelo LLM)
 ## ⚡ Instalación
 
 ```bash
-git clone https://github.com/tu/dpx.git
-cd dpx
+git clone <tu-repo-privado>/dpx-cli.git
+cd dpx-cli
 cargo install --path .
 ```
 
-### Requisitos previos
+### Requisitos
 
-- Rust toolchain estable (edition 2024, ≥1.96)
-- Al menos una API key de LLM en `~/.dpx/.env` o en un `.env` del proyecto:
+- Rust toolchain estable (edition 2024).
+- Tu API key de DeepSeek en `~/.dpx/.env` o en un `.env` del proyecto:
 
 ```env
 DEEPSEEK_API_KEY=sk-...
-MOONSHOT_API_KEY=sk-...    # Kimi
-OPENROUTER_API_KEY=sk-...  # Qwen
 ```
 
 > [!IMPORTANT]
-> **Sin API key, dpx arranca pero no puede responder**: el primer cerebro con key será el activo.
+> dpx usa **solo DeepSeek**. Sin la key arranca pero no puede responder.
 
-### Inicializar un proyecto
+### Primer arranque (onboarding)
+
+La primera vez que abres dpx en un proyecto **sin `.dpx/`**, arranca una **pantalla de configuración** (como un wizard): detecta tu stack, eliges enfoque y nivel de autonomía, y guarda `.dpx/config.toml`. El modo lo fija el subcomando con el que entraste.
 
 ```bash
 cd mi-proyecto
-dpx init        # wizard paso a paso: detecta stack, elige cerebro, modo y auto
+dpx code        # primera vez → te configura y entra en modo code
 ```
 
-Esto crea `.dpx/config.toml` con los defaults del proyecto. Después, `dpx` o `dpx chat` arranca directo con esa config.
+Si entras en **`hack`** en un proyecto nuevo, dpx arranca pidiéndote tu idea y la pasa por el **comité** (lluvia de ideas) para sacar un plan antes de construir.
 
 ---
 
-## 🏗️ Arquitectura
+## 🎛️ Los tres modos
 
-```text
-                   ┌──────────────────────────┐
-                   │         dpx CLI          │
-                   │  (clap: chat/code/init)  │
-                   └────────────┬─────────────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              │                 │                 │
-     ┌────────▼───────┐ ┌──────▼───────┐ ┌───────▼───────┐
-     │  Model Router  │ │ Focus Packs  │ │  Persistencia │
-     │ (DeepSeek/Kimi │ │ (Spring Boot,│ │  .dpx/        │
-     │  /Qwen)        │ │  React, Rust,│ │  context.md   │
-     │                │ │  Python, ...)│ │  sessions/    │
-     └────────┬───────┘ └──────┬───────┘ └───────┬───────┘
-              │                │                 │
-              └────────────────┼─────────────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │    System Prompt    │
-                    │  (identidad persona │
-                    │   + skills dominio  │
-                    │   + modo actitud    │
-                    │   + memoria .dpx)   │
-                    └──────────┬──────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │   Loop agéntico     │
-                    │  (turnos con tools  │
-                    │   + confirmaciones) │
-                    └─────────────────────┘
-```
+dpx tiene **un solo eje**: tres modos excluyentes. Los tres **piensan a fondo** y hacen las cosas **bien** — lo que cambia es el **rol**, no la calidad. Cada uno tiene su **propia identidad visual** (color de acento y banner).
 
----
-
-## 🎭 Modos y personas — las combinaciones
-
-`dpx` tiene DOS ejes de configuración que se combinan: **persona** y **modo**. El resultado son cuatro formas de trabajar distintas.
-
-### Personas: mentor vs code
-
-| Persona | Qué hace | Cuándo usarla |
-|:---|:---|:---|
-| 🎓 **mentor** (default) | Enseña, explica el porqué, te deja escribir a ti el código. No genera archivos completos salvo que lo pidas explícitamente. | Aprender, entender decisiones, revisar código, diseño. |
-| 🧑‍💻 **code** | Agente autónomo: escribe, compila, ejecuta, corrige. Itera hasta que la tarea funciona. | Tareas hechas, implementar features, corregir bugs, refactors. |
-
-Se activa con `--persona` (CLI) o los comandos `/mentor` y `/code` en el REPL.
+| Modo | Color | Qué hace | Cuándo |
+|:---|:---|:---|:---|
+| 🤖 **code** | azul | Agente autónomo: implementa, ejecuta, verifica y corrige hasta dejarlo robusto. | Implementar features, corregir bugs, refactors. |
+| ⚡ **hack** | ámbar | Construye rápido pero **con criterio**: defaults sensatos, mínimo boilerplate, código correcto que corre ya — **sin chapuza**. | Prototipos, hackathones, demos sólidas. |
+| 🎓 **learn** | verde | Tutor socrático: te hace pensar y te enseña conceptos, patrones y arquitectura. **Tú escribes el código**, él te guía. | Aprender, entender el porqué, fijar conocimiento. |
 
 ```bash
-dpx chat                           # mentor (default)
-dpx code                           # agente autónomo
-dpx code --mode hack --auto        # agente rápido y sin preguntar
+dpx code --focus spring-boot     # agente enfocado en Spring Boot
+dpx hack --auto                  # construir rápido y sin preguntar
+dpx learn                        # el tutor socrático
+
+# en vivo, dentro de la sesión:
+/modo hack                       # cambia de modo (y de color) al vuelo
 ```
 
-### Modos: pro vs hack
-
-| Modo | Actitud | Temperatura |
-|:---|:---|:---|
-| 👔 **pro** (default) | Metódico: arquitectura primero, cada decisión explicada, tests incluidos, señala deuda técnica. | `0.4` |
-| ⚡ **hack** | Rápido: defaults sensatos, mínimo boilerplate, demo funcionando YA. Enseña en una línea. | `0.7` |
-
-Se activa con `--mode` (CLI) o `/mode pro|hack` en el REPL.
-
-### Matriz de combinaciones
-
-```text
-                 MENTOR (enseña)              CODE (hace)
-              ┌───────────────────────┬──────────────────────────┐
-   PRO        │  "Te explico por qué   │  "Implemento, compilo,  │
-   (metódico) │   conviene X sobre Y;  │   corrijo y te entrego  │
-              │   ahora escríbelo tú"  │   funcionando con tests" │
-              ├───────────────────────┼──────────────────────────┤
-   HACK       │  "En prod sería X,    │  "CRUD listo, H2 en RAM, │
-   (rápido)   │   pero ahora simpli-  │   endpoints andando en   │
-              │   fico así para salir" │   5 minutos, sin tests"  │
-              └───────────────────────┴──────────────────────────┘
-```
-
-#### Ejemplos de comandos
-
-```bash
-# El caso clásico: mentor pro enseña Spring Boot
-dpx chat --focus spring-boot
-
-# Hackathon: agente rápido y autónomo
-dpx code --mode hack --auto
-
-# Aprendizaje: el mentor explica en detalle
-dpx chat --mode pro --brain deepseek
-
-# Producción de código: el agente resuelve solo
-dpx code --brain kimi --auto
-
-# Stack específico: mentor Python en modo hack
-dpx chat --focus python --mode hack
-```
+Cada modo expone **solo los comandos que le corresponden** (ver [Comandos](#️-comandos-del-repl)): p. ej. `/comité` solo en hack, `/examen` solo en learn, `/auto` solo en code/hack.
 
 ---
 
-## 🧠 Cerebros (modelos)
+## 🧠 El cerebro (DeepSeek)
 
-`dpx` usa un **Model Router**: tres cerebros intercambiables en caliente, cada uno con su fuerte. El router construye el agente con el system prompt y la temperatura correcta según el modo.
+dpx corre sobre **DeepSeek** con dos niveles, repartidos por el **Model Router**:
 
-| Cerebro | Proveedor | Fuerte | Ventana | API Key |
-|:---|:---|:---|:---|:---|
-| 🐋 **DeepSeek** (V4 Pro) | DeepSeek | Principal · razonamiento profundo · tool-calling nativo | 128k | `DEEPSEEK_API_KEY` |
-| 🌙 **Kimi** (K2.5) | Moonshot | Agéntico sólido · contexto largo | 256k | `MOONSHOT_API_KEY` |
-| 🤖 **Qwen** (Coder) | OpenRouter | Código · muy barato | 256k | `OPENROUTER_API_KEY` |
+| Nivel | Modelo | Para qué |
+|:---|:---|:---|
+| 🐋 **pro** | `deepseek-v4-pro` (razonador) | El cerebro principal de cada turno. Razona a fondo (`reasoning_effort: max`) en los tres modos. |
+| ⚡ **flash** | `deepseek-v4-flash` | ~**12× más barato**. Para subagentes de investigación y resúmenes de cierre — tareas mecánicas que no necesitan el caro. |
 
-> [!TIP]
-> Cambio en caliente desde el REPL: `/brain kimi`. Si el cerebro activo falla (sin saldo, saturado), dpx degrada automáticamente al siguiente con API key.
-
-### Thinking en DeepSeek
-
-En modo `pro`, DeepSeek razona con `reasoning_effort: max`; en `hack` usa `high` (más rápido). Kimi y Qwen no tienen este parámetro.
+Ventana de contexto: **128k**. dpx **compacta automáticamente** la conversación al llegar al 75%, y antes de eso aligera los resultados de herramienta viejos para que la sesión dure más.
 
 ---
 
 ## 🎯 Focus Packs (enfoques por stack)
 
-Cada Focus Pack inyecta conocimiento de dominio en el system prompt del modelo: versiones exactas, buenas prácticas, errores comunes y herramientas propias de ese ecosistema.
+Cada Focus Pack inyecta conocimiento de dominio en el prompt: versiones exactas, buenas prácticas y errores comunes de ese ecosistema.
 
-| Pack | Stack | Se activa con |
-|:---|:---|:---|
-| 🌱 `spring-boot` | Backend Java/Spring Boot | `--focus spring-boot` |
-| ⚛️ `react` | Frontend React (Vite, TanStack Query, RTL) | `--focus react` |
-| 🟩 `node` | Backend Node.js (Fastify/Express, zod) | `--focus node` |
-| 🐍 `python` | Backend Python con FastAPI | `--focus python` |
-| 🦀 `rust` | Sistemas y CLIs en Rust | `--focus rust` |
-| 🐘 `gradle` | Proyecto JVM con Gradle (genérico) | `--focus gradle` |
+| Pack | Stack |
+|:---|:---|
+| 🌱 `spring-boot` | Backend Java/Spring Boot |
+| ⚛️ `react` | Frontend React (Vite, TanStack Query, RTL) |
+| 🟩 `node` | Backend Node.js (Fastify/Express, zod) |
+| 🐍 `python` | Backend Python con FastAPI |
+| 🦀 `rust` | Sistemas y CLIs en Rust |
+| 🐘 `gradle` | Proyecto JVM con Gradle (genérico) |
+| 🛠️ `dpx` | El propio dpx: su arquitectura interna, para auto-editarse |
 
-Si no pasas `--focus`, `dpx` **detecta el stack automáticamente** analizando los archivos del proyecto (`pom.xml`, `package.json`, `Cargo.toml`, etc.). Si no reconoce nada, arranca como mentor general.
+Sin `--focus`, dpx **detecta el stack automáticamente** por los archivos de la raíz (`pom.xml`, `package.json`, `Cargo.toml`…). En modo **learn**, el focus pack también aporta el **temario** del stack (`/temario`).
 
 ---
 
-## 🤖 Modo autónomo (`--auto` / `/auto`)
+## 💬 Memoria de largo plazo
 
-El modo autónomo tiene **cuatro niveles acumulativos**: cada uno relaja una capa más de confirmaciones. Se controla con `--auto <nivel>` (CLI) o `/auto <nivel>` en el REPL (`/auto` sin argumento alterna entre `all` y `off`).
+Para "acabar con el problema del contexto", dpx tiene **memoria semántica** recuperable: guarda fragmentos con su **embedding** (vector que captura el significado) y recupera los relevantes en cada turno por **similitud coseno**. Los embeddings son **locales** (fastembed / ONNX, modelo BGE-small): gratis, privados y **offline** tras la primera descarga.
 
-| Nivel | Qué hace sin preguntar |
+- **`/recordar <texto>`** — guardas algo a mano.
+- **Auto-ingesta** — al cerrar cada sesión, dpx embebe el resumen y lo añade a la memoria solo.
+- **Recuperación automática** — antes de cada turno trae por *significado* lo relevante (notas + resúmenes de sesiones pasadas) y se lo da al modelo.
+
+Vive en `.dpx/memory.jsonl` (no se sube a git).
+
+---
+
+## 🧩 Skills auto-mejorables
+
+dpx **mejora con el uso**: acumula *playbooks* sobre cómo se hacen las cosas **en tu proyecto** y los va refinando. Cuando termina una tarea no trivial que puede repetirse (crear un endpoint, montar un test, una migración…), declara el procedimiento; el CLI lo embebe y, si ya hay uno parecido, lo **refina** (sube usos y confianza); si no, lo **crea**. Antes de cada turno (code/hack) recupera por significado los que aplican y los inyecta para aplicarlos y mejorarlos.
+
+- **`/habilidades`** — lista las skills aprendidas, con confianza (●●●○○) y usos.
+- Persisten en `.dpx/agent_skills.json`.
+
+> Las skills empiezan vacías y se construyen **con el uso** — no esperes magia el primer día.
+
+---
+
+## 💸 Auto-delegación a subagentes (ahorro)
+
+Los subagentes corren en **flash** (~12× más barato) y en **contexto aislado**: leen mucho pero te devuelven solo la conclusión. dpx **delega solo**: cuando tu petición es de **investigación** ("¿dónde se valida X?", "cómo funciona Y", "busca todos los usos de Z"), lanza un subagente flash que la resuelve y le pasa la conclusión ya digerida al cerebro caro `pro` — **antes** de responderte.
+
+Resultado: el trabajo de lectura/búsqueda **no lo paga el cerebro caro**. Lo ves en acción (`⎿ delegando en subagente flash…`) y el reparto en **`/costo`**. En peticiones de **cambio** no delega: eso lo hace el agente principal.
+
+---
+
+## 🤖 Modo autónomo (`/auto`)
+
+Disponible en **code** y **hack**. Cuatro niveles acumulativos; cada uno relaja una capa de confirmaciones. Se controla con `--auto <nivel>` (CLI) o `/auto <nivel>` en el REPL (`/auto` sin argumento alterna `all`/`off`).
+
+| Nivel | Sin preguntar |
 |:---|:---|
 | `off` (default) | Nada: cada acción se confirma. |
-| `reads` | Lecturas y búsquedas (ya eran libres) — útil como punto de partida. |
-| `writes` | + escrituras y ediciones de archivos (el diff se muestra igual). |
-| `all` ⚡ | + comandos **seguros**. Además, tras escribir código corre la **suite de tests** y se autocorrige. |
+| `reads` | Lecturas/búsquedas (ya libres) + auto-extiende rondas. |
+| `writes` | + escrituras y ediciones (el diff se muestra igual). |
+| `all` ⚡ | + comandos **seguros**, y tras escribir corre la **suite de tests** y se autocorrige. |
 
 Las puertas de seguridad se mantienen **siempre**, incluso en `all`:
 
-| Tipo de acción | ¿Pregunta aunque esté en `all`? |
+| Acción | ¿Pregunta aunque esté en `all`? |
 |:---|:---|
 | `write_file` que trunca un archivo grande (>40%) | ✅ **Sí** *(guard anti-truncado)* |
 | `write_file` que sobrescribe un archivo grande (≥200 líneas) | ✅ **Sí** *(la doctrina prefiere `edit_file`)* |
 | `run_command` peligroso (`rm -rf`, `git reset --hard`) | ✅ **Sí** *(hay que reescribir la 1ª palabra)* |
 | `run_command` prohibido (`format`, `shutdown`, `mkfs`) | 🚫 Bloqueado siempre |
-| `git_commit`, `delete_file` (mutan el repo) | ✅ **Sí** |
+| `delete_file`, commits (mutan el repo) | ✅ **Sí** |
 
 > [!TIP]
-> En `all`, el loop agéntico se auto-extiende hasta 32 rondas y, si pones un `/budget`, se pausa al llegar al tope de tokens. Con `/undo` puedes revertir cualquier cosa que dpx haya tocado sin miedo.
+> Con `/deshacer` reviertes lo del último turno y con `/cambios` revisas todo lo que dpx tocó. Úsalo sin miedo.
 
 ---
 
 ## ⌨️ Comandos del REPL
 
-Dentro de una sesión, el prompt entiende estos comandos slash:
+Los nombres son **en español** (los ingleses como `/help`, `/focus`… siguen de alias). `/ayuda` muestra **solo los comandos de tu modo**.
 
-| Comando | Acción |
-|:---|:---|
-| `/help` | Muestra esta ayuda |
-| `/status` | Estado: config, cerebros, memoria, tokens |
-| `/models` | Lista los cerebros y cuál tiene API key |
-| `/cost` | Tokens reales gastados en la sesión + % de caché y costo aprox |
-| `/budget [N]` | Tope de tokens de la sesión (ej. `/budget 100k`); `off` lo quita |
-| `/diff` | Muestra todo lo que dpx cambió en la sesión (base vs. actual) |
-| `/undo` | Deshace los cambios de archivos del último turno de dpx |
-| `/clear` | Reinicia la conversación (olvida la sesión) |
-| `/compact` | Resume la charla para liberar contexto (también automático) |
-| `/context` | Muestra la memoria guardada de `.dpx/context.md` |
-| `/focus [id]` | Cambia de stack (sin id: lista disponibles) |
-| `/mode pro\|hack` | Cambia actitud |
-| `/brain deepseek\|kimi\|qwen` | Cambia de modelo |
-| `/mentor` | Activa persona mentor (enseña) |
-| `/code` | Activa persona code (agente autónomo) |
-| `/auto [off\|reads\|writes\|all]` | Nivel de autonomía (sin arg: alterna all/off) |
-| `/update` | Recompila e instala dpx desde el repo actual |
-| `/salir` | Termina la sesión y guarda el contexto |
+| Comando | Disponible en | Acción |
+|:---|:---|:---|
+| `/ayuda` | todos | Lista los comandos de tu modo |
+| `/estado` | todos | Config, cerebro, memoria, tokens |
+| `/modelos` | todos | El cerebro y su API key |
+| `/costo` | todos | Tokens reales + % de caché + costo aprox |
+| `/presupuesto [N]` | todos | Tope de tokens de la sesión (ej. `/presupuesto 100k`) |
+| `/contexto` | todos | La memoria guardada del proyecto |
+| `/recordar <texto>` | todos | Guarda algo en la memoria de largo plazo |
+| `/enfoque [id]` | todos | Cambia de stack (sin id: lista) |
+| `/modo [code\|hack\|learn]` | todos | Cambia de modo (y de color) |
+| `/cerebro [modelo]` | todos | Cerebro (dpx usa solo DeepSeek) |
+| `/limpiar` | todos | Reinicia la conversación |
+| `/compactar` | todos | Resume la charla para liberar contexto |
+| `/actualizar` | todos | Recompila e instala dpx desde el repo |
+| `/salir` | todos | Termina y guarda el contexto |
+| `/cambios` | code · hack | Todo lo que dpx cambió en la sesión |
+| `/deshacer` | code · hack | Revierte los cambios del último turno |
+| `/habilidades` | code · hack | Playbooks aprendidos (se afinan con el uso) |
+| `/auto [off\|all]` | code · hack | Nivel de autonomía |
+| `/comité <idea>` | hack | El comité (4 roles) evalúa tu idea y da un plan |
+| `/progreso` | learn | Tu progreso de aprendizaje por tema |
+| `/temario` | learn | El temario del stack y cuánto llevas |
+| `/examen [tema]` | learn | El tutor te interroga para fijar lo aprendido |
 
-*También puedes referenciar archivos con `@ruta/al/archivo.java` y el mentor los leerá (con autocompletado por Tab). Y puedes definir tus propios comandos `/loquesea` en `.dpx/commands.toml` — ver [Extensibilidad](#-extensibilidad-mcp-comandos-y-hooks).*
+*También referencias archivos con `@ruta/al/archivo` (autocompletado con Tab), y defines tus propios comandos en `.dpx/commands.toml`.*
 
 ---
 
 ## 🛠️ Herramientas (function calling)
 
-`dpx` expone estas herramientas nativas al modelo (preferidas sobre los bloques de texto `dpx:*`):
+dpx expone estas herramientas nativas al modelo (preferidas sobre los bloques de texto `dpx:*`):
 
 | Herramienta | Función |
 |:---|:---|
 | 📄 `read_file` | Leer archivos del proyecto |
 | 🔍 `search_project` | Buscar texto en todos los archivos |
 | 🌐 `web_search` | Buscar en DuckDuckGo (gratis, sin API key) |
-| 🧩 `spawn_agent` | Lanzar un subagente de investigación aislado (solo lectura) |
+| 🧩 `spawn_agent` | Lanzar un subagente de investigación aislado (solo lectura, con rol) |
 | 🩺 `lsp_diagnostics` | Diagnósticos reales de un archivo vía language server |
 | ✏️ `write_file` | Crear/sobrescribir archivos |
 | ✂️ `edit_file` | Editar fragmentos con SEARCH/REPLACE literal |
 | 🗑️ `delete_file` | Borrar archivos |
-| 💻 `run_command` | Ejecutar comandos de shell |
-| 📊 `git_status` | Estado del repo (solo lectura) |
-| 📉 `git_diff` | Diff del working tree (solo lectura) |
-| 📜 `git_log` | Últimos commits (solo lectura) |
-| 💾 `git_commit` | Crear commit (MUTA, pide confirmación) |
+| 💻 `run_command` | Ejecutar comandos de shell (con sandbox) |
+| 📊 `git_status` · `git_diff` · `git_log` | Estado del repo (solo lectura) |
+| 💾 `git_commit` | Crear commit (muta, pide confirmación) |
 
-> [!NOTE]
-> Además, dpx puede cargar herramientas externas vía **MCP** (Model Context Protocol) y exponerlas al modelo como si fueran propias. Ver [Extensibilidad](#-extensibilidad-mcp-comandos-y-hooks).
-
----
-
-## 💰 Tokens, costo y presupuesto
-
-dpx mide el **consumo real de tokens** que reporta la API (no una estimación), incluyendo el porcentaje servido desde el **caché de contexto** — la métrica accionable, porque un caché alto puede salir ~10× más barato.
-
-- Tras cada turno verás una línea con `X in · Y out · caché Z% · ~$N` (delta del turno).
-- `/cost` muestra el acumulado de la sesión, con % de caché y costo aproximado.
-- `/budget 100k` pone un tope de tokens; al superarlo, el modo auto **deja de auto-extenderse** y vuelve a preguntar (`/budget off` lo quita, `/budget` muestra el estado).
-
-La ventana de contexto se ajusta al cerebro activo (DeepSeek 128k · Kimi/Qwen 256k) y dpx **compacta automáticamente** la conversación al llegar al 75%.
-
-Antes de eso, una **compactación ligera** actúa en cada turno: el cuerpo de los resultados de herramienta **viejos y voluminosos** (archivos leídos o salidas de comandos de rondas anteriores) se sustituye por un stub corto — sin borrar mensajes ni romper el emparejamiento `tool_call`/`tool_result`. Así no arrastras archivos enteros ronda tras ronda y la sesión dura más antes de necesitar la compactación completa.
-
----
-
-## ↩️ Deshacer y revisar cambios
-
-Antes de modificar cualquier archivo, dpx guarda su contenido anterior (en memoria, por sesión). Esto hace que el modo `/auto all` sea usable sin miedo:
-
-- **`/undo`** revierte todos los cambios de archivos del **último turno** de dpx: restaura lo que existía y borra lo que creó nuevo. **No toca git ni tus propios cambios** — solo deshace lo que escribió dpx.
-- **`/diff`** muestra **todo** lo que dpx ha cambiado en la sesión (línea base vs. disco actual), para revisarlo antes de confiar o commitear. Solo lectura.
-
----
-
-## 🔌 Extensibilidad (MCP, comandos y hooks)
-
-dpx se extiende por proyecto desde la carpeta `.dpx/`, sin recompilar:
-
-### Servidores MCP — `.dpx/mcp.toml`
-
-dpx actúa como **cliente MCP**: arranca servidores externos, hace el handshake JSON-RPC 2.0, descubre sus herramientas y las fusiona con las nativas (con namespace `mcp__<server>__<tool>`) para que el modelo las use como propias.
-
-### Comandos personalizados — `.dpx/commands.toml`
-
-Define tus propios comandos slash. Cada uno inyecta un prompt como tarea al modelo:
-
-```toml
-[commands.test]
-description = "Ejecuta los tests y diagnostica fallos"
-prompt = "Ejecuta los tests del proyecto, analiza los fallos y corrígelos uno por uno"
-confirm = false
-```
-
-Luego, dentro de la sesión: `/test`.
-
-### Hooks de ciclo de vida — `.dpx/hooks.toml`
-
-Ejecuta comandos automáticamente ante eventos (`OnSessionStart`, `OnSessionEnd`, `PreToolUse`, `PostToolUse`, `PreCommit`):
-
-```toml
-[[hooks]]
-event = "PostToolUse"
-tools = ["write_file", "edit_file"]   # opcional: filtra por tool
-command = "cargo fmt"
-
-[[hooks]]
-event = "PreCommit"
-command = "cargo test"
-```
+dpx también puede cargar herramientas externas vía **MCP** y exponerlas como propias.
 
 ---
 
@@ -365,83 +244,49 @@ command = "cargo test"
 
 ### Ciclo de un turno
 
-Cada turno del usuario dispara un **loop agéntico** de hasta 8 rondas (ampliable):
+Cada mensaje dispara un **loop agéntico** de hasta 8 rondas (ampliable):
 
-1. El usuario envía un mensaje (posiblemente con `@archivo` adjuntos)
-2. El modelo responde con texto + posiblemente tool calls o bloques `dpx:*`
-3. `dpx` **cuarentena** los bloques malformados (fence roto), aplica escrituras y ediciones (con confirmación), atiende lecturas y búsquedas (libres), ejecuta comandos (con sandbox de seguridad)
-4. Si hubo acciones, los resultados se realimentan al modelo y **vuelve a iterar**
-5. Si el modelo termina sin pedir más acciones, el turno se cierra
-6. La respuesta se guarda en la transcripción y en el historial de la sesión
+1. (code/hack) si la petición es de investigación, un **subagente flash** la resuelve y antepone su conclusión; se recuperan **memoria** y **skills** relevantes.
+2. El modelo responde con texto + tool calls.
+3. dpx pone en **cuarentena** los bloques malformados, aplica escrituras/ediciones (con diff y confirmación), atiende lecturas/búsquedas (libres) y ejecuta comandos (con sandbox).
+4. Los resultados se realimentan y **vuelve a iterar** hasta que el modelo cierra el turno.
+5. La respuesta se guarda; si dpx aprendió un playbook, lo destila en una skill.
 
-Si el modelo falla a mitad de un turno (error de red transitorio), `dpx` **reintenta esa ronda** en vez de matar el turno entero. Si falla sin haber emitido nada, **degrada al siguiente cerebro** con API key y reintenta.
+Si el modelo falla a mitad de turno (red transitoria) **reintenta la ronda**; si falla sin emitir nada, **degrada al siguiente cerebro** con key.
 
-### Verificación automática de build y tests
+### Verificación automática
 
-Si el modelo escribe código fuente (`.java`, `.rs`, `.kt`, …) o toca el build (`pom.xml`, `Cargo.toml`, `build.gradle`), `dpx` **lanza automáticamente la compilación** (Maven/Gradle/Cargo, prefiriendo el wrapper del proyecto) y le pasa los errores al modelo para que itere — sin que tenga que pedirlo.
+Al tocar código fuente o el build (`pom.xml`, `Cargo.toml`, `build.gradle`), dpx **compila solo** (prefiriendo el wrapper del proyecto) y le pasa los errores al modelo para iterar. En `/auto all` corre además la **suite de tests** y se autocorrige.
 
-En modo `/auto all` da un paso más: tras escribir código corre la **suite de tests completa** (`cargo test` / `mvn test` / `gradle test`) y se autocorrige con los fallos, no solo verifica que compile. El manifiesto real del proyecto se inyecta al prompt para que el modelo no invente dependencias ni versiones.
+### Mapa de símbolos · LSP · subagentes
 
-Cuando un `edit_file` no encuentra su bloque exacto, dpx tolera diferencias de **CRLF/LF e indentación** (edición fuzzy) y, si aun así falla, le devuelve al modelo la zona real del archivo para que reintente con conocimiento en vez de a ciegas.
-
-### Mapa de símbolos (repo-map)
-
-Al arrancar, `dpx` construye un **mapa de símbolos** del proyecto (funciones, structs, clases, traits… por archivo) mediante heurística por lenguaje, sin compiladores en C. Se inyecta al prompt para que el modelo sepa **qué define cada archivo y dónde** — así lee menos archivos, gasta menos tokens y se equivoca menos.
-
-### Diagnósticos LSP
-
-Vía la tool `lsp_diagnostics`, dpx arranca el **language server** del lenguaje (rust-analyzer, typescript-language-server, pyright, gopls), abre un archivo y devuelve sus **errores y warnings reales** con línea y columna — grounding de calidad de compilador **sin compilar el proyecto entero**. Ideal para verificar un archivo recién editado o ubicar un error con precisión.
-
-- Cliente LSP propio (JSON-RPC sobre stdio, framing Content-Length), sin dependencias nuevas.
-- El servidor se **cachea por lenguaje** durante la sesión: el primer diagnóstico paga el indexado; los siguientes reusan el server caliente.
-- Soporta `.rs`, `.ts/.tsx`, `.js/.jsx`, `.py` y `.go`. Si el language server no está instalado, lo dice sin romper la tarea.
-- Los comandos por defecto se pueden sobrescribir en `.dpx/lsp.toml`:
-
-```toml
-[servers.rust]
-command = "rust-analyzer"
-args = []
-```
-
-### Subagentes
-
-Cuando una investigación requiere leer muchos archivos largos para extraer una conclusión concreta (localizar dónde se hace algo, mapear un flujo, recopilar contexto disperso), el agente puede delegar en un **subagente** vía la tool `spawn_agent`. El subagente:
-
-- Corre en **aislamiento**: su propio contexto e historial, con el mismo cerebro.
-- Es de **solo lectura** (`read_file`, `search_project`, `web_search`) — sin escrituras, comandos ni recursión, así que no hay efectos secundarios ni confirmaciones.
-- Devuelve **solo su conclusión** al agente principal: los archivos que leyó **no** contaminan el contexto del padre → menos tokens y más foco.
-
-Su consumo de tokens cuenta en el mismo ledger de la sesión (`/cost` lo refleja).
-
-### Persistencia y memoria
-
-En la carpeta del proyecto, `dpx` crea `.dpx/`:
-
-```text
-.dpx/
-├── config.toml           # defaults del proyecto (creado por dpx init)
-├── context.md            # memoria viva: estado + aprendizaje + próximos pasos
-├── plan.md               # plan de trabajo pendiente entre sesiones
-├── allowed_commands      # comandos marcados como "ejecutar siempre"
-├── commands.toml         # comandos slash personalizados (opcional)
-├── hooks.toml            # hooks de ciclo de vida (opcional)
-├── mcp.toml              # servidores MCP a cargar (opcional)
-├── lsp.toml              # overrides de language servers (opcional)
-└── sessions/
-    └── 20250608-141230.jsonl   # transcripción turno a turno
-```
-
-Al cerrar la sesión (`/salir`), `dpx` resume la conversación en `.dpx/context.md` usando el modelo barato (DeepSeek Flash sin thinking). La próxima vez que abras el proyecto, el mentor **retoma donde lo dejaste**.
+- **Repo-map**: al arrancar, dpx mapea funciones/structs/clases por archivo (heurística por lenguaje) y lo inyecta — el modelo lee menos y se equivoca menos.
+- **LSP**: `lsp_diagnostics` arranca el language server (rust-analyzer, tsserver, pyright, gopls) y devuelve errores reales con línea/columna, sin compilar todo.
+- **Subagentes**: aislados, solo lectura, con roles (`researcher`, `planner`, `reviewer`, `debugger`, `architect`…). Devuelven solo su conclusión; su consumo cuenta en `/costo`.
 
 ### Seguridad
 
 - **Sandbox de comandos**: cada `run_command` se clasifica en seguro / peligroso / prohibido.
-- **Prohibidos**: bloqueados sin preguntar (`format`, `shutdown`, `rm -rf /`).
-- **Peligrosos**: confirmación reforzada (hay que reescribir la primera palabra del comando).
-- **Seguros**: confirmación normal, recordables con "ejecutar siempre".
-- **Rutas**: ningún archivo se escribe fuera del proyecto (rechaza `..` y paths absolutos).
-- **Guard anti-truncado**: detecta escrituras que encogen >40% un archivo grande y obliga a confirmar incluso en modo auto.
-- **Cuarentena de bloques**: los fences `dpx:*` malformados anulan todas las acciones de esa respuesta.
+- **Rutas**: nada se escribe fuera del proyecto (rechaza `..` y paths absolutos).
+- **Guard anti-truncado** y **cuarentena de bloques** protegen incluso en modo auto.
+
+---
+
+## 🔌 Extensibilidad (MCP, comandos y hooks)
+
+Todo por proyecto desde `.dpx/`, sin recompilar:
+
+- **`.dpx/mcp.toml`** — servidores MCP: dpx hace el handshake, descubre sus tools y las fusiona con las nativas.
+- **`.dpx/commands.toml`** — comandos slash propios (`/loquesea`) que inyectan un prompt.
+- **`.dpx/hooks.toml`** — comandos automáticos ante eventos (`OnSessionStart`, `PostToolUse`, `PreCommit`…).
+
+```toml
+# .dpx/commands.toml
+[commands.test]
+description = "Ejecuta los tests y diagnostica fallos"
+prompt = "Ejecuta los tests, analiza los fallos y corrígelos uno por uno"
+confirm = false
+```
 
 ---
 
@@ -449,104 +294,57 @@ Al cerrar la sesión (`/salir`), `dpx` resume la conversación en `.dpx/context.
 
 ```text
 src/
-├── main.rs                    # Punto de entrada, carga .env
-├── config.rs                  # Config del proyecto (.dpx/config.toml)
-├── ui.rs                      # Capa visual: colores, markdown, spinner
-├── token.rs                   # Ledger de tokens reales, costo y presupuesto
-├── checkpoint.rs              # Snapshots para /undo y /diff
-├── mcp.rs                     # Cliente MCP (JSON-RPC sobre stdio)
-├── lsp.rs                     # Cliente LSP (diagnósticos vía language server)
-├── cli/
-│   ├── mod.rs                 # CLI con clap, despacho de comandos
-│   ├── chat.rs                # Loop conversacional (REPL) + turnos agénticos
-│   ├── editor.rs              # Editor de entrada propio sobre crossterm
-│   ├── commands.rs            # Comandos slash personalizados (.dpx/commands.toml)
-│   ├── hooks.rs               # Hooks de ciclo de vida (.dpx/hooks.toml)
-│   └── init.rs                # Wizard dpx init
-├── agent/
-│   ├── mod.rs                 # Re-exports
-│   ├── router.rs              # Model Router: Brain, Mentor, streaming
-│   ├── tools.rs               # Definiciones de tools (function calling)
-│   ├── search.rs              # Búsqueda web vía DuckDuckGo
-│   └── diagnostic.rs          # Diagnóstico multi-lenguaje de fallos
-├── focus/
-│   ├── mod.rs                 # Focus Packs: system prompt, catálogo
-│   ├── spring_boot.rs         # Skills de Spring Boot
-│   ├── react.rs               # Skills de React
-│   ├── node.rs                # Skills de Node.js
-│   ├── python.rs              # Skills de Python
-│   └── rust.rs                # Skills de Rust
-├── fs/
-│   ├── mod.rs                 # Parseo de bloques dpx:*, escritura, edición, repo-map
-│   └── safety.rs              # Sandbox de comandos
-└── session/
-    └── mod.rs                 # Persistencia: .dpx/context.md, transcripción
+├── main.rs            # Entrada, carga .env
+├── config.rs          # Config del proyecto (.dpx/config.toml)
+├── ui.rs              # Capa visual: tema por modo, markdown, spinner
+├── memory.rs          # Memoria semántica (embeddings + coseno)
+├── agent_skill.rs     # Skills auto-mejorables (playbooks del proyecto)
+├── skill.rs           # Progreso de aprendizaje del usuario (modo learn)
+├── token.rs           # Ledger de tokens reales, costo y presupuesto
+├── checkpoint.rs      # Snapshots para /deshacer y /cambios
+├── mcp.rs · lsp.rs    # Clientes MCP y LSP
+├── cli/               # CLI (clap), REPL, editor propio, init, hooks
+├── agent/             # Model Router, tools, roles, búsqueda web
+├── focus/             # Focus Packs, modos, comité, temario
+├── fs/                # Parseo de bloques, escritura/edición, repo-map, sandbox
+└── session/           # Persistencia .dpx/
 ```
 
 ---
 
 ## 🔧 Configuración
 
-### `dpx init`
-
-El wizard configura el proyecto paso a paso:
-
-1. Detecta el stack por los archivos de la raíz (pom.xml, package.json, etc.)
-2. Pregunta el cerebro por defecto (mostrando cuáles tienen API key)
-3. Modo de trabajo (pro / hack)
-4. Modo autónomo sí/no
-5. Guarda `.dpx/config.toml`
-
-### `.dpx/config.toml`
+`.dpx/config.toml` (creado por el onboarding o `dpx init`):
 
 ```toml
 focus = "spring-boot"
 brain = "deepseek"
-mode = "pro"
-auto = false
+mode  = "code"      # code | hack | learn
+auto  = "off"       # off | reads | writes | all
 ```
 
-Estos valores son los defaults: los flags de CLI (`--focus`, `--brain`, `--mode`, `--auto`) los pisan, y los comandos del REPL (`/focus`, `/brain`, `/mode`, `/auto`) los cambian en caliente durante la sesión.
+Son los defaults: los flags de CLI (`--focus`, `--brain`, `--auto`) los pisan, y los comandos del REPL (`/enfoque`, `/modo`, `/auto`…) los cambian en caliente.
 
 ---
 
-## 💻 Desarrollo (hackear dpx)
+## 💻 Desarrollo
 
 ```bash
 cargo check                     # compilación rápida
-cargo test                      # tests
-cargo test -- --ignored         # incluye tests de red (requieren internet)
-cargo clippy -- -D warnings     # linter estricto
+cargo test                      # tests (211+)
+cargo test -- --ignored         # incluye tests de red / embeddings
+cargo clippy --all-targets -- -D warnings   # linter estricto (cero warnings)
 ```
 
-### Tests
+Dentro del repo de dpx, **`/actualizar`** recompila e instala el binario sin cerrar la sesión (en Windows renombra el exe en uso antes de instalar).
 
-El proyecto tiene **cobertura extensiva** (160+ tests unitarios y de integración, más algunos `#[ignore]` que requieren red o una API key):
-
-- `chat.rs`: 35+ tests del loop agéntico, confirmaciones, cuarentena, guards, planes
-- `fs/mod.rs`: 30+ tests de parseo de bloques, edits, writes, detección de stacks
-- `router.rs`: tests de reintentos y backoff
-- `tools.rs`: tests de definiciones y parseo de tool calls
-- `diagnostic.rs`: tests de diagnóstico multi-lenguaje (Rust, TS, Python, Java)
-- `session.rs`: tests de persistencia y allowlist
-- `search.rs`: tests de búsqueda web
-- `editor.rs`: tests de wrapping, cursor, autocompletado
-- `safety.rs`: sandbox de comandos
-
-### `/update`
-
-Dentro del repo de `dpx`, el comando `/update` recompila e instala el binario sin cerrar la sesión (en Windows renombra el exe en uso antes de instalar).
+> [!NOTE]
+> En Windows, `cargo install` falla con `os error 5` si tienes una sesión de dpx abierta (el `.exe` está bloqueado). Cierra la sesión o usa `/actualizar`.
 
 ---
 
 ## ⚖️ Licencia
 
-Este proyecto está licenciado bajo la **MIT License** - consulta el archivo [LICENSE](LICENSE) para ver el texto legal completo.
+**Proyecto privado. Todos los derechos reservados.**
 
-**¿Qué significa esto en español?**
-
-- ✅ Puedes usar dpx en tu empresa, gratis, sin pedir permiso
-- ✅ Puedes modificarlo, mejorarlo y compartir tus cambios
-- ✅ Puedes integrarlo en un producto comercial que vendas
-- ❌ No puedes quitar el aviso de copyright ni hacerte pasar por el autor
-- ❌ Los autores no se hacen responsables si algo sale mal (el software se da "como está")
+Este software no se distribuye bajo ninguna licencia de código abierto: no hay permiso de uso, copia, modificación ni distribución salvo autorización explícita del autor.

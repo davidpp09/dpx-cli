@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use termimad::crossterm::{
-    cursor::{MoveDown, MoveTo, MoveToColumn, MoveUp, position},
+    cursor::{MoveDown, MoveToColumn, MoveUp},
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     queue,
     style::Print,
@@ -30,8 +30,9 @@ use crate::ui;
 
 /// Comandos disponibles, para el autocompletado con Tab.
 pub const COMMANDS: &[&str] = &[
-    "/help", "/status", "/cost", "/budget", "/models", "/diff", "/undo", "/clear", "/compact",
-    "/context", "/focus", "/mode", "/brain", "/mentor", "/code", "/auto", "/update", "/salir",
+    "/ayuda", "/estado", "/costo", "/presupuesto", "/modelos", "/cambios", "/deshacer", "/limpiar",
+    "/compactar", "/contexto", "/enfoque", "/modo", "/progreso", "/temario", "/examen", "/recordar",
+    "/habilidades", "/cerebro", "/comité", "/auto", "/actualizar", "/salir",
 ];
 
 const PROMPT: &str = " › ";
@@ -241,11 +242,6 @@ struct Prompt<'a> {
     cur_region_row: usize,
     /// Total de filas pintadas la última vez.
     region_rows: usize,
-    /// Fila absoluta (Y) del tope de la región, capturada con `position()`
-    /// solo la primera vez que se pinta. Se reúsa en repintados sucesivos:
-    /// `position()` se desincroniza con clics de ratón, redimensiones, y
-    /// comandos que imprimen output entre prompts (ej. `/mode`).
-    region_top_y: Option<u16>,
     /// El buffer tal cual se envió (con placeholders), para el historial.
     submitted_raw: String,
 }
@@ -264,22 +260,15 @@ impl<'a> Prompt<'a> {
             draft: String::new(),
             cur_region_row: 0,
             region_rows: 0,
-            region_top_y: None,
             submitted_raw: String::new(),
         }
     }
 
     fn run(&mut self) -> io::Result<ReadResult> {
         let mut out = io::stdout();
-        // Capturar la posición ANTES del \r\n: así el Clear(FromCursorDown)
-        // en paint() abarca TODO el output viejo (incluido el del comando
-        // anterior como /mode), no solo desde después del salto de línea.
-        // Sin esto, el output fantasma queda arriba y nunca se limpia.
-        if let Ok((_col, y)) = position() {
-            self.region_top_y = Some(y);
-        }
-        // Usamos queue! en vez de print! para mantener un solo buffer de
-        // salida: print! usa su propio buffer y puede desincronizarse.
+        // Línea en blanco de separación con la salida anterior. Usamos queue!
+        // (no print!) para mantener un único buffer de salida y no
+        // desincronizarnos con el resto del pintado.
         queue!(out, Print("\r\n"))?;
         out.flush()?;
         let _raw = RawGuard::enable()?;
@@ -441,25 +430,15 @@ impl<'a> Prompt<'a> {
         // +1 por la regla superior, +1 si hay indicador de filas ocultas arriba.
         let target_row = 1 + usize::from(start > 0) + (crow - start);
         queue!(out, MoveToColumn(0))?;
-        // Borrado anclado a la fila absoulta del tope de la región, cachead
-        // la primera vez con `position()` y reusada en repintados sucesivos.
-        // `position()` se desincroniza con clics de ratón, redimensiones, y
-        // comandos que imprimen output entre prompts (ej. `/mode` → líneas
-        // fantasma al cambiar de modo). Cacheándola, el borrado siempre
-        // apunta a la misma fila física de la terminal.
-        if self.region_top_y.is_none()
-            && let Ok((_col, cur_y)) = position()
-        {
-            self.region_top_y = Some(cur_y.saturating_sub(self.cur_region_row as u16));
-        }
-        match self.region_top_y {
-            Some(top_y) => {
-                queue!(out, MoveTo(0, top_y))?;
-            }
-            None if self.cur_region_row > 0 => {
-                queue!(out, MoveUp(self.cur_region_row as u16))?;
-            }
-            None => {}
+        // Borrado RELATIVO: subimos `cur_region_row` filas desde donde está el
+        // cursor (dentro de la región pintada antes) para llegar a su tope, y
+        // limpiamos hacia abajo. Movimiento relativo = inmune al scroll que ya
+        // ocurrió: entre repintados no se imprime nada, así que el cursor sigue
+        // exactamente donde lo dejamos. NO usamos coordenadas absolutas
+        // (`position()`/`MoveTo`): se desincronizan con el scroll en pantallas
+        // llenas y dejaban un muro de reglas `────` huérfanas (bug real).
+        if self.cur_region_row > 0 {
+            queue!(out, MoveUp(self.cur_region_row as u16))?;
         }
         queue!(out, Clear(ClearType::FromCursorDown))?;
         for (i, l) in lines.iter().enumerate() {
@@ -818,7 +797,7 @@ fn is_reserved_word(word: &str) -> bool {
     let w = word.to_ascii_lowercase();
     matches!(
         w.as_str(),
-        "dpx" | "pro" | "hack" | "deepseek"
+        "dpx" | "code" | "hack" | "learn" | "deepseek"
     ) || focus::catalog().iter().any(|f| f.id == w)
 }
 
@@ -1014,12 +993,13 @@ mod tests {
     #[test]
     fn completion_de_comandos() {
         let cwd = std::env::temp_dir();
-        let (start, cands) = completion_candidates(&cwd, "/he", 3).unwrap();
+        // Los comandos son en español: "/ay" → "/ayuda" (único).
+        let (start, cands) = completion_candidates(&cwd, "/ay", 3).unwrap();
         assert_eq!(start, 0);
         assert_eq!(cands.len(), 1);
-        assert_eq!(cands[0].replacement, "/help");
+        assert_eq!(cands[0].replacement, "/ayuda");
         // Con espacio ya no es un comando a medias.
-        assert!(completion_candidates(&cwd, "/help x", 7).is_none());
+        assert!(completion_candidates(&cwd, "/ayuda x", 8).is_none());
     }
 
     #[test]

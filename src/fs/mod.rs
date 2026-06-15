@@ -666,7 +666,8 @@ pub fn strip_action_blocks(text: &str) -> String {
                 || parse_delete_marker(info).is_some()
                 || is_run_fence(info)
                 || is_plan_fence(info)
-                || crate::skill::is_skill_fence(info);
+                || crate::skill::is_skill_fence(info)
+                || crate::agent_skill::is_learned_fence(info);
             let on_next = lines.peek().is_some_and(|n| {
                 parse_path_marker(n).is_some()
                     || parse_read_marker(n).is_some()
@@ -676,6 +677,7 @@ pub fn strip_action_blocks(text: &str) -> String {
                     || is_run_fence(n)
                     || is_plan_fence(n)
                     || crate::skill::is_skill_fence(n)
+                    || crate::agent_skill::is_learned_fence(n)
             });
             if on_fence || on_next {
                 // Saltar el bloque entero hasta el cierre ```.
