@@ -27,6 +27,8 @@ pub enum DpxCall {
     LspDiagnostics { path: String },
     /// Referencias REALES (ground truth del compilador) a un símbolo, vía LSP.
     FindReferences { path: String, line: usize, symbol: String },
+    /// Renombra un símbolo en TODO el proyecto vía LSP (refactor exacto).
+    RenameSymbol { path: String, line: usize, symbol: String, new_name: String },
     GitStatus,
     GitDiff { path: Option<String> },
     GitLog { n: Option<usize> },
@@ -36,7 +38,7 @@ pub enum DpxCall {
 }
 
 /// Las definiciones que se anuncian al modelo en cada petición.
-/// Fusiona las 14 tools nativas con las tools MCP cacheadas (si las hay).
+/// Fusiona las 15 tools nativas con las tools MCP cacheadas (si las hay).
 pub fn definitions() -> Vec<ToolDefinition> {
     let mut defs = native_definitions();
     for tool in crate::mcp::McpManager::cached_tools() {
@@ -49,7 +51,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
     defs
 }
 
-/// Solo las 14 definiciones nativas, sin MCP.
+/// Solo las 15 definiciones nativas, sin MCP.
 fn native_definitions() -> Vec<ToolDefinition> {
     fn def(name: &str, description: &str, props: Value, required: &[&str]) -> ToolDefinition {
         ToolDefinition {
@@ -184,6 +186,23 @@ fn native_definitions() -> Vec<ToolDefinition> {
             &["path", "line", "symbol"],
         ),
         def(
+            "rename_symbol",
+            "Renombra un símbolo (función, variable, tipo, método) en TODO el proyecto usando el \
+             language server: un refactor EXACTO calculado por el compilador, no un \
+             find-and-replace. Actualiza la declaración y TODAS sus referencias de forma \
+             consistente; el usuario verá un diff por archivo y confirma. ÚSALO en vez de editar \
+             a mano archivo por archivo cuando cambies el nombre de algo usado en varios sitios. \
+             Indica el archivo donde está el símbolo, la línea (1-based), su nombre ACTUAL y el \
+             NUEVO. Soporta .rs, .ts/.tsx, .js/.jsx, .py y .go.",
+            json!({
+                "path": path("Archivo donde aparece el símbolo, p.ej. src/lsp.rs"),
+                "line": { "type": "integer", "description": "Línea (1-based) donde está el símbolo" },
+                "symbol": { "type": "string", "description": "Nombre ACTUAL del símbolo, p.ej. run_turn" },
+                "new_name": { "type": "string", "description": "Nombre NUEVO, p.ej. ejecutar_turno" },
+            }),
+            &["path", "line", "symbol", "new_name"],
+        ),
+        def(
             "git_status",
             "Muestra el estado de git: archivos modificados, staged y untracked. Solo lectura, \
              sin confirmación.",
@@ -213,6 +232,14 @@ fn native_definitions() -> Vec<ToolDefinition> {
             &["message"],
         ),
     ]
+}
+
+/// Extrae el argumento `line` (entero 1-based) con un error explicable si falta.
+fn line_arg(args: &Value, name: &str) -> Result<usize, String> {
+    args.get("line")
+        .and_then(Value::as_u64)
+        .map(|v| v as usize)
+        .ok_or_else(|| format!("falta el argumento `line` (entero) en la llamada a `{name}`"))
 }
 
 /// Valida y convierte una llamada cruda (nombre + argumentos JSON) en un
@@ -247,12 +274,14 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
         "lsp_diagnostics" => Ok(DpxCall::LspDiagnostics { path: arg("path")? }),
         "find_references" => Ok(DpxCall::FindReferences {
             path: arg("path")?,
-            line: args
-                .get("line")
-                .and_then(Value::as_u64)
-                .map(|v| v as usize)
-                .ok_or_else(|| format!("falta el argumento `line` (entero) en la llamada a `{name}`"))?,
+            line: line_arg(args, name)?,
             symbol: arg("symbol")?,
+        }),
+        "rename_symbol" => Ok(DpxCall::RenameSymbol {
+            path: arg("path")?,
+            line: line_arg(args, name)?,
+            symbol: arg("symbol")?,
+            new_name: arg("new_name")?,
         }),
         "git_status" => Ok(DpxCall::GitStatus),
         "git_diff" => {
@@ -271,7 +300,8 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
         other => Err(format!(
             "herramienta desconocida: `{other}`. Las disponibles son: read_file, search_project, \
              write_file, edit_file, delete_file, run_command, web_search, spawn_agent, \
-             lsp_diagnostics, find_references, git_status, git_diff, git_log, git_commit."
+             lsp_diagnostics, find_references, rename_symbol, git_status, git_diff, git_log, \
+             git_commit."
         )),
     }
 }
@@ -345,6 +375,23 @@ mod tests {
         // line faltante → error explicable, no panic.
         let sin_line = parse_call("find_references", &json!({ "path": "a.rs", "symbol": "x" })).unwrap_err();
         assert!(sin_line.contains("line"));
+
+        // rename_symbol: path + line + symbol + new_name.
+        let rename = parse_call(
+            "rename_symbol",
+            &json!({ "path": "src/lsp.rs", "line": 10, "symbol": "foo", "new_name": "bar" }),
+        );
+        assert_eq!(
+            rename,
+            Ok(DpxCall::RenameSymbol {
+                path: "src/lsp.rs".into(),
+                line: 10,
+                symbol: "foo".into(),
+                new_name: "bar".into()
+            })
+        );
+        let sin_nuevo = parse_call("rename_symbol", &json!({ "path": "a.rs", "line": 1, "symbol": "x" })).unwrap_err();
+        assert!(sin_nuevo.contains("new_name"));
 
         let desconocida = parse_call("rm_rf", &json!({})).unwrap_err();
         assert!(desconocida.contains("desconocida"));

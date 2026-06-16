@@ -1458,6 +1458,45 @@ async fn run_tool_call(
             };
             ToolOutcome::Done(out)
         }
+        Ok(DpxCall::RenameSymbol { path, line, symbol, new_name }) => {
+            println!(
+                "{}",
+                ui::accent(&format!("  rename_symbol: {symbol} → {new_name} ({path}:{line})"))
+            );
+            let cwd2 = cwd.to_path_buf();
+            let (p, s, nn) = (path.clone(), symbol.clone(), new_name.clone());
+            let result = tokio::task::spawn_blocking(move || {
+                crate::lsp::rename(&cwd2, &p, line, &s, &nn)
+            })
+            .await;
+            match result {
+                Ok(Ok((rename_writes, notes))) => {
+                    if rename_writes.is_empty() {
+                        ToolOutcome::Done(
+                            "[rename_symbol: el language server no devolvió cambios (¿símbolo no \
+                             renombrable, o aún indexando? reintenta en unos segundos)]"
+                                .to_string(),
+                        )
+                    } else {
+                        println!(
+                            "{}",
+                            ui::dim(&format!("  ⎿ {} archivo(s) afectado(s)", rename_writes.len()))
+                        );
+                        // Pasa por el flujo normal: diff + confirmación + checkpoint
+                        // (/undo) + auto-build (green-gate) por cada archivo tocado.
+                        let report = process_writes(cwd, &rename_writes, ask, auto);
+                        let mut out = report.notes.clone();
+                        out.extend(notes);
+                        for w in rename_writes {
+                            writes.push(w);
+                        }
+                        ToolOutcome::Done(out.join("\n"))
+                    }
+                }
+                Ok(Err(e)) => ToolOutcome::Done(format!("[rename_symbol: {e}]")),
+                Err(e) => ToolOutcome::Done(format!("[rename_symbol se interrumpió: {e}]")),
+            }
+        }
         Ok(DpxCall::Write { path, content }) => {
             let w = crate::fs::FileWrite { path, content };
             let report = process_writes(cwd, std::slice::from_ref(&w), ask, auto);

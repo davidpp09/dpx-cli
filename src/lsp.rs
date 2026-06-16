@@ -130,22 +130,170 @@ pub fn references(cwd: &Path, rel_path: &str, line: usize, symbol: &str) -> Resu
         "position": { "line": line0, "character": char0 },
         "context": { "includeDeclaration": true },
     });
-    // Reintenta mientras el server indexa (primeras respuestas pueden venir vacías).
-    let mut locations: Vec<Value> = Vec::new();
-    for attempt in 0..REFERENCES_RETRIES {
-        let result = srv.request("textDocument/references", params.clone(), REFERENCES_TIMEOUT)?;
-        if let Some(arr) = result.as_array()
-            && !arr.is_empty()
-        {
-            locations = arr.clone();
-            break;
+    // Reintenta mientras el server indexa (vacío o error de "not indexed").
+    let (result, _err) = srv.request_until("textDocument/references", params, |r| {
+        r.as_array().is_some_and(|a| !a.is_empty())
+    });
+    let locations = result.as_array().cloned().unwrap_or_default();
+    Ok(format_locations(cwd, rel_path, symbol, &locations))
+}
+
+/// Punto de entrada de la tool `rename_symbol`: localiza el símbolo y pide al
+/// language server (`textDocument/rename`) TODOS los cambios para renombrarlo en
+/// el proyecto, ya resueltos como reescrituras de archivo completas
+/// (`FileWrite`) listas para pasar por el flujo normal de confirmación/diff/
+/// checkpoint. Es un refactor EXACTO (lo calcula el compilador), no un
+/// find-and-replace textual. Devuelve `(writes, notas)`: las notas avisan de
+/// operaciones que dpx no aplica solo (p.ej. renombrar el archivo de un módulo).
+pub fn rename(
+    cwd: &Path,
+    rel_path: &str,
+    line: usize,
+    symbol: &str,
+    new_name: &str,
+) -> Result<(Vec<crate::fs::FileWrite>, Vec<String>)> {
+    let abs = cwd.join(rel_path);
+    if !abs.is_file() {
+        return Err(anyhow!("no existe el archivo `{rel_path}`"));
+    }
+    let key = server_key(&abs).ok_or_else(|| {
+        anyhow!("no hay language server para `{rel_path}` (soportados: .rs, .ts/.tsx, .js/.jsx, .py, .go)")
+    })?;
+    let lang_id = language_id(&abs).unwrap_or(key);
+    let uri = path_to_uri(&abs);
+    let text = std::fs::read_to_string(&abs).with_context(|| format!("no pude leer {rel_path}"))?;
+    let (line0, char0) = locate_symbol(&text, line, symbol)
+        .ok_or_else(|| anyhow!("no encontré `{symbol}` en la línea {line} de `{rel_path}`"))?;
+
+    let mut map = manager().lock().map_err(|e| anyhow!("lock LSP: {e}"))?;
+    if !map.contains_key(key) {
+        let srv = LspServer::start(cwd, key)?;
+        map.insert(key.to_string(), srv);
+    }
+    let srv = map.get_mut(key).expect("recién insertado");
+    srv.sync_doc(&uri, lang_id, &text)?;
+
+    let params = serde_json::json!({
+        "textDocument": { "uri": uri },
+        "position": { "line": line0, "character": char0 },
+        "newName": new_name,
+    });
+    // Mismo cold-start que references: en frío rust-analyzer responde con error
+    // ("No references found at position") hasta indexar → se reintenta.
+    let (edit, err) = srv.request_until("textDocument/rename", params, workspace_edit_has_changes);
+    if !workspace_edit_has_changes(&edit)
+        && let Some(e) = err
+    {
+        return Err(anyhow!("textDocument/rename: {e}"));
+    }
+    apply_workspace_edit(cwd, &edit)
+}
+
+/// ¿El `WorkspaceEdit` trae cambios reales (en cualquiera de los dos formatos)?
+fn workspace_edit_has_changes(edit: &Value) -> bool {
+    edit.get("documentChanges").and_then(Value::as_array).is_some_and(|a| !a.is_empty())
+        || edit.get("changes").and_then(Value::as_object).is_some_and(|m| !m.is_empty())
+}
+
+/// Traduce un `WorkspaceEdit` LSP a reescrituras de archivo completas. Soporta
+/// los dos formatos (`documentChanges` —preferido por rust-analyzer— y `changes`)
+/// y junta notas para las operaciones de recurso (renombrar/crear/borrar archivo)
+/// que NO aplicamos automáticamente.
+fn apply_workspace_edit(
+    cwd: &Path,
+    edit: &Value,
+) -> Result<(Vec<crate::fs::FileWrite>, Vec<String>)> {
+    let mut writes = Vec::new();
+    let mut notes = Vec::new();
+    if let Some(dcs) = edit.get("documentChanges").and_then(Value::as_array) {
+        for dc in dcs {
+            // Las operaciones de recurso traen `kind` (rename/create/delete).
+            if let Some(kind) = dc.get("kind").and_then(Value::as_str) {
+                notes.push(format!(
+                    "[rename_symbol: el language server sugiere además una operación de archivo \
+                     `{kind}` que dpx no aplica sola; hazla a mano si hace falta]"
+                ));
+                continue;
+            }
+            if let (Some(uri), Some(edits)) =
+                (dc["textDocument"]["uri"].as_str(), dc["edits"].as_array())
+            {
+                writes.push(build_renamed_write(cwd, uri, edits)?);
+            }
         }
-        if attempt + 1 < REFERENCES_RETRIES {
-            std::thread::sleep(REFERENCES_BACKOFF);
+    } else if let Some(map) = edit.get("changes").and_then(Value::as_object) {
+        for (uri, edits) in map {
+            if let Some(edits) = edits.as_array() {
+                writes.push(build_renamed_write(cwd, uri, edits)?);
+            }
         }
     }
+    Ok((writes, notes))
+}
 
-    Ok(format_locations(cwd, rel_path, symbol, &locations))
+/// Lee un archivo, aplica sus `TextEdit`s y devuelve la reescritura completa.
+fn build_renamed_write(cwd: &Path, uri: &str, edits: &[Value]) -> Result<crate::fs::FileWrite> {
+    let rel = uri_to_rel(cwd, uri).ok_or_else(|| anyhow!("URI no relativizable: {uri}"))?;
+    let content = std::fs::read_to_string(cwd.join(&rel))
+        .with_context(|| format!("no pude leer {rel} para el rename"))?;
+    let new_content = apply_text_edits(&content, edits)?;
+    Ok(crate::fs::FileWrite { path: rel, content: new_content })
+}
+
+/// Aplica una lista de `TextEdit` LSP a `content`. Convierte cada posición
+/// (línea, carácter UTF-16) a offset de bytes y aplica los splices de ATRÁS
+/// hacia DELANTE, para que los offsets aún sin tocar no se corran.
+fn apply_text_edits(content: &str, edits: &[Value]) -> Result<String> {
+    let pos = |e: &Value, which: &str| -> Option<(u32, u32)> {
+        let l = e["range"][which]["line"].as_u64()? as u32;
+        let c = e["range"][which]["character"].as_u64()? as u32;
+        Some((l, c))
+    };
+    let mut spans: Vec<(usize, usize, String)> = Vec::with_capacity(edits.len());
+    for e in edits {
+        let (sl, sc) = pos(e, "start").ok_or_else(|| anyhow!("TextEdit sin range.start"))?;
+        let (el, ec) = pos(e, "end").ok_or_else(|| anyhow!("TextEdit sin range.end"))?;
+        let start = position_to_byte(content, sl, sc)
+            .ok_or_else(|| anyhow!("posición start ({sl},{sc}) fuera de rango"))?;
+        let end = position_to_byte(content, el, ec)
+            .ok_or_else(|| anyhow!("posición end ({el},{ec}) fuera de rango"))?;
+        let new_text = e["newText"].as_str().unwrap_or("").to_string();
+        spans.push((start, end, new_text));
+    }
+    spans.sort_by_key(|s| std::cmp::Reverse(s.0)); // descendente por inicio
+    let mut out = content.to_string();
+    for (start, end, new_text) in spans {
+        if start > end || end > out.len() {
+            return Err(anyhow!("rango de edición inválido ({start}..{end} en {} bytes)", out.len()));
+        }
+        out.replace_range(start..end, &new_text);
+    }
+    Ok(out)
+}
+
+/// Convierte una posición LSP `(line0, char_utf16)` (0-based; carácter en
+/// unidades UTF-16) a offset de BYTES en `content`. Clampa al fin de línea si el
+/// carácter la rebasa, y al fin de archivo si la línea lo hace.
+fn position_to_byte(content: &str, line0: u32, char_utf16: u32) -> Option<usize> {
+    let mut offset = 0usize;
+    let mut cur = 0u32;
+    for seg in content.split_inclusive('\n') {
+        if cur == line0 {
+            let text = seg.strip_suffix('\n').unwrap_or(seg);
+            let text = text.strip_suffix('\r').unwrap_or(text);
+            let mut u16c = 0u32;
+            for (b, ch) in text.char_indices() {
+                if u16c >= char_utf16 {
+                    return Some(offset + b);
+                }
+                u16c += ch.len_utf16() as u32;
+            }
+            return Some(offset + text.len()); // carácter rebasa la línea → fin del texto
+        }
+        offset += seg.len();
+        cur += 1;
+    }
+    (cur == line0).then_some(content.len()) // línea una más allá de la última = fin del archivo
 }
 
 /// Apaga los language servers (handshake `shutdown`/`exit` + kill). Se llama al
@@ -277,6 +425,32 @@ impl LspServer {
             self.opened.insert(uri.to_string());
             Ok(())
         }
+    }
+
+    /// Petición que puede venir VACÍA o ERROR mientras el server indexa en frío
+    /// (rust-analyzer devuelve `[]`/`null` o un error tipo "No references found"
+    /// hasta cargar el workspace). Reintenta hasta que `ready(&result)` sea true
+    /// o se agoten los intentos. Devuelve `(resultado, último_error)`: si nunca
+    /// hubo éxito, el resultado es `Null` y el error (si lo hubo) lo decide el
+    /// llamador. Ver presupuesto en `REFERENCES_RETRIES`/`REFERENCES_BACKOFF`.
+    fn request_until(
+        &mut self,
+        method: &str,
+        params: Value,
+        ready: impl Fn(&Value) -> bool,
+    ) -> (Value, Option<String>) {
+        let mut last_err = None;
+        for attempt in 0..REFERENCES_RETRIES {
+            match self.request(method, params.clone(), REFERENCES_TIMEOUT) {
+                Ok(r) if ready(&r) => return (r, None),
+                Ok(_) => last_err = None, // vacío: aún indexando, sin error
+                Err(e) => last_err = Some(e.to_string()),
+            }
+            if attempt + 1 < REFERENCES_RETRIES {
+                std::thread::sleep(REFERENCES_BACKOFF);
+            }
+        }
+        (Value::Null, last_err)
     }
 
     /// Notificación JSON-RPC (sin id, sin respuesta).
@@ -660,6 +834,60 @@ mod tests {
     }
 
     #[test]
+    fn position_to_byte_offsets_y_clamps() {
+        let c = "fn main() {}\n  let x = 1;\nfin\n";
+        // Inicio del archivo.
+        assert_eq!(position_to_byte(c, 0, 0), Some(0));
+        // Línea 1 (0-based), carácter 6 → 'x' tras "  let ": 13 ("fn main() {}\n") + 6 = 19.
+        assert_eq!(position_to_byte(c, 1, 6), Some(19));
+        // Carácter que rebasa la línea → clampa al fin del texto de esa línea.
+        assert_eq!(position_to_byte(c, 1, 999), Some(13 + "  let x = 1;".len()));
+        // Línea una más allá de la última → fin del archivo.
+        assert_eq!(position_to_byte(c, 99, 0), None);
+        // Carácter en unidades UTF-16 con no-ASCII antes.
+        let u = "let café = 1;\n"; // 'é' = 1 unidad UTF-16, 2 bytes
+        // char 5 = tras "let c","a","f","é" → byte 4(let )+1+1+1+2 = 9? "let " =4, c=1,a=1,f=1,é=2 → 'é' es el char index 3 en utf16 (l,e,t,space=0..3? no)
+        // "let café": l(0)e(1)t(2) (3)c(4)a(5)f(6)é(7). char_utf16=7 → 'é'. bytes: 'l e t space c a f' = 7 bytes, é empieza en byte 7.
+        assert_eq!(position_to_byte(u, 0, 7), Some(7));
+        // char 8 = justo después de 'é' (que ocupa 2 bytes) → byte 9.
+        assert_eq!(position_to_byte(u, 0, 8), Some(9));
+    }
+
+    #[test]
+    fn apply_text_edits_renombra_consistente() {
+        let content = "let foo = 1;\nbar(foo, foo);\n";
+        // Tres ocurrencias de `foo` → `baz`, en orden cualquiera (la fn ordena).
+        let edits = vec![
+            serde_json::json!({ "range": { "start": {"line":0,"character":4}, "end": {"line":0,"character":7} }, "newText": "baz" }),
+            serde_json::json!({ "range": { "start": {"line":1,"character":4}, "end": {"line":1,"character":7} }, "newText": "baz" }),
+            serde_json::json!({ "range": { "start": {"line":1,"character":9}, "end": {"line":1,"character":12} }, "newText": "baz" }),
+        ];
+        let out = apply_text_edits(content, &edits).unwrap();
+        assert_eq!(out, "let baz = 1;\nbar(baz, baz);\n");
+    }
+
+    #[test]
+    fn apply_workspace_edit_documentchanges_y_notas() {
+        let cwd = std::env::temp_dir().join(format!("dpx-ws-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&cwd);
+        std::fs::write(cwd.join("a.rs"), "let foo = 1;\n").unwrap();
+        let uri = path_to_uri(&cwd.join("a.rs"));
+        let edit = serde_json::json!({
+            "documentChanges": [
+                { "textDocument": { "uri": uri, "version": 1 },
+                  "edits": [ { "range": { "start": {"line":0,"character":4}, "end": {"line":0,"character":7} }, "newText": "baz" } ] },
+                { "kind": "rename", "oldUri": "x", "newUri": "y" }
+            ]
+        });
+        let (writes, notes) = apply_workspace_edit(&cwd, &edit).unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].path, "a.rs");
+        assert_eq!(writes[0].content, "let baz = 1;\n");
+        assert_eq!(notes.len(), 1, "la op de recurso `rename` debe generar una nota");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
     fn uri_to_rel_relativiza_dentro_del_proyecto() {
         let cwd = PathBuf::from(if cfg!(windows) { r"C:\proj" } else { "/proj" });
         let uri = path_to_uri(&cwd.join("src").join("main.rs"));
@@ -775,5 +1003,35 @@ mod tests {
         );
         // La declaración + 2 usos = al menos las líneas 3 y 4 deben aparecer.
         assert!(out.contains("main.rs:3:") && out.contains("main.rs:4:"), "salió: {out}");
+    }
+
+    #[test]
+    #[ignore = "requiere rust-analyzer instalado en el PATH"]
+    fn rename_renombra_todas_las_apariciones() {
+        let dir = std::env::temp_dir().join(format!("dpx-lsprn-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("src"));
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src").join("main.rs"),
+            "fn saludar() {}\nfn main() {\n    saludar();\n    saludar();\n}\n",
+        )
+        .unwrap();
+
+        let (writes, _notes) = match rename(&dir, "src/main.rs", 1, "saludar", "hola") {
+            Ok(r) => r,
+            Err(e) => {
+                shutdown();
+                panic!("rename falló: {e:#}");
+            }
+        };
+        shutdown();
+        assert_eq!(writes.len(), 1, "esperaba reescribir un archivo, vi: {}", writes.len());
+        let new = &writes[0].content;
+        assert!(!new.contains("saludar"), "quedó una aparición vieja: {new}");
+        assert_eq!(new.matches("hola").count(), 3, "decl + 2 usos → 3 `hola`: {new}");
     }
 }
