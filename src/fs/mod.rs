@@ -204,6 +204,10 @@ pub struct RunResult {
     pub output: String,
     /// True si el usuario lo interrumpió (Ctrl-C): el turno debería abortarse.
     pub cancelled: bool,
+    /// Código de salida REAL del proceso (`Some(0)` = éxito determinista). `None`
+    /// si ni siquiera arrancó. Es la fuente de verdad para el green-gate: el texto
+    /// `exit code: N` puede perderse si `cap_tail` recorta una salida muy larga.
+    pub exit_code: Option<i32>,
 }
 
 enum StreamLine {
@@ -280,6 +284,7 @@ pub fn run_command_streaming(
             return RunResult {
                 output: format!("error al ejecutar el comando: {e}"),
                 cancelled: false,
+                exit_code: None,
             };
         }
     };
@@ -357,7 +362,7 @@ pub fn run_command_streaming(
     if cancelled {
         s.push_str("[interrumpido por el usuario con Ctrl-C]\n");
     }
-    RunResult { output: cap_tail(&s, 200), cancelled }
+    RunResult { output: cap_tail(&s, 200), cancelled, exit_code: Some(code) }
 }
 
 /// Ejecuta un comando y devuelve su salida acotada (sin streaming ni cancelación;
@@ -1889,7 +1894,22 @@ mod tests {
         );
         assert!(!res.cancelled);
         assert!(res.output.contains("exit code: 0"));
+        // Fuente de verdad del green-gate: el código de salida REAL, no el texto.
+        assert_eq!(res.exit_code, Some(0));
         assert!(lines.iter().any(|l| l.contains("hola")));
+    }
+
+    #[test]
+    fn run_command_fallido_expone_exit_code_distinto_de_cero() {
+        // El green-gate distingue verde (Some(0)) de rojo por el código REAL,
+        // que sobrevive aunque `cap_tail` recorte la línea `exit code:` en una
+        // salida larga. Un comando que sale con error debe reportarse en rojo.
+        let dir = std::env::temp_dir();
+        let fail = if cfg!(windows) { "cmd /c exit 1" } else { "sh -c 'exit 1'" };
+        let res = run_command_streaming(&dir, fail, 30, &mut |_| {}, &|| false);
+        assert!(!res.cancelled);
+        assert_ne!(res.exit_code, Some(0), "un fallo no puede pasar por verde");
+        assert_eq!(res.exit_code, Some(1));
     }
 
     #[test]

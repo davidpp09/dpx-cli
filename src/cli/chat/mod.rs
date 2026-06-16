@@ -598,6 +598,12 @@ const AUTO_MAX_ROUNDS: usize = 32;
 /// ya emitido): antes esto mataba el turno entero — la queja nº 1 del usuario.
 const MAX_STREAM_RETRIES: usize = 2;
 
+/// Rondas EXTRA que el green-gate fuerza cuando el modelo intenta cerrar con el
+/// build/tests en rojo. Acotado: si tras estos intentos sigue rojo, se cierra
+/// con un aviso ROJO honesto en vez de fingir verde (mejor "incompleto" claro
+/// que un falso "listo"). No queremos un bucle infinito contra un fallo real.
+const GATE_MAX_FORCED: usize = 3;
+
 /// Resultado de un turno completo.
 enum TurnOutcome {
     /// Respuesta (posiblemente parcial) del asistente, para memoria.
@@ -790,6 +796,12 @@ async fn run_turn(
     let mut round = 0usize;
     let mut round_budget = MAX_TURN_ROUNDS;
     let mut stream_retries = 0usize;
+    // GREEN-GATE: veredicto determinista de la ÚLTIMA verificación automática
+    // (build/tests que inyecta dpx). `true` = quedó en rojo. Bloquea el cierre
+    // del turno hasta que vuelva a verde. `gate_forced` acota cuántas rondas
+    // extra forzamos para que un build irreparable no cicle eternamente.
+    let mut verify_red = false;
+    let mut gate_forced = 0usize;
     // Checkpoint del turno: captura el estado de cada archivo antes de tocarlo
     // (vía fs::apply/delete_file) y lo apila al terminar para que `/undo` pueda
     // revertir TODO lo que dpx escribió este turno. Se commitea al soltar el
@@ -1035,6 +1047,9 @@ async fn run_turn(
         // tenga que pedirlo. Se omite si el modelo ya pidió el mismo build tool.
         let mut auto_built = false;
         let mut auto_tested = false;
+        // Frontera: lo que va DESPUÉS de este índice en `runs` es verificación
+        // que inyectó dpx (no comandos del modelo) → es lo que vigila el gate.
+        let runs_before_verify = runs.len();
         if crate::fs::touches_build(&writes)
             || crate::fs::edits_touch_build(&edits)
             || crate::fs::touches_build(&s_writes)
@@ -1083,10 +1098,20 @@ async fn run_turn(
             && round >= round_budget
             && !extend_rounds(&mut *ask, round, auto, &mut round_budget)
         {
-            println!(
-                "{}",
-                ui::dim("⏸ turno detenido · el plan y la memoria quedan guardados para retomar")
-            );
+            // Si encima la verificación quedó en ROJO, no lo disfraces de pausa
+            // tranquila: dilo claro para que el usuario sepa que el build/tests
+            // siguen rotos al detenerse.
+            if verify_red {
+                println!(
+                    "{}",
+                    ui::red("🔴 turno detenido CON EL BUILD/TESTS EN ROJO · revisa y retoma")
+                );
+            } else {
+                println!(
+                    "{}",
+                    ui::dim("⏸ turno detenido · el plan y la memoria quedan guardados para retomar")
+                );
+            }
             break;
         }
         if wants_more {
@@ -1132,7 +1157,14 @@ async fn run_turn(
             } else if auto_built {
                 println!("\n{}", ui::dim("dpx verifica el proyecto (compila/linter)…"));
             }
-            for cmd in &runs {
+            // Si esta ronda corre verificación automática, partimos de VERDE y
+            // cualquier comando de verificación que falle lo pone en rojo (OR de
+            // todos: clippy Y tests deben pasar). Si la ronda no verifica, el
+            // veredicto previo se conserva (un read no "limpia" un build roto).
+            if auto_built || auto_tested {
+                verify_red = false;
+            }
+            for (idx, cmd) in runs.iter().enumerate() {
                 match confirm_run(&mut *ask, store, cwd, cmd, auto) {
                     RunDecision::Blocked(reason) => {
                         ctx.push_str(&format!(
@@ -1148,7 +1180,7 @@ async fn run_turn(
                     }
                     RunDecision::Run => {}
                 }
-                let (out_text, cancelled) = execute_run(cwd, cmd);
+                let (out_text, cancelled, exit_code) = execute_run(cwd, cmd);
                 ctx.push_str(&format!("\n--- salida de `{cmd}` ---\n{out_text}\n--- fin ---\n"));
                 if cancelled {
                     ui::clear_cancel();
@@ -1158,6 +1190,14 @@ async fn run_turn(
                     } else {
                         TurnOutcome::Reply(full)
                     };
+                }
+                // GREEN-GATE: si este comando es la verificación que inyectó dpx
+                // (no uno del modelo) y su exit code no fue 0, el turno queda en
+                // rojo. `Some(0)` es la única señal de verde; `None` (ni arrancó)
+                // o cualquier otro código cuenta como rojo.
+                let is_auto_verify = (auto_built || auto_tested) && idx >= runs_before_verify;
+                if is_auto_verify && exit_code != Some(0) {
+                    verify_red = true;
                 }
             }
             // Si solo hubo tool calls nativas, sus resultados ya viajan en el
@@ -1175,6 +1215,32 @@ async fn run_turn(
                 )
             };
             continue;
+        }
+        // 🟢 GREEN-GATE: el modelo no pidió más acciones → se da por terminado.
+        // Pero si la última verificación automática quedó en ROJO, no cerramos en
+        // falso: lo empujamos a una ronda de corrección. Acotado por
+        // `GATE_MAX_FORCED` para no ciclar contra un fallo que no sabe resolver;
+        // agotados los intentos, cerramos con un aviso ROJO honesto (mejor un
+        // "incompleto" claro que un falso "listo" con el build roto).
+        if verify_red {
+            if gate_forced < GATE_MAX_FORCED {
+                gate_forced += 1;
+                println!(
+                    "{}",
+                    ui::red("🔴 build/tests en ROJO · no cierro el turno hasta verde")
+                );
+                to_send = "[GREEN-GATE: la última verificación automática (build/tests) quedó en \
+                           ROJO, pero diste el turno por terminado. NO lo está: vuelve a los errores \
+                           reportados arriba y arréglalos hasta que el proyecto compile y los tests \
+                           pasen en verde. Si un error no lo causaste tú o no se puede arreglar, dilo \
+                           EXPLÍCITAMENTE y explica por qué; no lo dejes pasar en silencio.]"
+                    .to_string();
+                continue;
+            }
+            println!(
+                "{}",
+                ui::red("🔴 INCOMPLETO · el build/tests sigue en rojo tras varios intentos de arreglo")
+            );
         }
         break;
     }
@@ -1435,7 +1501,7 @@ async fn run_tool_call(
                 ToolOutcome::Done(format!("[el usuario rechazó ejecutar `{command}`]"))
             }
             RunDecision::Run => {
-                let (out, cancelled) = execute_run(cwd, &command);
+                let (out, cancelled, _exit) = execute_run(cwd, &command);
                 if cancelled { ToolOutcome::Cancelled(out) } else { ToolOutcome::Done(out) }
             }
         },

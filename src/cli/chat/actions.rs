@@ -33,8 +33,10 @@ pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> String {
 
 /// Ejecuta un comando YA confirmado: salida en vivo (acotada en pantalla; el
 /// modelo recibe todo), timeout, cancelación por Ctrl-C y diagnóstico
-/// automático de fallos. Devuelve (texto para el modelo, ¿se canceló?).
-pub(crate) fn execute_run(cwd: &Path, cmd: &str) -> (String, bool) {
+/// automático de fallos. Devuelve (texto para el modelo, ¿se canceló?, código de
+/// salida). El código (`Some(0)` = éxito) alimenta el green-gate de forma
+/// determinista, sin depender de heurísticas sobre el texto de salida.
+pub(crate) fn execute_run(cwd: &Path, cmd: &str) -> (String, bool, Option<i32>) {
     let t = std::time::Instant::now();
     // La pestaña muestra el comando en curso (acotado para que quepa).
     let shown_cmd: String = cmd.chars().take(48).collect();
@@ -69,7 +71,7 @@ pub(crate) fn execute_run(cwd: &Path, cmd: &str) -> (String, bool) {
             diag.hint, diag.suggestions
         ));
     }
-    (text, out.cancelled)
+    (text, out.cancelled, out.exit_code)
 }
 
 /// Resultado de aplicar los cambios propuestos por el modelo en una ronda
