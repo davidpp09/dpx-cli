@@ -152,9 +152,9 @@ pub async fn run(
     let mut mem_store = crate::memory::MemoryStore::load(store.dpx_dir());
     let mut embedder: Option<crate::memory::Embedder> = None;
 
-    // Skills auto-mejorables del agente (playbooks de este proyecto). Como la
-    // memoria, se carga barato; el motor de embeddings solo si de verdad se usa.
-    let mut skillbook = crate::agent_skill::SkillBook::load(store.dpx_dir());
+    // Skills CURADOS del proyecto (playbooks `skills/*.md`). Como la memoria, se
+    // cargan barato (solo leer los .md); el embedder solo si de verdad se usan.
+    let mut skillbook = crate::agent_skill::SkillBook::from_dir(&cwd.join("skills"));
 
     loop {
         // De vuelta en el prompt: la pestaña muestra dpx en reposo.
@@ -327,13 +327,13 @@ pub async fn run(
                     }
                     None => input.to_string(),
                 };
-                // Skills aprendidas (code/hack): trae los playbooks de este
-                // proyecto que encajan con la petición y los antepone, para que
-                // dpx los aplique y los mejore. En learn no aplica (no ejecuta).
+                // Skills curados (code/hack): trae los playbooks `skills/*.md`
+                // que encajan con la petición y los antepone para que dpx los
+                // siga paso a paso. En learn no aplica (no ejecuta).
                 if mode != Mode::Learn
-                    && let Some(sk) = recall_skills(input, &skillbook, &mut embedder)
+                    && let Some(sk) = recall_skills(input, &mut skillbook, &mut embedder)
                 {
-                    println!("{}", ui::dim("⎿ aplicando skills aprendidas…"));
+                    println!("{}", ui::dim("⎿ aplicando playbook del proyecto…"));
                     turn_input = format!("{sk}\n\n{turn_input}");
                 }
                 // Auto-delegación: si la petición es de investigación, un subagente
@@ -399,11 +399,8 @@ pub async fn run(
                 }
                 match outcome {
                     TurnOutcome::Reply(full) => {
-                        // Skills auto-mejorables: si dpx declaró un `dpx:learned`,
-                        // lo embebe y refina/crea la skill del proyecto (code/hack).
-                        if mode != Mode::Learn {
-                            learn_skill(&full, focus_id.as_deref(), &mut skillbook, &mut embedder);
-                        }
+                        // (Los skills son curados en skills/*.md; ya no se
+                        // auto-aprende nada de la respuesta — eso daba genérico.)
                         store.checkpoint("assistant", &full)?;
                         turns.push(Turn { role: "assistant", text: full });
                     }
@@ -1500,73 +1497,37 @@ fn recall_context(
     Some(s)
 }
 
-/// Recupera los playbooks (skills aprendidas) que encajan con `input` y los
-/// formatea para anteponerlos al turno. `None` si no hay skills, el motor no
-/// carga, o nada supera el umbral (degradación elegante, igual que la memoria).
+/// Recupera los playbooks CURADOS (`skills/*.md`) que encajan con `input` y los
+/// antepone al turno. `None` si no hay skills, el motor no carga, o nada supera
+/// el umbral (degradación elegante, igual que la memoria).
 fn recall_skills(
     input: &str,
-    book: &crate::agent_skill::SkillBook,
+    book: &mut crate::agent_skill::SkillBook,
     emb: &mut Option<crate::memory::Embedder>,
 ) -> Option<String> {
     if book.is_empty() {
         return None; // sin skills → ni cargamos el modelo
     }
     let engine = ensure_embedder(emb).ok()?;
+    // Vectoriza perezosamente los skills curados que aún no tienen embedding
+    // (el motor ya está cargado en este punto).
+    book.embed_pending(|t| engine.embed_one(t).ok());
     let query_vec = engine.embed_one(input).ok()?;
     let hits = book.search(&query_vec, 3, 0.55);
     if hits.is_empty() {
         return None;
     }
     let mut s = String::from(
-        "[skills que dpx aprendió en ESTE proyecto y que aplican a la petición. Síguelas y, \
-         si descubres una forma mejor, decláralo con un bloque dpx:learned para refinarlas:\n",
+        "[PLAYBOOK del proyecto que aplica a esta petición. SÍGUELO paso a paso: \
+         te da los archivos y el orden exactos para ir de A→B, no explores a ciegas:\n",
     );
     for sk in hits {
-        s.push_str(&format!("• {} — {}\n", sk.name, sk.body));
+        s.push_str(&format!("## {}\n{}\n", sk.name, sk.body));
     }
     s.push(']');
     Some(s)
 }
 
-/// Si dpx declaró un bloque `dpx:learned` en su respuesta, lo embebe y lo
-/// incorpora al libro de skills (refina la parecida o crea una nueva). Best
-/// effort: si no hay bloque o el motor no carga, no pasa nada.
-fn learn_skill(
-    reply: &str,
-    focus_id: Option<&str>,
-    book: &mut crate::agent_skill::SkillBook,
-    emb: &mut Option<crate::memory::Embedder>,
-) {
-    let Some((name, body)) = crate::agent_skill::parse_learned_block(reply) else {
-        return;
-    };
-    let Ok(engine) = ensure_embedder(emb) else {
-        return;
-    };
-    let Ok(vector) = engine.embed_one(&format!("{name}\n{body}")) else {
-        return;
-    };
-    let today = crate::skill::today();
-    let skill = crate::agent_skill::AgentSkill {
-        name,
-        body,
-        focus: focus_id.unwrap_or("").to_string(),
-        uses: 0,
-        confidence: 0.0,
-        created: today.clone(),
-        updated: today,
-        vector,
-    };
-    match book.reinforce_or_add(skill) {
-        Ok(crate::agent_skill::Learned::New(n)) => {
-            println!("{}", ui::dim(&format!("⎿ nueva skill aprendida: {n} · {} en total", book.len())))
-        }
-        Ok(crate::agent_skill::Learned::Refined(n)) => {
-            println!("{}", ui::dim(&format!("⎿ skill refinada: {n}")))
-        }
-        Err(_) => {}
-    }
-}
 
 /// Heurística: ¿esta petición "huele" a trabajo de investigación/exploración que
 /// un subagente FLASH (barato) puede resolver y devolver ya digerido, ahorrando
@@ -2139,7 +2100,12 @@ fn handle_command(
                 .count();
             let total_skills = skills.len();
             let recuerdos = crate::memory::MemoryStore::load(store.dpx_dir()).len();
-            let agent_skills = crate::agent_skill::SkillBook::load(store.dpx_dir()).len();
+            let skills_dir = store
+                .dpx_dir()
+                .parent()
+                .map(|p| p.join("skills"))
+                .unwrap_or_else(|| std::path::PathBuf::from("skills"));
+            let agent_skills = crate::agent_skill::SkillBook::from_dir(&skills_dir).len();
             ui::project_panel(has_context, plan_progress, dominados, total_skills, recuerdos, agent_skills);
         }
 

@@ -11,6 +11,9 @@
 # Contexto de proyecto generado por dpx al correrlo aquí
 .dpx/
 
+# Banco de pruebas del harness (uso local, no se sube)
+eval/
+
 # Caché del modelo de embeddings local (fastembed/ONNX): ~128 MB, se descarga
 # sola la primera vez. Nunca se commitea.
 .fastembed_cache/

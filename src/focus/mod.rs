@@ -289,7 +289,7 @@ code = agente que hace el trabajo, hack = construir rápido con criterio, learn 
 socrático que te enseña), `/progreso` (avance de aprendizaje del usuario), \
 `/temario` (el temario del stack y su avance), `/examen` (te interroga para fijar lo aprendido), \
 `/recordar <texto>` (guarda algo en la memoria de largo plazo del usuario), \
-`/habilidades` (las skills/playbooks que has aprendido en este proyecto, code/hack), \
+`/habilidades` (los playbooks curados del proyecto en skills/*.md, code/hack), \
 `/auto` (modo autónomo: aplica cambios y comandos seguros sin preguntar), \
 `/actualizar` (recompila e instala dpx desde este repo) y `/salir`. Los nombres son en \
 ESPAÑOL (los ingleses como `/help` o `/focus` siguen funcionando de alias, pero usa los \
@@ -390,6 +390,17 @@ grande o ambiguo.
 - El presupuesto arranca en 8 rondas por turno y se amplía si la tarea sigue viva (checkpoint \
 con el usuario; en modo auto se amplía solo hasta un tope). Pero cada ronda cuesta tiempo y \
 dinero: sé eficiente igualmente.
+- EDITA TEMPRANO — esta es la regla MÁS importante de eficiencia. Tu PRIMER edit debe salir \
+en las primeras 2-3 rondas. Si llevas 4 rondas leyendo/buscando sin un solo `edit_file`, PARA \
+de explorar: haz YA el cambio mínimo con lo que sabes y deja que el COMPILADOR te corrija — un \
+error real de `cargo` te enseña dónde tocar más que leer otro archivo. Para una tarea chica \
+(añadir un comando, imprimir un resumen) con 1-2 lecturas te sobra para empezar a editar.
+- El PEOR resultado posible es topar el tope de rondas SIN haber editado nada: pasó de verdad \
+en tareas triviales (agregar un comando, un resumen al final) donde dpx leyó medio repo y se \
+quedó en cero. Releer-buscar-releer hasta el cap = fracaso total. Mejor un edit imperfecto que \
+el compilador corrige, que cero edits.
+- Reserva presupuesto para CERRAR (verificar + limpiar cabos): no llegues a la mitad del \
+presupuesto todavía explorando. Si a la ronda 4 no has editado, vas tarde.
 - Pide TODAS las lecturas que necesites en UN solo turno, no de a una.
 - No releas un archivo que ya tienes fresco en la conversación (sí relélo tras editarlo o si \
 falló un edit). Releer el mismo archivo cinco veces es quemar rondas: cuando ya lo mapeaste, \
@@ -552,28 +563,20 @@ visto | Arquitectura en capas (controller/service/repo) | spring-boot
 No lo dibujes con prosa: usa el bloque. Sé honesto con el nivel (no marques `dominado` lo que \
 solo presentaste). Si en este turno no se trabajó ningún concepto, omite el bloque.";
 
-/// Contrato de SKILLS AUTO-MEJORABLES (solo code/hack): dpx destila playbooks
-/// reutilizables de lo que aprende EN ESTE proyecto y mejora con el uso.
+/// Contrato de SKILLS CURADOS (solo code/hack): el proyecto trae playbooks
+/// escritos a mano en `skills/*.md`; los relevantes se inyectan antes del turno.
 const LEARNED_SKILLS_CONTRACT: &str = "\
-# Skills del proyecto (auto-mejora — bloque dpx:learned)
-Vas mejorando en lo que más se usa: cuando TERMINES una tarea no trivial que \
-probablemente se REPITA (crear un endpoint, montar un test, una migración, un patrón de \
-este repo…), destila el procedimiento en un bloque `dpx:learned` para reutilizarlo después. \
-El CLI lo guarda y, si ya existe uno parecido, lo REFINA (sube su confianza); en turnos \
-futuros te re-inyecta los que encajen con la tarea para que los apliques (y los mejores).
+# Skills del proyecto (playbooks curados)
+Este proyecto puede traer PLAYBOOKS curados (archivos `skills/*.md`, escritos y revisados a \
+mano) que describen, paso a paso, CÓMO se hacen aquí las tareas que se repiten. Cuando uno \
+encaje con la petición, el CLI te lo inyecta ARRIBA del turno marcado como PLAYBOOK. \
+Cuando eso pase: SÍGUELO al pie de la letra — te da los archivos exactos y el orden, así no \
+exploras a ciegas ni reinventas la convención del repo.
 
-Formato: la PRIMERA línea es un nombre corto y reconocible; el resto, los pasos/criterios \
-CONCISOS y específicos de ESTE proyecto (rutas, comandos, convenciones reales — no genérico):
-
-```dpx:learned
-Crear endpoint REST en este proyecto
-Controlador en src/main/java/.../web con @RestController; delega a un service; DTO con
-validación (jakarta.validation). Test de slice con @WebMvcTest + MockMvc. Verifica: mvn -q test.
-```
-
-Reglas: úsalo SOLO cuando de verdad aporte un playbook reutilizable (no por cada respuesta); \
-sé específico y honesto; si no hay nada que valga la pena guardar, omite el bloque. El usuario \
-ve sus skills con `/skills`.";
+No declares bloques de skills ni inventes un formato: los skills son curados, NO se generan \
+solos. Si crees que falta un playbook para una tarea repetitiva, MENCIÓNALO en una línea al \
+final (\"esto podría ser un skill en skills/\") y deja que el humano decida. El usuario ve los \
+skills con `/skills`.";
 
 #[cfg(test)]
 mod tests {

@@ -1130,29 +1130,29 @@ pub fn status_panel(
     );
 }
 
-/// Lista las skills (playbooks) que dpx ha aprendido en el proyecto (`/skills`).
+/// Lista los playbooks curados del proyecto (`skills/*.md`, comando `/skills`).
 pub fn skills_list(skills: &[&crate::agent_skill::AgentSkill]) {
     if skills.is_empty() {
         println!("\n{}", accent("⏺ skills del proyecto"));
         println!(
             "  {}",
-            dim("aún ninguna · dpx las irá aprendiendo (y refinando) según trabajes en code/hack")
+            dim("aún ninguno · crea un .md en skills/ con los pasos de una tarea que se repita")
         );
         return;
     }
     println!(
         "\n{} {}",
-        accent("⏺ skills aprendidas"),
-        dim(&format!("· {} en este proyecto · se afinan con el uso", skills.len()))
+        accent("⏺ skills del proyecto"),
+        dim(&format!("· {} playbooks curados · edítalos en skills/", skills.len()))
     );
     println!();
     for s in skills {
-        // Barra de confianza (0–1) en 5 bloques.
-        let filled = (s.confidence * 5.0).round() as usize;
-        let bar: String = "●".repeat(filled.min(5)) + &"○".repeat(5usize.saturating_sub(filled));
-        let usos = if s.uses == 1 { "1 uso".to_string() } else { format!("{} usos", s.uses) };
         let stack = if s.focus.is_empty() { String::new() } else { format!(" · {}", s.focus) };
-        println!("  {} {}   {}", grad(&bar), accent(&s.name), dim(&format!("{usos}{stack}")));
+        println!("  {} {}", accent(&format!("• {}", s.name)), dim(&stack));
+        // "Cuándo se usa" (frase de disparo), si la trae.
+        if !s.when.trim().is_empty() {
+            println!("     {}", dim(&format!("cuándo: {}", s.when)));
+        }
         // Cuerpo recortado a una línea para la vista de lista.
         let body = s.body.replace('\n', " ");
         let body: String = body.chars().take(96).collect();
@@ -1199,7 +1199,7 @@ pub fn print_help(mode: crate::focus::Mode) {
         ("/temario", "el temario del stack y cuánto llevas", &[Mode::Learn]),
         ("/examen [tema]", "el tutor te interroga para fijar lo aprendido", &[Mode::Learn]),
         ("/recordar <texto>", "guarda algo en memoria de largo plazo", &[]),
-        ("/habilidades", "playbooks que dpx aprendió aquí (se afinan con el uso)", &[Mode::Code, Mode::Hack]),
+        ("/habilidades", "playbooks curados del proyecto (skills/*.md)", &[Mode::Code, Mode::Hack]),
         ("/cerebro [modelo]", "cerebro (dpx usa solo deepseek)", &[]),
         ("/auto [off|all]", "modo autónomo: cambios sin preguntar", &[Mode::Code, Mode::Hack]),
         ("/actualizar", "recompila e instala dpx desde este repo", &[]),
