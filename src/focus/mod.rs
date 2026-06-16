@@ -191,6 +191,20 @@ fn domain_skills(focus_id: &str) -> Option<&'static str> {
     }
 }
 
+/// Playbooks EMPOTRADOS (built-in) del stack activo: `(nombre, cuándo, pasos)`.
+/// Vienen DENTRO de dpx, así un usuario obtiene playbooks A→B expertos sin
+/// escribir skills. Se cargan junto a los curados de `skills/` (el CLI los
+/// recupera por similitud antes del turno). Vacío = sin playbooks para ese stack.
+pub fn builtin_playbooks(focus_id: Option<&str>) -> &'static [(&'static str, &'static str, &'static str)] {
+    match focus_id {
+        Some("spring-boot") => spring_boot::PLAYBOOKS,
+        Some("react") => react::PLAYBOOKS,
+        Some("node") => node::PLAYBOOKS,
+        Some("python") => python::PLAYBOOKS,
+        _ => &[],
+    }
+}
+
 /// Devuelve el nombre legible de un focus pack (para banners).
 /// `None` = mentor general, sin enfoque de stack.
 pub fn display_name(focus_id: Option<&str>) -> &str {

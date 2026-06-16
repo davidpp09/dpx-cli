@@ -82,3 +82,61 @@ Tu entrenamiento probablemente está desactualizado. Usa SIEMPRE estos datos, no
 ## Modelado de negocio
 Modelas con soltura entidades comunes y sus relaciones reales: User, Product, Order, Payment
 (un Order tiene varios items, un Payment pertenece a un Order, un User tiene roles, etc.).";
+
+/// Playbooks EMPOTRADOS de Spring Boot: pasos A→B de las tareas que más se
+/// repiten, para que dpx no explore a ciegas y aplique la convención correcta.
+/// Se cargan cuando el focus activo es `spring-boot`. (nombre, cuándo, pasos).
+pub const PLAYBOOKS: &[(&str, &str, &str)] = &[
+    (
+        "crear endpoint REST",
+        "USAR cuando: crear/agregar un endpoint, API, ruta, controller, GET/POST/PUT/DELETE. NO para tests sueltos ni config.",
+        "1. Controller en `web/` con `@RestController` + `@RequestMapping(\"/api/...\")`; inyección por CONSTRUCTOR.\n\
+         2. NO metas lógica en el controller: delega a un `@Service`.\n\
+         3. Request/Response como `record` DTO (no expongas la entidad). Valida el body con `@Valid`.\n\
+         4. Devuelve `ResponseEntity<T>` con el status correcto (201 + Location en POST).\n\
+         5. Test: `@WebMvcTest(ElController.class)` + `MockMvc`, con el service mockeado.\n\
+         6. Verifica con `mvn -q test`.",
+    ),
+    (
+        "crear entidad JPA y repositorio",
+        "USAR cuando: agregar una entidad, modelo, tabla, persistencia, o un repositorio. Palabras: @Entity, JPA, repository, base de datos.",
+        "1. Entidad con `jakarta.persistence` (NUNCA `javax.*`): `@Entity`, `@Id @GeneratedValue(strategy = IDENTITY)`.\n\
+         2. Repositorio = interfaz `extends JpaRepository<Entidad, Long>` en `repository/`; queries derivados por nombre o `@Query`.\n\
+         3. NO pongas lógica de negocio en la entidad ni la expongas por el API (usa DTOs).\n\
+         4. Esquema versionado con Flyway (`db/migration/V__.sql`), no `ddl-auto=update` en serio.\n\
+         5. Test del repo: `@DataJpaTest` (+ Testcontainers si pruebas contra la BD real).",
+    ),
+    (
+        "validar input (DTO + bean validation)",
+        "USAR cuando: validar un request, body, constraints, campos obligatorios, formato. Palabras: @Valid, validación, NotNull, Email.",
+        "1. DTO como `record` con `jakarta.validation.constraints` (`@NotBlank`, `@Email`, `@Size`, `@Positive`...).\n\
+         2. En el controller, `@Valid` en el parámetro del body.\n\
+         3. El `MethodArgumentNotValidException` se maneja en un `@RestControllerAdvice` → 400 con `ProblemDetail`.\n\
+         4. La validación de NEGOCIO (no de formato) va en el `@Service`, no en el DTO.",
+    ),
+    (
+        "manejo global de errores",
+        "USAR cuando: manejar excepciones, errores, respuestas de error, 404/400/409, @ControllerAdvice, ProblemDetail.",
+        "1. Una clase `@RestControllerAdvice` central con un `@ExceptionHandler` por tipo.\n\
+         2. Respuesta con `ProblemDetail` (RFC 7807, Boot 3+): `ProblemDetail.forStatusAndDetail(...)`. NUNCA expongas stack traces.\n\
+         3. Excepciones de dominio propias (p.ej. `NotFoundException`) → mapéalas a 404/409.\n\
+         4. Loggea el error real en el server; al cliente solo el ProblemDetail limpio.",
+    ),
+    (
+        "test de slice (controller / repo / service)",
+        "USAR cuando: escribir o pedir un test, probar un controller/repo/service, @WebMvcTest, @DataJpaTest.",
+        "1. Controller → `@WebMvcTest(Controller.class)` + `MockMvc`, mockeando el service con `@MockitoBean` (Boot 3.4+, sustituye a `@MockBean`).\n\
+         2. Repo → `@DataJpaTest` (slice de persistencia).\n\
+         3. Service → test unitario puro JUnit 5 + Mockito, sin levantar Spring.\n\
+         4. Aserciones con AssertJ (`assertThat(...)`). NO uses `@SpringBootTest` para todo: es lento.\n\
+         5. Corre `mvn -q test` y reacciona a la salida real.",
+    ),
+    (
+        "configuración tipada (properties)",
+        "USAR cuando: configuración, application.yml, propiedades externas, @ConfigurationProperties, perfiles, secretos.",
+        "1. Agrupa la config en un `record` con `@ConfigurationProperties(prefix = \"...\")` + `@Validated`; NADA de `@Value` disperso.\n\
+         2. Valores en `application.yml` por perfil (`application-dev.yml`, `application-prod.yml`).\n\
+         3. Secretos por variable de entorno, NUNCA hardcodeados ni en el repo.\n\
+         4. Habilita con `@EnableConfigurationProperties` o `@ConfigurationPropertiesScan`.",
+    ),
+];

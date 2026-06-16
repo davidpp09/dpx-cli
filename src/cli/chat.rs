@@ -152,9 +152,17 @@ pub async fn run(
     let mut mem_store = crate::memory::MemoryStore::load(store.dpx_dir());
     let mut embedder: Option<crate::memory::Embedder> = None;
 
-    // Skills CURADOS del proyecto (playbooks `skills/*.md`). Como la memoria, se
-    // cargan barato (solo leer los .md); el embedder solo si de verdad se usan.
+    // Skills del proyecto: CURADOS (`skills/*.md`, locales) + EMPOTRADOS del stack
+    // activo (vienen en dpx). Carga barata; el embedder solo si de verdad se usan.
     let mut skillbook = crate::agent_skill::SkillBook::from_dir(&cwd.join("skills"));
+    skillbook.extend(
+        crate::focus::builtin_playbooks(focus_id.as_deref())
+            .iter()
+            .map(|(n, w, b)| {
+                crate::agent_skill::AgentSkill::builtin(n, w, b, focus_id.as_deref().unwrap_or(""))
+            })
+            .collect(),
+    );
 
     loop {
         // De vuelta en el prompt: la pestaña muestra dpx en reposo.

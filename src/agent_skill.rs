@@ -36,8 +36,23 @@ pub struct AgentSkill {
     pub vector: Vec<f32>,
 }
 
-/// Catálogo de skills curados cargado de `skills/*.md`. De solo lectura: no se
-/// auto-persiste nada (los `.md` se editan a mano).
+impl AgentSkill {
+    /// Crea un skill EMPOTRADO (built-in) desde literales de un focus pack. Estos
+    /// vienen DENTRO de dpx (por stack), así un usuario obtiene playbooks expertos
+    /// sin escribir nada. El vector se llena perezosamente, igual que los curados.
+    pub fn builtin(name: &str, when: &str, body: &str, focus: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            body: body.to_string(),
+            focus: focus.to_string(),
+            when: when.to_string(),
+            vector: Vec::new(),
+        }
+    }
+}
+
+/// Catálogo de skills cargado de `skills/*.md` (curados) + los empotrados del
+/// stack activo. De solo lectura: no se auto-persiste nada.
 pub struct SkillBook {
     skills: Vec<AgentSkill>,
 }
@@ -62,6 +77,16 @@ impl SkillBook {
     /// Todos los skills (para `/skills`), por nombre.
     pub fn ranked(&self) -> Vec<&AgentSkill> {
         self.skills.iter().collect()
+    }
+
+    /// Añade skills (p.ej. los empotrados del focus activo). No duplica por nombre
+    /// — un skill curado de `skills/` con el mismo nombre gana sobre el built-in.
+    pub fn extend(&mut self, more: Vec<AgentSkill>) {
+        for s in more {
+            if !self.skills.iter().any(|e| e.name == s.name) {
+                self.skills.push(s);
+            }
+        }
     }
 
     /// Embebe (vectoriza) los skills que aún no tienen vector, usando `embed`.
@@ -202,6 +227,21 @@ mod tests {
         let hits = book.search(&[1.0, 0.0], 3, 0.5);
         assert_eq!(hits.len(), 1, "solo el parecido supera el umbral");
         assert_eq!(hits[0].name, "endpoint");
+    }
+
+    #[test]
+    fn extend_no_duplica_y_el_curado_gana() {
+        // Un curado de skills/ con el mismo nombre debe ganar sobre el built-in.
+        let mut book = SkillBook {
+            skills: vec![AgentSkill::builtin("crear endpoint", "w", "curado", "spring-boot")],
+        };
+        book.extend(vec![
+            AgentSkill::builtin("crear endpoint", "w", "builtin", "spring-boot"), // mismo nombre → ignorado
+            AgentSkill::builtin("otro", "w", "nuevo", "spring-boot"),             // nombre nuevo → entra
+        ]);
+        assert_eq!(book.len(), 2, "no duplica por nombre");
+        let endpoint = book.ranked().into_iter().find(|s| s.name == "crear endpoint").unwrap();
+        assert_eq!(endpoint.body, "curado", "el primero (curado) gana");
     }
 
     #[test]
