@@ -318,6 +318,26 @@ pub(crate) fn process_deletes(
                 Ok(()) => {
                     println!("{} borrado: {}", ui::accent("⏺"), d);
                     report.ok(format!("[borrado: {d}]"));
+                    // ORPHAN-SWEEP: ¿quedaron referencias colgando al módulo
+                    // borrado? Si las hay, una ronda extra para que el modelo
+                    // las limpie (no deje imports/usos rotos). El green-gate
+                    // cazaría el build roto después; esto se lo dice ANTES y le
+                    // señala exactamente dónde.
+                    if let Some(refs) = crate::fs::orphan_refs(cwd, d) {
+                        let n = refs.lines().count();
+                        println!(
+                            "  {}",
+                            ui::red(&format!(
+                                "⚠ {n} referencia(s) podrían haber quedado colgando tras borrar {d}"
+                            ))
+                        );
+                        report.followup(format!(
+                            "[ORPHAN-SWEEP tras borrar `{d}`: quedan referencias a su nombre de \
+                             módulo en el proyecto. Revísalas y límpialas (imports/usos/mod) para \
+                             no dejar el build roto. Si alguna es un falso positivo (otra cosa con \
+                             el mismo nombre), ignórala:\n{refs}\n]"
+                        ));
+                    }
                 }
                 Err(e) => {
                     eprintln!("{} error al borrar: {e}", ui::accent("⏺"));

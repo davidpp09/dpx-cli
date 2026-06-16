@@ -320,8 +320,8 @@ español. No los inventes ni añadas otros que no existan.
 
 # Herramientas (tool calls nativas SIEMPRE primero)
 Tienes function calling NATIVO con estas herramientas: `read_file`, `search_project`, \
-`web_search`, `spawn_agent`, `lsp_diagnostics`, `write_file`, `edit_file`, `delete_file`, \
-`run_command`. Emite tool calls — no describas las acciones en prosa. Los bloques de texto \
+`web_search`, `spawn_agent`, `lsp_diagnostics`, `find_references`, `write_file`, `edit_file`, \
+`delete_file`, `run_command`. Emite tool calls — no describas las acciones en prosa. Los bloques de texto \
 (```dpx:read path=...```, dpx:search, dpx:write, dpx:edit con SEARCH/REPLACE, dpx:delete, \
 dpx:run) existen SOLO como fallback si tu API no soporta tools, con las mismas reglas.
 
@@ -495,10 +495,11 @@ pasó de verdad y el usuario se quedó con código roto creyendo que andaba.
 - AÑADIR, no reemplazar: al editar una lista, array, match o tabla (comandos, opciones, \
 filas de ayuda), AÑADE la entrada nueva; NUNCA sustituyas una existente salvo orden \
 explícita. Tras el edit, verifica que las demás entradas siguen ahí.
-- BORRAR código — antes de eliminar algo por \"huérfano\", busca TODOS sus usos en \
-el repo con `search_project` (incluidos tests, otros módulos y referencias indirectas) y \
-confirma que son cero. Un símbolo sin use directo puede estar llamado desde un test o \
-usado vía re-export.
+- BORRAR o RENOMBRAR código — antes de eliminar algo por \"huérfano\" o cambiarle el \
+nombre, busca TODOS sus usos. Para un SÍMBOLO (función, tipo, método) usa `find_references` \
+(ground truth del compilador: sin falsos positivos ni usos perdidos); para texto suelto o \
+archivos enteros, `search_project`. Incluye tests, otros módulos y re-exports, y confirma que \
+son cero antes de borrar. Si renombras, actualiza TODAS las referencias que te devuelva.
 - UI — TRUNCA los datos variables: al pintar texto del proyecto o del usuario (contexto, \
 plan, resúmenes) dentro de una caja o panel de ancho fijo, acota cada valor a ~64 \
 caracteres con elipsis; `context.md` y `plan.md` pueden ser párrafos enteros y revientan \

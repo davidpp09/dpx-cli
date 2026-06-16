@@ -80,33 +80,72 @@ pub fn diagnostics(cwd: &Path, rel_path: &str) -> Result<String> {
         map.insert(key.to_string(), srv);
     }
     let srv = map.get_mut(key).expect("recién insertado");
-
-    // didChange si ya estaba abierto, didOpen si es la primera vez (cada uno
-    // dispara una nueva tanda de diagnósticos para esa URI).
-    let version = {
-        srv.version += 1;
-        srv.version
-    };
-    if srv.opened.contains(&uri) {
-        srv.notify(
-            "textDocument/didChange",
-            serde_json::json!({
-                "textDocument": { "uri": uri, "version": version },
-                "contentChanges": [ { "text": text } ],
-            }),
-        )?;
-    } else {
-        srv.notify(
-            "textDocument/didOpen",
-            serde_json::json!({
-                "textDocument": { "uri": uri, "languageId": lang_id, "version": version, "text": text },
-            }),
-        )?;
-        srv.opened.insert(uri.clone());
-    }
-
+    srv.sync_doc(&uri, lang_id, &text)?;
     let diags = srv.collect_diagnostics(&uri, DIAG_OVERALL, DIAG_SETTLE);
     Ok(format_diagnostics(rel_path, &diags))
+}
+
+/// Tope de cada petición `textDocument/references`.
+const REFERENCES_TIMEOUT: Duration = Duration::from_secs(20);
+/// Reintentos: en frío rust-analyzer tarda en indexar el workspace (corre
+/// `cargo metadata`, arranca el proc-macro server…) y devuelve vacío hasta que
+/// termina. Se reintenta con pausa: ~18s de margen total en el peor caso (la
+/// primera consulta de la sesión); ya caliente responde al primer intento.
+const REFERENCES_RETRIES: usize = 20;
+const REFERENCES_BACKOFF: Duration = Duration::from_millis(2000);
+
+/// Punto de entrada de la tool `find_references`: localiza el símbolo `symbol`
+/// en la línea `line` (1-based, tal como la ve el modelo) de `rel_path` y pide
+/// al language server TODAS sus referencias en el proyecto. Es ground truth del
+/// compilador (no texto): a diferencia de un grep, no trae falsos positivos ni
+/// se pierde usos calificados. Devuelve las ubicaciones `ruta:línea:col`, o un
+/// mensaje claro si no hay server, no se encontró el símbolo, o no hay refs.
+pub fn references(cwd: &Path, rel_path: &str, line: usize, symbol: &str) -> Result<String> {
+    let abs = cwd.join(rel_path);
+    if !abs.is_file() {
+        return Err(anyhow!("no existe el archivo `{rel_path}`"));
+    }
+    let key = server_key(&abs).ok_or_else(|| {
+        anyhow!("no hay language server para `{rel_path}` (soportados: .rs, .ts/.tsx, .js/.jsx, .py, .go)")
+    })?;
+    let lang_id = language_id(&abs).unwrap_or(key);
+    let uri = path_to_uri(&abs);
+    let text = std::fs::read_to_string(&abs).with_context(|| format!("no pude leer {rel_path}"))?;
+
+    // Resuelve la posición exacta (línea, carácter) del símbolo dentro de la
+    // línea indicada — el modelo razona en nombres, no en offsets UTF-16.
+    let (line0, char0) = locate_symbol(&text, line, symbol)
+        .ok_or_else(|| anyhow!("no encontré `{symbol}` en la línea {line} de `{rel_path}`"))?;
+
+    let mut map = manager().lock().map_err(|e| anyhow!("lock LSP: {e}"))?;
+    if !map.contains_key(key) {
+        let srv = LspServer::start(cwd, key)?;
+        map.insert(key.to_string(), srv);
+    }
+    let srv = map.get_mut(key).expect("recién insertado");
+    srv.sync_doc(&uri, lang_id, &text)?;
+
+    let params = serde_json::json!({
+        "textDocument": { "uri": uri },
+        "position": { "line": line0, "character": char0 },
+        "context": { "includeDeclaration": true },
+    });
+    // Reintenta mientras el server indexa (primeras respuestas pueden venir vacías).
+    let mut locations: Vec<Value> = Vec::new();
+    for attempt in 0..REFERENCES_RETRIES {
+        let result = srv.request("textDocument/references", params.clone(), REFERENCES_TIMEOUT)?;
+        if let Some(arr) = result.as_array()
+            && !arr.is_empty()
+        {
+            locations = arr.clone();
+            break;
+        }
+        if attempt + 1 < REFERENCES_RETRIES {
+            std::thread::sleep(REFERENCES_BACKOFF);
+        }
+    }
+
+    Ok(format_locations(cwd, rel_path, symbol, &locations))
 }
 
 /// Apaga los language servers (handshake `shutdown`/`exit` + kill). Se llama al
@@ -211,6 +250,32 @@ impl LspServer {
                     return Err(anyhow!("el language server cerró la conexión"));
                 }
             }
+        }
+    }
+
+    /// Abre (`didOpen`) o sincroniza (`didChange`) un documento, subiendo la
+    /// versión. La primera vez dispara `didOpen`; las siguientes `didChange` con
+    /// el texto actual. Compartido por diagnósticos y referencias.
+    fn sync_doc(&mut self, uri: &str, lang_id: &str, text: &str) -> Result<()> {
+        self.version += 1;
+        let version = self.version;
+        if self.opened.contains(uri) {
+            self.notify(
+                "textDocument/didChange",
+                serde_json::json!({
+                    "textDocument": { "uri": uri, "version": version },
+                    "contentChanges": [ { "text": text } ],
+                }),
+            )
+        } else {
+            self.notify(
+                "textDocument/didOpen",
+                serde_json::json!({
+                    "textDocument": { "uri": uri, "languageId": lang_id, "version": version, "text": text },
+                }),
+            )?;
+            self.opened.insert(uri.to_string());
+            Ok(())
         }
     }
 
@@ -434,6 +499,66 @@ fn path_to_uri(abs: &Path) -> String {
     }
 }
 
+/// Localiza un símbolo dentro de una línea (1-based) de `text` y devuelve su
+/// posición LSP `(line0, character0)` 0-based, donde el carácter se cuenta en
+/// unidades UTF-16 (lo que exige el protocolo). `None` si la línea no existe o
+/// el símbolo no aparece en ella.
+fn locate_symbol(text: &str, line_1based: usize, symbol: &str) -> Option<(u32, u32)> {
+    if line_1based == 0 || symbol.is_empty() {
+        return None;
+    }
+    let line = text.lines().nth(line_1based - 1)?;
+    let byte_idx = line.find(symbol)?;
+    let char0 = line[..byte_idx].encode_utf16().count() as u32;
+    Some(((line_1based - 1) as u32, char0))
+}
+
+/// `file://` URI → ruta relativa al proyecto (`cwd`), con separadores `/`. Si la
+/// URI cae fuera del proyecto, devuelve la ruta absoluta limpia (mejor mostrar
+/// algo útil que nada). `None` si no es una `file://` URI.
+fn uri_to_rel(cwd: &Path, uri: &str) -> Option<String> {
+    let body = uri.strip_prefix("file://")?;
+    // file:///C:/x → /C:/x en Windows: quita la barra inicial sobrante.
+    let cleaned = if cfg!(windows) {
+        body.strip_prefix('/').unwrap_or(body)
+    } else {
+        body
+    };
+    let decoded = cleaned.replace("%20", " ");
+    let abs = std::path::PathBuf::from(decoded.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let rel = abs.strip_prefix(cwd).unwrap_or(&abs);
+    Some(rel.to_string_lossy().replace('\\', "/"))
+}
+
+/// Formatea las ubicaciones de referencias para el modelo (rutas relativas,
+/// líneas/cols 1-based, ordenadas y sin duplicados).
+fn format_locations(cwd: &Path, rel_path: &str, symbol: &str, locations: &[Value]) -> String {
+    if locations.is_empty() {
+        return format!(
+            "[find_references: el language server no reportó referencias a `{symbol}` \
+             (puede seguir indexando, o el símbolo solo se usa en su declaración). \
+             Si esperabas más, reintenta en unos segundos o usa search_project.]"
+        );
+    }
+    let mut lines: Vec<String> = locations
+        .iter()
+        .map(|loc| {
+            let uri = loc["uri"].as_str().unwrap_or("");
+            let l = loc["range"]["start"]["line"].as_u64().unwrap_or(0) + 1;
+            let c = loc["range"]["start"]["character"].as_u64().unwrap_or(0) + 1;
+            let path = uri_to_rel(cwd, uri).unwrap_or_else(|| uri.to_string());
+            format!("{path}:{l}:{c}")
+        })
+        .collect();
+    lines.sort();
+    lines.dedup();
+    format!(
+        "{} referencia(s) a `{symbol}` (declarado/usado desde `{rel_path}`):\n{}",
+        lines.len(),
+        lines.join("\n")
+    )
+}
+
 /// Formatea los diagnósticos para devolvérselos al modelo (líneas/cols 1-based).
 fn format_diagnostics(rel_path: &str, diags: &[Value]) -> String {
     if diags.is_empty() {
@@ -503,6 +628,42 @@ mod tests {
         // Estilo Unix absoluto (file:// + autoridad vacía + /ruta = tres slashes).
         let uri = path_to_uri(&PathBuf::from("/home/x/main.rs"));
         assert_eq!(uri, "file:///home/x/main.rs");
+    }
+
+    #[test]
+    fn locate_symbol_resuelve_posicion_utf16() {
+        let text = "fn main() {}\n    let run_turn = 1;\nfin\n";
+        // Línea 2 (1-based), símbolo run_turn empieza tras 4 espacios + "let ".
+        assert_eq!(locate_symbol(text, 2, "run_turn"), Some((1, 8)));
+        // Línea inexistente o símbolo ausente → None.
+        assert_eq!(locate_symbol(text, 99, "run_turn"), None);
+        assert_eq!(locate_symbol(text, 1, "ausente"), None);
+        assert_eq!(locate_symbol(text, 0, "main"), None);
+        // Caracteres no-ASCII antes del símbolo cuentan en unidades UTF-16.
+        let acc = "let café_x = 0;\n"; // 'é' = 1 unidad UTF-16
+        assert_eq!(locate_symbol(acc, 1, "café_x"), Some((0, 4)));
+    }
+
+    #[test]
+    fn format_locations_vacio_y_con_refs() {
+        let cwd = PathBuf::from(if cfg!(windows) { r"C:\proj" } else { "/proj" });
+        assert!(format_locations(&cwd, "src/a.rs", "foo", &[]).contains("no reportó referencias"));
+
+        let uri = path_to_uri(&cwd.join("src").join("b.rs"));
+        let locs = vec![serde_json::json!({
+            "uri": uri,
+            "range": { "start": { "line": 41, "character": 7 } }
+        })];
+        let out = format_locations(&cwd, "src/a.rs", "foo", &locs);
+        assert!(out.contains("1 referencia"));
+        assert!(out.contains("src/b.rs:42:8"), "0-based→1-based y ruta relativa, vi: {out}");
+    }
+
+    #[test]
+    fn uri_to_rel_relativiza_dentro_del_proyecto() {
+        let cwd = PathBuf::from(if cfg!(windows) { r"C:\proj" } else { "/proj" });
+        let uri = path_to_uri(&cwd.join("src").join("main.rs"));
+        assert_eq!(uri_to_rel(&cwd, &uri).as_deref(), Some("src/main.rs"));
     }
 
     #[test]
@@ -580,5 +741,39 @@ mod tests {
             out.contains("error "),
             "esperaba al menos un error de rust-analyzer, salió: {out}"
         );
+    }
+
+    #[test]
+    #[ignore = "requiere rust-analyzer instalado en el PATH"]
+    fn references_encuentra_usos_reales() {
+        // Proyecto cargo con un símbolo declarado y usado dos veces.
+        let dir = std::env::temp_dir().join(format!("dpx-lspref-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("src"));
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src").join("main.rs"),
+            "fn saludar() {}\nfn main() {\n    saludar();\n    saludar();\n}\n",
+        )
+        .unwrap();
+
+        // Símbolo `saludar` declarado en la línea 1.
+        let out = match references(&dir, "src/main.rs", 1, "saludar") {
+            Ok(o) => o,
+            Err(e) => {
+                shutdown();
+                panic!("references falló: {e:#}");
+            }
+        };
+        shutdown();
+        assert!(
+            out.contains("referencia(s) a `saludar`"),
+            "esperaba referencias reales, salió: {out}"
+        );
+        // La declaración + 2 usos = al menos las líneas 3 y 4 deben aparecer.
+        assert!(out.contains("main.rs:3:") && out.contains("main.rs:4:"), "salió: {out}");
     }
 }

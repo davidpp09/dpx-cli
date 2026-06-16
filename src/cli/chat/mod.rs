@@ -1442,6 +1442,22 @@ async fn run_tool_call(
             };
             ToolOutcome::Done(out)
         }
+        Ok(DpxCall::FindReferences { path, line, symbol }) => {
+            println!("{}", ui::accent(&format!("  find_references: {symbol} ({path}:{line})")));
+            // El cliente LSP bloquea (indexa + espera respuesta): fuera del runtime.
+            let cwd2 = cwd.to_path_buf();
+            let (p, s) = (path.clone(), symbol.clone());
+            let out = match tokio::task::spawn_blocking(move || {
+                crate::lsp::references(&cwd2, &p, line, &s)
+            })
+            .await
+            {
+                Ok(Ok(text)) => text,
+                Ok(Err(e)) => format!("[find_references: {e}]"),
+                Err(e) => format!("[find_references se interrumpió: {e}]"),
+            };
+            ToolOutcome::Done(out)
+        }
         Ok(DpxCall::Write { path, content }) => {
             let w = crate::fs::FileWrite { path, content };
             let report = process_writes(cwd, std::slice::from_ref(&w), ask, auto);

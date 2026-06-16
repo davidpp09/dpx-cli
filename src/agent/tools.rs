@@ -25,6 +25,8 @@ pub enum DpxCall {
     Spawn { task: String, role: Option<String> },
     /// Diagnósticos REALES de un archivo vía language server (errores/warnings).
     LspDiagnostics { path: String },
+    /// Referencias REALES (ground truth del compilador) a un símbolo, vía LSP.
+    FindReferences { path: String, line: usize, symbol: String },
     GitStatus,
     GitDiff { path: Option<String> },
     GitLog { n: Option<usize> },
@@ -34,7 +36,7 @@ pub enum DpxCall {
 }
 
 /// Las definiciones que se anuncian al modelo en cada petición.
-/// Fusiona las 13 tools nativas con las tools MCP cacheadas (si las hay).
+/// Fusiona las 14 tools nativas con las tools MCP cacheadas (si las hay).
 pub fn definitions() -> Vec<ToolDefinition> {
     let mut defs = native_definitions();
     for tool in crate::mcp::McpManager::cached_tools() {
@@ -47,7 +49,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
     defs
 }
 
-/// Solo las 13 definiciones nativas, sin MCP.
+/// Solo las 14 definiciones nativas, sin MCP.
 fn native_definitions() -> Vec<ToolDefinition> {
     fn def(name: &str, description: &str, props: Value, required: &[&str]) -> ToolDefinition {
         ToolDefinition {
@@ -166,6 +168,22 @@ fn native_definitions() -> Vec<ToolDefinition> {
             &["path"],
         ),
         def(
+            "find_references",
+            "Encuentra TODAS las referencias a un símbolo (función, variable, tipo, método) en el \
+             proyecto usando el language server — ground truth del COMPILADOR, no texto. Mucho \
+             más fiable que search_project para esto: no trae falsos positivos (otra cosa con el \
+             mismo nombre) ni se pierde usos. ÚSALA antes de renombrar o borrar algo, para ver \
+             qué se rompería. Indica el archivo donde está el símbolo, la línea (1-based, la que \
+             ves al leer) y el NOMBRE del símbolo. Soporta .rs, .ts/.tsx, .js/.jsx, .py y .go; si \
+             el language server no está instalado te lo dice (no falla la tarea).",
+            json!({
+                "path": path("Archivo donde aparece el símbolo, p.ej. src/cli/chat/mod.rs"),
+                "line": { "type": "integer", "description": "Línea (1-based) donde está el símbolo en ese archivo" },
+                "symbol": { "type": "string", "description": "Nombre exacto del símbolo, p.ej. run_turn" },
+            }),
+            &["path", "line", "symbol"],
+        ),
+        def(
             "git_status",
             "Muestra el estado de git: archivos modificados, staged y untracked. Solo lectura, \
              sin confirmación.",
@@ -227,6 +245,15 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
             role: args.get("role").and_then(Value::as_str).map(str::to_string),
         }),
         "lsp_diagnostics" => Ok(DpxCall::LspDiagnostics { path: arg("path")? }),
+        "find_references" => Ok(DpxCall::FindReferences {
+            path: arg("path")?,
+            line: args
+                .get("line")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+                .ok_or_else(|| format!("falta el argumento `line` (entero) en la llamada a `{name}`"))?,
+            symbol: arg("symbol")?,
+        }),
         "git_status" => Ok(DpxCall::GitStatus),
         "git_diff" => {
             let path = args.get("path").and_then(Value::as_str).map(str::to_string);
@@ -244,7 +271,7 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
         other => Err(format!(
             "herramienta desconocida: `{other}`. Las disponibles son: read_file, search_project, \
              write_file, edit_file, delete_file, run_command, web_search, spawn_agent, \
-             lsp_diagnostics, git_status, git_diff, git_log, git_commit."
+             lsp_diagnostics, find_references, git_status, git_diff, git_log, git_commit."
         )),
     }
 }
@@ -301,6 +328,23 @@ mod tests {
             spawn_role,
             Ok(DpxCall::Spawn { task: "revisa fs/mod.rs".into(), role: Some("reviewer".into()) })
         );
+
+        // find_references: requiere path + line (entero) + symbol.
+        let refs = parse_call(
+            "find_references",
+            &json!({ "path": "src/lib.rs", "line": 42, "symbol": "run_turn" }),
+        );
+        assert_eq!(
+            refs,
+            Ok(DpxCall::FindReferences {
+                path: "src/lib.rs".into(),
+                line: 42,
+                symbol: "run_turn".into()
+            })
+        );
+        // line faltante → error explicable, no panic.
+        let sin_line = parse_call("find_references", &json!({ "path": "a.rs", "symbol": "x" })).unwrap_err();
+        assert!(sin_line.contains("line"));
 
         let desconocida = parse_call("rm_rf", &json!({})).unwrap_err();
         assert!(desconocida.contains("desconocida"));
