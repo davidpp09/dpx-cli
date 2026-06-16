@@ -231,12 +231,25 @@ pub async fn run(
                     continue;
                 }
 
-                // /skills: las skills (playbooks) que dpx ha aprendido y refinado
-                // en este proyecto, con sus usos y confianza.
+                // /skills: los playbooks del proyecto (curados + built-in del stack),
+                // y un DOCTOR que audita el catálogo con el propio motor de
+                // embeddings: gatillos vacíos, cuerpos triviales y colisiones de
+                // gatillo (dos skills tan parecidos que dpx dispararía el equivocado).
                 if single_line
                     && matches!(input, "/habilidades" | "/skills" | "/skill")
                 {
                     ui::skills_list(&skillbook.ranked());
+                    let mut warnings = skillbook.lint();
+                    if let Ok(engine) = ensure_embedder(&mut embedder) {
+                        skillbook.embed_pending(|t| engine.embed_one(t).ok());
+                        for (a, b, score) in skillbook.overlaps(0.90) {
+                            warnings.push(format!(
+                                "«{a}» ↔ «{b}» colisionan ({:.0}% de parecido)",
+                                score * 100.0
+                            ));
+                        }
+                    }
+                    ui::skills_doctor(&warnings);
                     continue;
                 }
 
@@ -341,7 +354,6 @@ pub async fn run(
                 if mode != Mode::Learn
                     && let Some(sk) = recall_skills(input, &mut skillbook, &mut embedder)
                 {
-                    println!("{}", ui::dim("⎿ aplicando playbook del proyecto…"));
                     turn_input = format!("{sk}\n\n{turn_input}");
                 }
                 // Auto-delegación: si la petición es de investigación, un subagente
@@ -1525,6 +1537,9 @@ fn recall_skills(
     if hits.is_empty() {
         return None;
     }
+    // Transparencia: di QUÉ playbook(s) se aplican, por nombre (no genérico).
+    let nombres: Vec<&str> = hits.iter().map(|sk| sk.name.as_str()).collect();
+    println!("{}", ui::dim(&format!("⎿ playbook: {}", nombres.join(" · "))));
     let mut s = String::from(
         "[PLAYBOOK del proyecto que aplica a esta petición. SÍGUELO paso a paso: \
          te da los archivos y el orden exactos para ir de A→B, no explores a ciegas:\n",

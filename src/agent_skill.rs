@@ -106,6 +106,50 @@ impl SkillBook {
         }
     }
 
+    /// Revisión BARATA (sin embeddings) de la salud de los skills: gatillo
+    /// (`cuando`) vacío o cuerpo trivial. Devuelve advertencias legibles.
+    pub fn lint(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for s in &self.skills {
+            if s.when.trim().is_empty() {
+                out.push(format!(
+                    "«{}» no tiene gatillo (cuando): dpx no sabrá cuándo aplicarlo",
+                    s.name
+                ));
+            }
+            if s.body.trim().chars().count() < 40 {
+                out.push(format!(
+                    "«{}» tiene el cuerpo muy corto: un playbook necesita pasos concretos",
+                    s.name
+                ));
+            }
+        }
+        out
+    }
+
+    /// DOCTOR de colisiones: pares de skills cuyos vectores son tan parecidos que
+    /// el recall podría disparar el EQUIVOCADO. Requiere estar embebido
+    /// (`embed_pending`). Devuelve `(nombre_a, nombre_b, similitud)` ordenado desc.
+    pub fn overlaps(&self, threshold: f32) -> Vec<(String, String, f32)> {
+        let mut out = Vec::new();
+        for (i, a) in self.skills.iter().enumerate() {
+            if a.vector.is_empty() {
+                continue;
+            }
+            for b in &self.skills[i + 1..] {
+                if b.vector.is_empty() {
+                    continue;
+                }
+                let score = cosine(&a.vector, &b.vector);
+                if score >= threshold {
+                    out.push((a.name.clone(), b.name.clone(), score));
+                }
+            }
+        }
+        out.sort_by(|x, y| y.2.total_cmp(&x.2));
+        out
+    }
+
     /// Los `k` skills más parecidos a `query_vec` por encima de `min_score`,
     /// de mayor a menor similitud.
     pub fn search(&self, query_vec: &[f32], k: usize, min_score: f32) -> Vec<&AgentSkill> {
@@ -242,6 +286,25 @@ mod tests {
         assert_eq!(book.len(), 2, "no duplica por nombre");
         let endpoint = book.ranked().into_iter().find(|s| s.name == "crear endpoint").unwrap();
         assert_eq!(endpoint.body, "curado", "el primero (curado) gana");
+    }
+
+    #[test]
+    fn doctor_caza_incompletos_y_colisiones() {
+        let book = SkillBook {
+            skills: vec![
+                AgentSkill { name: "bueno".into(), body: "1. paso concreto con suficiente detalle\n2. otro".into(), focus: String::new(), when: "cuando pasa algo".into(), vector: vec![1.0, 0.0] },
+                AgentSkill { name: "sin gatillo".into(), body: "1. paso concreto con suficiente detalle".into(), focus: String::new(), when: "".into(), vector: vec![1.0, 0.01] },
+                AgentSkill { name: "corto".into(), body: "x".into(), focus: String::new(), when: "cuando otro".into(), vector: vec![0.0, 1.0] },
+            ],
+        };
+        let lint = book.lint();
+        assert!(lint.iter().any(|w| w.contains("sin gatillo")), "caza el gatillo vacío");
+        assert!(lint.iter().any(|w| w.contains("corto")), "caza el cuerpo trivial");
+        // "bueno" y "sin gatillo" tienen vectores casi idénticos → colisión; "corto" es ortogonal.
+        let ov = book.overlaps(0.95);
+        assert_eq!(ov.len(), 1, "solo el par casi idéntico colisiona");
+        let (a, b, _) = &ov[0];
+        assert!([a.as_str(), b.as_str()].contains(&"bueno") && [a.as_str(), b.as_str()].contains(&"sin gatillo"));
     }
 
     #[test]

@@ -1163,6 +1163,21 @@ pub fn skills_list(skills: &[&crate::agent_skill::AgentSkill]) {
     println!("\n  {}", dim("dpx las recupera por significado y las aplica cuando encajan con tu tarea"));
 }
 
+/// "Doctor" de skills (parte de `/skills`): muestra problemas de salud del
+/// catálogo — gatillos vacíos, cuerpos triviales y, lo más útil con muchos
+/// skills, pares cuyos gatillos colisionan (dpx dispararía el equivocado).
+pub fn skills_doctor(warnings: &[String]) {
+    if warnings.is_empty() {
+        println!("  {}", dim("⏺ doctor: catálogo sano · sin gatillos en colisión"));
+        return;
+    }
+    println!("\n  {}", accent("⏺ doctor de skills"));
+    for w in warnings {
+        println!("  {} {}", red("⚠"), dim(w));
+    }
+    println!("  {}", dim("afina el «cuando» de los que colisionan para que dpx dispare el correcto"));
+}
+
 /// Lista de cerebros con su superpoder (comando `/models`).
 pub fn models_list(brains: &[BrainRow]) {
     println!("\n{}", accent("⏺ cerebros · /cerebro <id> para cambiar"));

@@ -201,6 +201,7 @@ pub fn builtin_playbooks(focus_id: Option<&str>) -> &'static [(&'static str, &'s
         Some("react") => react::PLAYBOOKS,
         Some("node") => node::PLAYBOOKS,
         Some("python") => python::PLAYBOOKS,
+        Some("rust") => rust::PLAYBOOKS,
         _ => &[],
     }
 }
