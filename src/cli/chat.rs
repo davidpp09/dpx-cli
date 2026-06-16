@@ -163,6 +163,14 @@ pub async fn run(
             })
             .collect(),
     );
+    // Playbooks GENERALES (arquitectura, CSS/UI, lógica de negocio): cross-stack,
+    // se cargan siempre y se inyectan cuando la petición encaja con alguno.
+    skillbook.extend(
+        crate::focus::general_playbooks()
+            .iter()
+            .map(|(n, w, b)| crate::agent_skill::AgentSkill::builtin(n, w, b, "general"))
+            .collect(),
+    );
 
     loop {
         // De vuelta en el prompt: la pestaña muestra dpx en reposo.

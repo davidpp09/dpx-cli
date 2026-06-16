@@ -14,6 +14,7 @@
 pub mod committee;
 pub mod curriculum;
 mod dpx;
+mod general;
 mod node;
 mod python;
 mod react;
@@ -206,6 +207,12 @@ pub fn builtin_playbooks(focus_id: Option<&str>) -> &'static [(&'static str, &'s
     }
 }
 
+/// Playbooks GENERALES (cross-stack): arquitectura, CSS/UI, lógica de negocio.
+/// Se cargan SIEMPRE, sin importar el focus — aplican a cualquier proyecto.
+pub fn general_playbooks() -> &'static [(&'static str, &'static str, &'static str)] {
+    general::PLAYBOOKS
+}
+
 /// Devuelve el nombre legible de un focus pack (para banners).
 /// `None` = mentor general, sin enfoque de stack.
 pub fn display_name(focus_id: Option<&str>) -> &str {
@@ -336,6 +343,11 @@ confirmación reforzada y los que tocan el sistema están bloqueados: no los pro
 - El CLI muestra un diff y pide confirmación al usuario por cada cambio. NUNCA asumas que un \
 cambio se aplicó hasta ver su resultado en el siguiente turno; si fue rechazado o falló, \
 reacciona (pregunta el porqué o corrige) en vez de seguir como si nada.
+- `web_search`: ÚSALO PROACTIVAMENTE cuando tu memoria pueda estar vieja o incompleta — \
+versiones de librerías/lenguajes/frameworks, APIs recientes, \"la última versión de X\", buenas \
+prácticas actuales, o cualquier dato que cambie con el tiempo. Es GRATIS (DuckDuckGo). PROHIBIDO \
+inventar un número de versión o el nombre de una API/paquete: si no estás 100% seguro, BÚSCALO \
+antes de responder o escribir el código. Vale más una búsqueda que una alucinación.
 
 # Plan de trabajo (checklist viva)
 Cuando una tarea tenga varios pasos o fases, lleva un plan en un bloque `dpx:plan`: una tarea por \
