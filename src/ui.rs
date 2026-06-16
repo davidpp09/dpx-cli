@@ -307,6 +307,24 @@ pub fn mode_banner(mode: crate::focus::Mode) {
     println!("  {}", dim(l2));
 }
 
+/// Dibuja una caja redondeada con bordes ╭─╮ ╰─╯ usando el color indicado.
+/// Cada línea de `lines` ya viene con sus colores; la función pone los bordes
+/// y el padding a la derecha para que todas alineen. `max_width` opcional
+/// acota el ancho interior (útil para paneles con texto largo).
+fn draw_box(lines: &[String], color: fn(&str) -> String, max_width: Option<usize>) {
+    let raw = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
+    let w = if let Some(max) = max_width { raw.min(max) } else { raw };
+    let inner = w + 2;
+
+    println!();
+    println!("{}", color(&format!("╭{}╮", "─".repeat(inner))));
+    for l in lines {
+        let pad = w.saturating_sub(visible_width(l));
+        println!("{} {l}{} {}", color("│"), " ".repeat(pad), color("│"));
+    }
+    println!("{}", color(&format!("╰{}╯", "─".repeat(inner))));
+}
+
 /// Panel de aprendizaje (comando `/progreso`): cada concepto con dots de nivel,
 /// un badge de dominio en texto y mensaje motivador si aún no hay skills.
 /// Reusa la caja redondeada con degradado del modo activo.
@@ -315,24 +333,19 @@ pub fn learn_panel(skills: &[crate::skill::Skill], today: &str) {
 
     // --- sin skills aún: mensaje motivador ---
     if skills.is_empty() {
-        let lines = vec![
-            grad("tu aprendizaje"),
-            String::new(),
-            dim("aún no hay nada registrado."),
-            dim("entra en modo learn (/modo learn) y empieza a descubrir."),
-            String::new(),
-            dim("cada concepto que trabajemos irá apareciendo aquí"),
-            dim("con su nivel: ●●● dominado · ●●○ practicando · ●○○ visto"),
-        ];
-        let content_width = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
-        let inner = content_width + 2;
-        println!();
-        println!("{}", grad(&format!("╭{}╮", "─".repeat(inner))));
-        for l in &lines {
-            let pad = content_width.saturating_sub(visible_width(l));
-            println!("{} {l}{} {}", grad("│"), " ".repeat(pad), grad("│"));
-        }
-        println!("{}", grad(&format!("╰{}╯", "─".repeat(inner))));
+        draw_box(
+            &[
+                grad("tu aprendizaje"),
+                String::new(),
+                dim("aún no hay nada registrado."),
+                dim("entra en modo learn (/modo learn) y empieza a descubrir."),
+                String::new(),
+                dim("cada concepto que trabajemos irá apareciendo aquí"),
+                dim("con su nivel: ●●● dominado · ●●○ practicando · ●○○ visto"),
+            ],
+            grad,
+            None,
+        );
         return;
     }
 
@@ -401,16 +414,7 @@ pub fn learn_panel(skills: &[crate::skill::Skill], today: &str) {
     }
 
     // --- pintar la caja ---
-    let content_width = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
-    let inner = content_width + 2;
-
-    println!();
-    println!("{}", grad(&format!("╭{}╮", "─".repeat(inner))));
-    for l in &lines {
-        let pad = content_width.saturating_sub(visible_width(l));
-        println!("{} {l}{} {}", grad("│"), " ".repeat(pad), grad("│"));
-    }
-    println!("{}", grad(&format!("╰{}╯", "─".repeat(inner))));
+    draw_box(&lines, grad, None);
 }
 
 /// Línea de estado del área de entrada (focus · modo · cerebro · auto).
@@ -487,16 +491,7 @@ pub fn welcome(focus: &str, mode: &str, brain: &str, cwd: &str) {
         format!("{}   {cwd}", dim("carpeta")),
     ];
 
-    let content_width = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
-    let inner = content_width + 2; // un espacio de padding a cada lado
-
-    println!();
-    println!("{}", grad(&format!("╭{}╮", "─".repeat(inner))));
-    for l in &lines {
-        let pad = content_width - visible_width(l);
-        println!("{} {l}{} {}", grad("│"), " ".repeat(pad), grad("│"));
-    }
-    println!("{}", grad(&format!("╰{}╯", "─".repeat(inner))));
+    draw_box(&lines, grad, None);
 }
 
 /// Dashboard de proyecto (comando `/panel`): 3 tarjetas de modo con el color
@@ -558,16 +553,7 @@ pub fn project_panel(
         )),
     ];
 
-    let content_width = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
-    let inner = content_width + 2;
-
-    println!();
-    println!("{}", grad(&format!("╭{}╮", "─".repeat(inner))));
-    for l in &lines {
-        let pad = content_width.saturating_sub(visible_width(l));
-        println!("{} {l}{} {}", grad("│"), " ".repeat(pad), grad("│"));
-    }
-    println!("{}", grad(&format!("╰{}╯", "─".repeat(inner))));
+    draw_box(&lines, grad, None);
 }
 
 /// Vista del modo hack: resumen del proyecto, enfoque activo, ideas del
@@ -635,16 +621,7 @@ pub fn hack_panel(
     }
 
     // Caja redondeada con degradado
-    let content_width = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
-    let inner = content_width + 2;
-
-    println!();
-    println!("{}", grad(&format!("╭{}╮", "─".repeat(inner))));
-    for l in &lines {
-        let pad = content_width.saturating_sub(visible_width(l));
-        println!("{} {l}{} {}", grad("│"), " ".repeat(pad), grad("│"));
-    }
-    println!("{}", grad(&format!("╰{}╯", "─".repeat(inner))));
+    draw_box(&lines, grad, None);
 }
 
 /// Extrae el resumen del comité: primera línea sustancial tras "idea refinada"

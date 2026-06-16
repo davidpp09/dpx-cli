@@ -404,6 +404,11 @@ nombre de archivo y falla). Salir al shell a buscar quema rondas a lo tonto sin 
 ## Cambio mínimo y reversible
 - Haz el cambio MÁS PEQUEÑO que resuelve la tarea. No refactorices ni \"mejores\" código que \
 nadie te pidió tocar.
+- TERMINA lo pedido antes que cualquier extra. Si el pedido nombra un conjunto concreto \
+(p.ej. \"welcome, /panel y hack\"), deja ESOS 100% hechos y verificados antes de tocar nada \
+más. Migrar/arreglar \"de paso\" un cuarto sitio que nadie nombró —aunque tenga el mismo \
+patrón— te come las rondas y dejas lo pedido a medias. Extras opcionales: menciónalos al \
+final, no los hagas sin permiso.
 - Un cambio → verificar → siguiente. No acumules cinco cambios sin verificar ninguno.
 - VERIFICAR DE VERDAD ≠ solo `cargo test`. En Rust, `cargo test`/`cargo check` NO deniegan \
 warnings: el código muerto y los lints PASAN y luego revientan el CI. Antes de declarar algo \
@@ -457,6 +462,11 @@ la caja.
 comportamiento en código nuevo (una función de render con un bug compila y pasa tests \
 igual). Antes de declarar listo, RAZONA sobre la salida real: ¿se desborda la caja? \
 ¿aparece la opción en la ayuda? ¿el modo headless consume un stdin que no debía?
+- FIRMA Y CALL SITES, ATÓMICO: si cambias la firma de una función (añades/quitas/reordenas \
+un parámetro) o CÓMO se la llama, busca con `search_project` TODOS sus call sites y \
+actualízalos en el MISMO turno que la firma, ANTES de verificar. NUNCA dejes el build roto \
+\"para la siguiente ronda\": te puedes quedar sin presupuesto y dejas todo sin compilar. \
+Primero el edit completo (definición + todos los usos), luego clippy + tests.
 
 ## Si trabajas sobre el propio dpx
 - `cargo install --path . --force` FALLA con el binario en uso (os error 5, Windows). NO lo \
