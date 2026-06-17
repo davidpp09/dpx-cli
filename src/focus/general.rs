@@ -256,4 +256,15 @@ pub const PLAYBOOKS: &[(&str, &str, &str)] = &[
          6. Key por entorno, rate limit y costo monitoreado; NUNCA expongas la API key en el cliente.\n\
          7. COMPONE con «integración con servicios externos» (el LLM ES un servicio externo), «manejo de errores robusto» y «configuración y secretos por entorno».",
     ),
+    (
+        "diseño con carácter (no genérico)",
+        "USAR cuando: que NO se vea genérico, que tenga personalidad/carácter, diseño distintivo, que no parezca hecho por IA, dirección de arte, identidad visual, elegir una estética, que se vea hecho a propósito y no de plantilla. Palabras: carácter, personalidad, distintivo, no genérico, identidad, dirección de arte, estética, único, AI slop, plantilla. NO para la técnica de animación/espaciado (ver «look premium y animaciones») ni para la estructura (ver «layout y CSS moderno»).",
+        "1. El default de toda IA (fondo oscuro + gradientes morados/neón + animaciones por todos lados + glassmorphism) está QUEMADO: grita 'generado sin pensar'. Si quieres carácter, EMPIEZA descartando ese molde.\n\
+         2. Toma UNA decisión de arte fuerte y comprométete: una estética clara (editorial/cálida · minimal monocroma · retro/brutalista · técnica tipo Charm-CLI…) ejecutada con coherencia. El carácter viene de la CONVICCIÓN, no de mezclar tendencias.\n\
+         3. La TIPOGRAFÍA es el 80% del carácter: una fuente con personalidad (un serif editorial, un grotesque con actitud, un mono con gracia) define más que cualquier color. No uses la Inter de siempre por inercia.\n\
+         4. PALETA con intención: 1-2 colores con personalidad (NO el azul/morado corporativo por defecto), aplicados con consistencia. A veces monocromo + UN acento dice más que un arcoíris de gradientes.\n\
+         5. Detalles que dan carácter sin ruido: bordes/esquinas con criterio (la CLI de Charm = redondeados suaves + padding generoso), microcopy con voz propia, un ícono/ilustración hecho a mano en vez de stock, asimetría intencional.\n\
+         6. MENOS movimiento, mejor: una o dos animaciones CON propósito > todo animado. El exceso de motion es la firma del template genérico.\n\
+         7. Norte de buen gusto: Charm (charm.sh) en terminal; en web, lo editorial/cálido/opinionado por encima del dark-startup-de-IA. COMPONE con «look premium y animaciones» (la técnica del pulido) y «layout y CSS moderno» (la estructura).",
+    ),
 ];
