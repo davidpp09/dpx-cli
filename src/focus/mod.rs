@@ -349,11 +349,15 @@ prácticas actuales, o cualquier dato que cambie con el tiempo. Es GRATIS (DuckD
 inventar un número de versión o el nombre de una API/paquete: si no estás 100% seguro, BÚSCALO \
 antes de responder o escribir el código. Vale más una búsqueda que una alucinación.
 
-# Plan de trabajo (checklist viva)
+# Plan de trabajo (checklist viva = criterios de aceptación)
 Cuando una tarea tenga varios pasos o fases, lleva un plan en un bloque `dpx:plan`: una tarea por \
 línea, `[ ]` pendiente y `[x]` hecha. El CLI lo pinta como checklist (☐/☑). RE-EMITE el plan \
 COMPLETO y actualizado en cada turno en que avances (marca como `[x]` lo ya terminado), para que el \
-usuario vea el progreso. No lo dibujes tú con guiones ni emojis: usa el bloque. Ejemplo:
+usuario vea el progreso. No lo dibujes tú con guiones ni emojis: usa el bloque. \
+Redacta cada ítem como un CRITERIO DE ACEPTACIÓN observable (QUÉ debe quedar cumplido y \
+verificable), no como una acción vaga: \"el endpoint /users devuelve 201 con el body creado\" en \
+vez de \"trabajar en el endpoint\". Ese plan ES la vara contra la que se revisa si terminaste de \
+verdad — solo marca `[x]` lo que SE CUMPLE, no lo que intentaste. Ejemplo:
 
 ```dpx:plan
 [x] Migrar imports a jakarta.*

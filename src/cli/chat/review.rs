@@ -23,6 +23,7 @@ const MAX_DIFF_LINES: usize = 400;
 pub(crate) async fn run_self_review(
     cwd: &Path,
     user_request: &str,
+    criteria: Option<&str>,
     changed_paths: &HashSet<String>,
 ) -> Option<String> {
     if changed_paths.is_empty() {
@@ -35,7 +36,7 @@ pub(crate) async fn run_self_review(
         "{}",
         ui::dim("⎿ autorrevisión: un revisor compara tus cambios con lo que se pidió…")
     );
-    let task = review_task(user_request, &files, &diff);
+    let task = review_task(user_request, criteria, &files, &diff);
     let conclusion = run_subagent(cwd, &task, Some("reviewer")).await;
     parse_verdict(&conclusion)
 }
@@ -57,20 +58,29 @@ fn build_diff(cwd: &Path, files: &[String]) -> String {
     truncate_lines(&out, MAX_DIFF_LINES)
 }
 
-/// Prompt para el subagente revisor: comparar cambios vs intención del usuario y
-/// emitir un veredicto estructurado (`VEREDICTO: OK` o `VEREDICTO: CORREGIR`).
-fn review_task(user_request: &str, files: &[String], diff: &str) -> String {
+/// Prompt para el subagente revisor: comparar cambios vs intención del usuario
+/// (y los criterios de aceptación que el agente declaró, si los hay) y emitir un
+/// veredicto estructurado (`VEREDICTO: OK` o `VEREDICTO: CORREGIR`).
+fn review_task(user_request: &str, criteria: Option<&str>, files: &[String], diff: &str) -> String {
     let diff_block = if diff.trim().is_empty() {
         "(sin diff disponible; LEE los archivos cambiados con read_file para evaluarlos)".to_string()
     } else {
         format!("```diff\n{diff}\n```")
     };
+    // El plan/criterios que el propio agente declaró = la vara de medir (spec).
+    let criteria_block = match criteria {
+        Some(c) if !c.trim().is_empty() => format!(
+            "\nEl agente se comprometió con ESTOS criterios de aceptación (su plan). Verifica que \
+             CADA uno se cumple de verdad en los cambios, no solo que se marcó como hecho:\n{c}\n"
+        ),
+        _ => String::new(),
+    };
     format!(
-        "El usuario pidió EXACTAMENTE esto:\n\"{user_request}\"\n\n\
+        "El usuario pidió EXACTAMENTE esto:\n\"{user_request}\"\n{criteria_block}\n\
          El agente cambió estos archivos: {lista}\n\n\
          Cambios realizados:\n{diff_block}\n\n\
-         Tu trabajo: evalúa si los cambios CUMPLEN lo que el usuario pidió y si están BIEN hechos. \
-         Clasifica cada problema que encuentres:\n\
+         Tu trabajo: evalúa si los cambios CUMPLEN lo que el usuario pidió (y los criterios de \
+         arriba si los hay) y si están BIEN hechos. Clasifica cada problema que encuentres:\n\
          - P0 = no hace lo que el usuario pidió, o lo rompe.\n\
          - P1 = lo hace, pero con un bug real, un caso borde sin cubrir o una omisión importante.\n\
          - P2/P3 = menor o de estilo (NO bloquean).\n\n\

@@ -812,6 +812,8 @@ async fn run_turn(
     // diff contra lo pedido) y cuántas rondas de corrección por revisión llevamos.
     let mut changed_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut review_forced = 0usize;
+    // Último `dpx:plan` del turno = criterios de aceptación para la autorrevisión.
+    let mut latest_plan: Option<String> = None;
     // Checkpoint del turno: captura el estado de cada archivo antes de tocarlo
     // (vía fs::apply/delete_file) y lo apila al terminar para que `/undo` pueda
     // revertir TODO lo que dpx escribió este turno. Se commitea al soltar el
@@ -899,8 +901,11 @@ async fn run_turn(
         }
 
         // Plan/checklist: si el modelo emitió un `dpx:plan`, lo pintamos vivo (☐/☑).
+        // Guardamos el ÚLTIMO plan como criterios de aceptación para la
+        // autorrevisión (la vara contra la que el revisor mide los cambios).
         if let Some(plan) = crate::fs::parse_plan(&reply) {
             ui::checklist(&plan);
+            latest_plan = Some(crate::fs::plan_to_markdown(&plan));
         }
 
         // Modo learn: si el tutor registró habilidades (bloque `dpx:skill`), las
@@ -1274,7 +1279,8 @@ async fn run_turn(
             && auto.commands()
             && !changed_paths.is_empty()
             && review_forced < SELF_REVIEW_MAX_ROUNDS
-            && let Some(critique) = review::run_self_review(cwd, user_input, &changed_paths).await
+            && let Some(critique) =
+                review::run_self_review(cwd, user_input, latest_plan.as_deref(), &changed_paths).await
         {
             review_forced += 1;
             println!(
