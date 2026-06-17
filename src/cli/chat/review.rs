@@ -31,12 +31,13 @@ pub(crate) async fn run_self_review(
     }
     let mut files: Vec<String> = changed_paths.iter().cloned().collect();
     files.sort();
+    let tests_touched = files.iter().any(|f| looks_like_test(f));
     let diff = build_diff(cwd, &files);
     println!(
         "{}",
         ui::dim("⎿ autorrevisión: un revisor compara tus cambios con lo que se pidió…")
     );
-    let task = review_task(user_request, criteria, &files, &diff);
+    let task = review_task(user_request, criteria, &files, &diff, tests_touched);
     let conclusion = run_subagent(cwd, &task, Some("reviewer")).await;
     parse_verdict(&conclusion)
 }
@@ -61,7 +62,13 @@ fn build_diff(cwd: &Path, files: &[String]) -> String {
 /// Prompt para el subagente revisor: comparar cambios vs intención del usuario
 /// (y los criterios de aceptación que el agente declaró, si los hay) y emitir un
 /// veredicto estructurado (`VEREDICTO: OK` o `VEREDICTO: CORREGIR`).
-fn review_task(user_request: &str, criteria: Option<&str>, files: &[String], diff: &str) -> String {
+fn review_task(
+    user_request: &str,
+    criteria: Option<&str>,
+    files: &[String],
+    diff: &str,
+    tests_touched: bool,
+) -> String {
     let diff_block = if diff.trim().is_empty() {
         "(sin diff disponible; LEE los archivos cambiados con read_file para evaluarlos)".to_string()
     } else {
@@ -75,16 +82,29 @@ fn review_task(user_request: &str, criteria: Option<&str>, files: &[String], dif
         ),
         _ => String::new(),
     };
+    // TEST-PRIMERO enforced: el revisor debe exigir que el comportamiento
+    // verificable quede cubierto por un test. La señal determinista (¿se tocó
+    // algún archivo de test?) le ahorra trabajo, pero ÉL juzga si hacía falta.
+    let tests_signal = if tests_touched {
+        "Este turno SÍ tocó archivos de test."
+    } else {
+        "Este turno NO tocó ningún archivo de test."
+    };
     format!(
         "El usuario pidió EXACTAMENTE esto:\n\"{user_request}\"\n{criteria_block}\n\
-         El agente cambió estos archivos: {lista}\n\n\
+         El agente cambió estos archivos: {lista}\n{tests_signal}\n\n\
          Cambios realizados:\n{diff_block}\n\n\
          Tu trabajo: evalúa si los cambios CUMPLEN lo que el usuario pidió (y los criterios de \
          arriba si los hay) y si están BIEN hechos. Clasifica cada problema que encuentres:\n\
          - P0 = no hace lo que el usuario pidió, o lo rompe.\n\
-         - P1 = lo hace, pero con un bug real, un caso borde sin cubrir o una omisión importante.\n\
+         - P1 = lo hace, pero con un bug real, un caso borde sin cubrir o una omisión importante. \
+         INCLUYE aquí: añadió o cambió COMPORTAMIENTO VERIFICABLE (lógica, una función con \
+         entrada→salida, un endpoint, un bugfix) y NO hay un test que lo cubra. Usa tu criterio: \
+         UI/visual, configuración o un refactor puro (sin cambio de comportamiento) NO exigen test \
+         nuevo; un bugfix sin test que lo reproduzca o lógica nueva sin test SÍ es P1.\n\
          - P2/P3 = menor o de estilo (NO bloquean).\n\n\
-         Si necesitas más contexto, usa read_file/search_project sobre los archivos cambiados.\n\n\
+         Si necesitas más contexto, usa read_file/search_project sobre los archivos cambiados \
+         (incluso para confirmar si ya existe un test que cubra el comportamiento).\n\n\
          RESPONDE así, con la PRIMERA línea siendo el veredicto:\n\
          - `VEREDICTO: OK` si NO hay ningún P0 ni P1 (cumple lo pedido y está bien).\n\
          - `VEREDICTO: CORREGIR` si hay al menos un P0 o P1; debajo lista SOLO los P0/P1 \
@@ -92,6 +112,27 @@ fn review_task(user_request: &str, criteria: Option<&str>, files: &[String], dif
          Sé estricto pero JUSTO: no inventes problemas ni bloquees por gustos de estilo.",
         lista = files.join(", ")
     )
+}
+
+/// ¿La ruta parece un archivo de test? Señal (no veredicto) para el revisor:
+/// cubre las convenciones de Rust/JS-TS/Python/Go/Java. El revisor decide si la
+/// ausencia de test importa para ESTE cambio.
+fn looks_like_test(path: &str) -> bool {
+    let p = path.replace('\\', "/").to_lowercase();
+    // ¿Algún DIRECTORIO del path es de tests? (cubre `tests/x.rs` y `a/tests/x.rs`)
+    let in_test_dir = p
+        .split('/')
+        .any(|seg| matches!(seg, "tests" | "test" | "spec" | "__tests__"));
+    let file = p.rsplit('/').next().unwrap_or(&p);
+    in_test_dir
+        || file.contains("test_")
+        || file.contains("_test.")
+        || file.contains(".test.")
+        || file.contains(".spec.")
+        || file.contains("_spec.")
+        || file.ends_with("_test.go")
+        || file.ends_with("test.java")
+        || file.ends_with("tests.java")
 }
 
 /// Interpreta el veredicto del revisor. `Some(issues)` = hay que corregir (P0/P1);
@@ -131,6 +172,22 @@ mod tests {
         // Ambiguo / sin veredicto → NO bloquea (mejor cerrar que ciclar).
         assert!(parse_verdict("creo que está más o menos bien").is_none());
         assert!(parse_verdict("").is_none());
+    }
+
+    #[test]
+    fn looks_like_test_reconoce_convenciones() {
+        // Tests por convención de varios lenguajes.
+        assert!(looks_like_test("src/foo_test.rs"));
+        assert!(looks_like_test("tests/integration.rs"));
+        assert!(looks_like_test("test_calc.py"));
+        assert!(looks_like_test("src/__tests__/Button.jsx"));
+        assert!(looks_like_test("components/Button.test.tsx"));
+        assert!(looks_like_test("user.spec.ts"));
+        assert!(looks_like_test("internal/svc_test.go"));
+        // Código normal NO es test.
+        assert!(!looks_like_test("src/calc.js"));
+        assert!(!looks_like_test("src/main.rs"));
+        assert!(!looks_like_test("README.md"));
     }
 
     #[test]
