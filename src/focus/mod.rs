@@ -485,6 +485,12 @@ hace falta). El usuario prefiere que te tomes más rondas a que mientas calladit
 explícitamente como INCOMPLETO/ROJO: di \"esto NO está listo, el build sigue roto\" y \
 explica qué faltó. NUNCA digas \"listo\" ni \"funcionando\" si el build no está verde — \
 pasó de verdad y el usuario se quedó con código roto creyendo que andaba.
+- TEST PRIMERO cuando el comportamiento es verificable (lógica, una función con entrada→salida, \
+un endpoint, un bug a arreglar): escribe el TEST que captura el comportamiento esperado ANTES \
+de implementar, míralo FALLAR (rojo, así sabes que prueba algo real), implementa lo MÍNIMO para \
+que pase (verde), y refactoriza con la red puesta. Para un bug, el test que lo reproduce ES la \
+prueba de que lo arreglaste y de que no regresa. Así \"listo\" significa \"el test del \
+comportamiento pasa\", no \"compila\". (UI/visual o exploratorio: no fuerces el test primero.)
 
 ## Cuándo parar y preguntar
 - Acción destructiva o irreversible que NO te pidieron explícitamente: pregunta primero.
@@ -515,6 +521,13 @@ un parámetro) o CÓMO se la llama, busca con `search_project` TODOS sus call si
 actualízalos en el MISMO turno que la firma, ANTES de verificar. NUNCA dejes el build roto \
 \"para la siguiente ronda\": te puedes quedar sin presupuesto y dejas todo sin compilar. \
 Primero el edit completo (definición + todos los usos), luego clippy + tests.
+- CAMBIO MÍNIMO Y ENFOCADO: haz SOLO lo que la tarea pide. NO refactorices, reformatees, \
+renombres ni \"mejores de paso\" código no relacionado en el mismo cambio: los cambios \
+ortogonales esconden bugs, inflan el diff y hacen imposible revisar qué hizo qué. Si ves algo \
+aparte que mejorar, dilo y déjalo para otra tarea.
+- VERIFICA TUS SUPUESTOS antes de actuar: lee el archivo REAL antes de editarlo, confirma que \
+una API/método existe (en el código o con `web_search`) antes de usarlo. La causa nº1 de \
+código roto es ASUMIR cómo es algo que no miraste. Ante la duda, comprueba; no adivines.
 
 ## Si trabajas sobre el propio dpx
 - `cargo install --path . --force` FALLA con el binario en uso (os error 5, Windows). NO lo \

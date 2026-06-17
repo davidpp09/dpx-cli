@@ -93,6 +93,16 @@ pub const PLAYBOOKS: &[(&str, &str, &str)] = &[
          7. VERIFICA con herramientas reales: axe DevTools (linting automático), Lighthouse (puntuación a11y), y al menos UNA prueba con teclado real y lector de pantalla (VoiceOver/NVDA). Lo que compila puede ser inaccesible; solo la herramienta y la prueba humana lo cazan.",
     ),
     (
+        "depuración sistemática",
+        "USAR cuando: hay un bug, error, algo no funciona, falla, crashea, da resultado incorrecto, comportamiento raro/inesperado, debuggear, investigar por qué falla. Palabras: bug, error, falla, no funciona, crashea, debuggear, depurar, por qué falla, comportamiento inesperado, no anda. NO para añadir features nuevas ni para optimizar velocidad (ver «performance»).",
+        "1. NO toques código al azar. Primero REPRODUCE el fallo de forma fiable: el caso mínimo que lo dispara. Lo que no puedes reproducir, no lo puedes arreglar NI confirmar que quedó.\n\
+         2. FORMA UNA HIPÓTESIS concreta y falsable ('X pasa porque Y'), UNA a la vez. Sin hipótesis solo estás picando a ciegas.\n\
+         3. AÍSLA por bisección: parte el problema a la mitad (logs/prints en puntos clave, comenta secciones, `git bisect`) hasta acorralar la línea/función culpable. Que hable la EVIDENCIA, no la intuición.\n\
+         4. VERIFICA LA CAUSA RAÍZ, no el síntoma: cuando creas tenerla, explica el MECANISMO completo (por qué produce el síntoma). Si no lo puedes explicar, todavía no es la causa raíz.\n\
+         5. ARREGLA la causa, no el síntoma. Un fix que 'hace que desaparezca' sin entender el porqué suele reintroducirse o tapar otro bug.\n\
+         6. CONFIRMA: reproduce el caso original y comprueba que ahora pasa; añade un test que lo capture para que no regrese. Si tras 2 intentos sigues igual, RELEE en fresco y replantea la hipótesis — no insistas en la misma corazonada.",
+    ),
+    (
         "API REST: contratos y diseño",
         "USAR cuando: diseñar una API REST, endpoints, contratos HTTP, versionado, paginación, idempotencia, códigos de error, nombres de recursos, OpenAPI. Palabras: API, REST, endpoint, contrato, versionado, paginación, idempotente, status code, recurso, URL, OpenAPI, Swagger. NO para GraphQL ni RPC/gRPC.",
         "1. RECURSOS, no verbos: nombres en plural y sustantivos (`/orders`, `/users/{id}/orders`). Las acciones se modelan como sub-recursos (`POST /orders/{id}/cancellations`, no `POST /orders/{id}/cancel`).\n\

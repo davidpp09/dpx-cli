@@ -24,6 +24,7 @@ mod actions;
 mod commands;
 mod recall;
 mod committee;
+mod review;
 pub(crate) use actions::*;
 pub(crate) use commands::{build_quiz_prompt, handle_command, remember};
 pub(crate) use recall::{maybe_auto_delegate, recall_context, recall_skills, run_subagent};
@@ -604,6 +605,11 @@ const MAX_STREAM_RETRIES: usize = 2;
 /// que un falso "listo"). No queremos un bucle infinito contra un fallo real.
 const GATE_MAX_FORCED: usize = 3;
 
+/// Rondas EXTRA que el gate de AUTORREVISIÓN fuerza cuando el revisor encuentra
+/// problemas P0/P1. Acotado para no ciclar contra un revisor exigente: tras
+/// estos intentos se cierra (el humano del modo auto verá el último estado).
+const SELF_REVIEW_MAX_ROUNDS: usize = 2;
+
 /// Resultado de un turno completo.
 enum TurnOutcome {
     /// Respuesta (posiblemente parcial) del asistente, para memoria.
@@ -802,6 +808,10 @@ async fn run_turn(
     // extra forzamos para que un build irreparable no cicle eternamente.
     let mut verify_red = false;
     let mut gate_forced = 0usize;
+    // AUTORREVISIÓN: archivos que el turno cambió (para que el revisor compare el
+    // diff contra lo pedido) y cuántas rondas de corrección por revisión llevamos.
+    let mut changed_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut review_forced = 0usize;
     // Checkpoint del turno: captura el estado de cada archivo antes de tocarlo
     // (vía fs::apply/delete_file) y lo apila al terminar para que `/undo` pueda
     // revertir TODO lo que dpx escribió este turno. Se commitea al soltar el
@@ -1041,6 +1051,19 @@ async fn run_turn(
         let searches = if quarantined { Vec::new() } else { crate::fs::parse_searches(&reply) };
         let mut runs = if quarantined { Vec::new() } else { crate::fs::parse_runs(&reply) };
 
+        // AUTORREVISIÓN: acumula los archivos que esta ronda cambió (en modo auto
+        // ya se aplicaron sin preguntar) para que el revisor los compare contra lo
+        // pedido al cerrar. Dedup por el HashSet.
+        for p in writes
+            .iter()
+            .map(|w| &w.path)
+            .chain(s_writes.iter().map(|w| &w.path))
+            .chain(edits.iter().map(|e| &e.path))
+            .chain(s_edits.iter().map(|e| &e.path))
+        {
+            changed_paths.insert(p.clone());
+        }
+
         // Verificación de build automática: si escribimos código fuente y hay un
         // proyecto Maven/Gradle/Cargo, dpx propone compilar y realimenta los
         // errores al modelo para que itere (escribe → compila → corrige), sin que
@@ -1241,6 +1264,29 @@ async fn run_turn(
                 "{}",
                 ui::red("🔴 INCOMPLETO · el build/tests sigue en rojo tras varios intentos de arreglo")
             );
+        }
+        // 🔎 AUTORREVISIÓN (solo modo auto, build VERDE): antes de cerrar un turno
+        // autónomo que cambió código, un revisor compara los cambios contra lo que
+        // pidió el usuario. Si hay P0/P1, se fuerza una ronda de corrección — el
+        // green-gate pero de COMPORTAMIENTO, no de compilación. Acotado por
+        // `SELF_REVIEW_MAX_ROUNDS`. En interactivo el humano ES la revisión.
+        if !verify_red
+            && auto.commands()
+            && !changed_paths.is_empty()
+            && review_forced < SELF_REVIEW_MAX_ROUNDS
+            && let Some(critique) = review::run_self_review(cwd, user_input, &changed_paths).await
+        {
+            review_forced += 1;
+            println!(
+                "{}",
+                ui::accent("⏺ autorrevisión: hay P0/P1 que corregir antes de cerrar")
+            );
+            to_send = format!(
+                "[AUTORREVISIÓN: un revisor evaluó tus cambios contra lo que pidió el usuario y \
+                 encontró problemas que DEBES corregir antes de cerrar. Arréglalos; si crees que el \
+                 revisor se equivoca en algo, explícalo con evidencia en vez de ignorarlo.\n\n{critique}\n]"
+            );
+            continue;
         }
         break;
     }
