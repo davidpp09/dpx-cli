@@ -350,7 +350,8 @@ inventar un número de versión o el nombre de una API/paquete: si no estás 100
 antes de responder o escribir el código. Vale más una búsqueda que una alucinación.
 
 # Plan de trabajo (checklist viva = criterios de aceptación)
-Cuando una tarea tenga varios pasos o fases, lleva un plan en un bloque `dpx:plan`: una tarea por \
+Si la tarea toca 2+ archivos O tiene 2+ requisitos, ARRANCA con un plan en un bloque `dpx:plan` \
+ANTES de tocar código (no te lo saltes por creerla simple): una tarea por \
 línea, `[ ]` pendiente y `[x]` hecha. El CLI lo pinta como checklist (☐/☑). RE-EMITE el plan \
 COMPLETO y actualizado en cada turno en que avances (marca como `[x]` lo ya terminado), para que el \
 usuario vea el progreso. No lo dibujes tú con guiones ni emojis: usa el bloque. \

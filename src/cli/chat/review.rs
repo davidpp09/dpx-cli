@@ -74,13 +74,20 @@ fn review_task(
     } else {
         format!("```diff\n{diff}\n```")
     };
-    // El plan/criterios que el propio agente declaró = la vara de medir (spec).
+    // SPEC-DRIVEN robusto: si el agente declaró criterios (su `dpx:plan`), esos
+    // son la vara. Si NO (el modelo suele saltarse el plan), el revisor los
+    // DERIVA de la petición — así la revisión contra criterios funciona SIEMPRE,
+    // sin depender de que el agente planee.
     let criteria_block = match criteria {
         Some(c) if !c.trim().is_empty() => format!(
             "\nEl agente se comprometió con ESTOS criterios de aceptación (su plan). Verifica que \
              CADA uno se cumple de verdad en los cambios, no solo que se marcó como hecho:\n{c}\n"
         ),
-        _ => String::new(),
+        _ => "\nEl agente NO declaró criterios de aceptación. PRIMERO derívalos tú de la petición \
+              del usuario: enumera los 3-6 puntos OBSERVABLES que significan 'hecho y BIEN hecho' \
+              (incluye casos borde y de error que la petición implique). LUEGO verifica que los \
+              cambios cumplen CADA uno; un criterio incumplido es P0 o P1.\n"
+            .to_string(),
     };
     // TEST-PRIMERO enforced: el revisor debe exigir que el comportamiento
     // verificable quede cubierto por un test. La señal determinista (¿se tocó
