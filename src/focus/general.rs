@@ -113,4 +113,147 @@ pub const PLAYBOOKS: &[(&str, &str, &str)] = &[
          6. PAGINACIÓN: para colecciones usa cursor-based (`page[cursor]` + `Link` header con `rel=next`) si el dataset muta; offset (`page[number]`/`page[size]`) solo para datos estables. Metadatos de paginación EN el envelope, no en headers aislados.\n\
          7. IDEMPOTENCIA en mutaciones: `POST`/`PATCH` aceptan `Idempotency-Key`; si llega duplicada, devuelves la misma respuesta sin re-ejecutar. Crítico en pagos e integraciones.",
     ),
+    (
+        "autenticación y autorización",
+        "USAR cuando: login, autenticación, autorización, sesiones, JWT, OAuth, permisos, roles, RBAC, proteger rutas, quién puede hacer qué, refresh token, 2FA. Palabras: auth, login, sesión, JWT, OAuth, permisos, roles, RBAC, token, autenticar, autorizar, proteger ruta. NO para hashing genérico ni CORS (ver «seguridad OWASP»).",
+        "1. AUTENTICACIÓN (quién eres) ≠ AUTORIZACIÓN (qué puedes). Sepáralas: una capa valida identidad, otra valida permisos en CADA acción.\n\
+         2. NUNCA implementes auth desde cero: usa librerías maduras (Auth.js/next-auth, Spring Security, Passport, Devise, OAuth2+PKCE). Contraseñas = argon2id/bcrypt, jamás SHA/MD5.\n\
+         3. Sesiones: token de acceso de vida CORTA + refresh token ROTATIVO. JWT con `exp` y `aud`, sin datos sensibles en el payload. Guárdalo en cookie httpOnly+Secure+SameSite, NO en localStorage.\n\
+         4. Autorización en el SERVIDOR en cada endpoint (no confíes en ocultar la opción en la UI). RBAC (roles) para la mayoría; ABAC (atributos) si la regla depende del recurso concreto.\n\
+         5. El default es DENEGAR: una ruta sin regla explícita está prohibida, no abierta.\n\
+         6. 2FA y rate-limit en el login (frena fuerza bruta); el logout invalida el refresh token.\n\
+         7. COMPONE con «API REST» (proteger endpoints) y «seguridad OWASP» (el resto de la superficie).",
+    ),
+    (
+        "manejo de errores robusto",
+        "USAR cuando: manejar errores, excepciones, qué pasa si falla, propagar errores, try/catch, Result, fallar de forma controlada, reintentos, timeouts, mensajes de error, no tragarse errores. Palabras: error, excepción, fallo, try, catch, throw, Result, reintento, retry, timeout, manejo de errores, fallback. NO para depurar un bug ya existente (ver «depuración sistemática»).",
+        "1. Distingue errores ESPERADOS (input inválido, no encontrado, sin permiso) de INESPERADOS (bug, infra caída). Los esperados se modelan como valores/tipos; los inesperados se propagan y se loggean.\n\
+         2. Falla TEMPRANO y ruidoso en desarrollo; suave y con mensaje útil en producción. NUNCA te tragues un error en silencio: un `catch {}` vacío es un bug oculto.\n\
+         3. Propaga CON CONTEXTO, no lo pierdas: envuelve añadiendo qué intentabas ('al guardar el pedido: <causa>'). Usa Result/`?` (Rust), excepciones tipadas (Java/Py) o `Error.cause` (JS).\n\
+         4. UN solo punto en cada BORDE (handler HTTP, main, UI) traduce el error a respuesta (status+mensaje) o a estado de error de la UI, SIN filtrar stack traces ni detalles internos al usuario.\n\
+         5. Red/IO: timeout SIEMPRE + reintento con backoff SOLO si la operación es idempotente y el fallo es transitorio. Nunca reintentes a ciegas.\n\
+         6. El mensaje al usuario dice QUÉ pasó y QUÉ hacer; el log técnico (causa + contexto) va aparte.\n\
+         7. COMPONE con casi todo: cualquier skill que escriba lógica necesita esta para fallar bien.",
+    ),
+    (
+        "capa de datos y persistencia",
+        "USAR cuando: base de datos, persistencia, guardar datos, modelar tablas, queries, SQL, ORM, migraciones, transacciones, relaciones, índices, repositorio. Palabras: base de datos, BD, persistencia, tabla, query, SQL, ORM, migración, transacción, repositorio, índice, schema, DAO. NO para la lógica de negocio pura (ver «modelar la lógica de negocio»).",
+        "1. Separa el ACCESO a datos (repositorios/DAOs) de la lógica de negocio: el dominio no escribe SQL, le pide a un repositorio. Así testeas el dominio sin BD.\n\
+         2. Migraciones VERSIONADAS desde el día 1 (Flyway/Liquibase, Prisma migrate, Alembic, sqlx). El schema cambia SOLO por migración, nunca a mano; cada una reversible o con plan de rollback.\n\
+         3. Transacción para operaciones que deben ser ATÓMICAS (varias escrituras que van juntas o no van). Mantenla CORTA: nada de IO externo dentro.\n\
+         4. Evita el N+1: carga lo relacionado en UNA query (join/eager/`include`), no en un loop. Mídelo cuando la lista crece.\n\
+         5. Índices en lo que filtras/ordenas/joineas; no de más (cuestan en escritura).\n\
+         6. Consultas PARAMETRIZADAS siempre (nunca concatenes SQL); tipa al salir (datos crudos → objetos del dominio) y valida al entrar.\n\
+         7. COMPONE con «API REST» (el endpoint pide al repositorio) y «modelar la lógica de negocio» (el dominio lo usa).",
+    ),
+    (
+        "concurrencia y async",
+        "USAR cuando: async, await, promesas, concurrencia, paralelismo, hilos, race condition, condición de carrera, bloqueo, lock, mutex, tareas en paralelo, idempotencia, colas, workers. Palabras: async, await, promesa, concurrencia, paralelo, hilo, thread, race, lock, mutex, idempotente, cola, worker, tarea en segundo plano. NO para optimizar velocidad en general (ver «performance»).",
+        "1. async/await NO es paralelismo: es no-bloqueante. Para correr cosas EN PARALELO usa `Promise.all`/`tokio::join!`/`gather`; en serie solo si una depende de la otra.\n\
+         2. Estado mutable COMPARTIDO entre tareas = condición de carrera. Evítalo: pasa datos por mensajes/canales, o protégelo con lock — pero un lock mal puesto serializa todo y mata el beneficio.\n\
+         3. Toda espera tiene TIMEOUT y forma de CANCELAR; una tarea colgada no debe colgar el sistema.\n\
+         4. Lo que puede reintentarse o llegar duplicado (webhooks, pagos, reintentos de red) debe ser IDEMPOTENTE: la misma operación dos veces deja el mismo efecto que una.\n\
+         5. Trabajo pesado o diferible (emails, thumbnails, reportes) → fuera del request, a una cola/worker; no hagas esperar al usuario.\n\
+         6. No metas algo BLOQUEANTE (CPU pesada, IO síncrono) dentro de un runtime async: lo congela. Aíslalo en un thread/pool aparte.\n\
+         7. COMPONE con «performance» (paralelizar el hot path) y «capa de datos» (transacción + concurrencia).",
+    ),
+    (
+        "observabilidad: logs y métricas",
+        "USAR cuando: logging, logs, registrar, observabilidad, métricas, monitoreo, trazas, debugging en producción, qué loggear, niveles de log, structured logging, correlación. Palabras: log, logging, logger, observabilidad, métrica, monitoreo, traza, trace, registrar, nivel de log, correlación. NO para depurar localmente un bug (ver «depuración sistemática»).",
+        "1. Logs ESTRUCTURADOS (campos: timestamp, nivel, mensaje, contexto), no `print` sueltos: así se buscan y filtran en producción.\n\
+         2. Niveles con criterio: ERROR (algo se rompió, requiere acción), WARN (anómalo pero recuperado), INFO (eventos de negocio: 'pedido creado'), DEBUG (detalle de diagnóstico, apagado en prod).\n\
+         3. Loggea los BORDES y las DECISIONES: entrada/salida de cada request (con id de correlación), errores con su causa, y los puntos donde el flujo se bifurca. NO dentro de loops calientes.\n\
+         4. NUNCA loggees datos sensibles (contraseñas, tokens, PII, tarjetas): enmascara.\n\
+         5. Un ID de CORRELACIÓN que viaje por todo el flujo: así reconstruyes qué pasó en UNA petición entre todo el ruido.\n\
+         6. Métricas para lo que importa al negocio (latencia, tasa de error, throughput); alerta sobre umbrales, no sobre cada evento.\n\
+         7. COMPONE con «manejo de errores robusto» (el error se loggea con contexto) y «depuración sistemática» (los logs son la evidencia).",
+    ),
+    (
+        "estado y datos en el frontend",
+        "USAR cuando: estado en el frontend, state management, manejar datos en React/Vue, fetch de datos, loading, error, empty states, caché en cliente, formularios, sincronizar con el servidor, stores. Palabras: estado, state, store, fetch, loading, cargando, data fetching, caché cliente, formulario, React Query, SWR, Zustand, sincronizar. NO para el layout visual (ver «layout y CSS moderno»).",
+        "1. Distingue estado de SERVIDOR (datos que viven en la BD, los fetcheas) de estado de UI/CLIENTE (qué tab está abierto, el draft de un form). Mézclalos y sufres.\n\
+         2. El estado de servidor se maneja con una librería de data-fetching (TanStack/React Query, SWR, RTK Query): te da caché, revalidación y loading/error gratis. NO lo metas a mano en un useState global.\n\
+         3. Estado de UI: local (`useState`) si es de un componente; elevado/contexto solo si varios lo comparten; store global (Zustand/Redux/Pinia) SOLO para estado realmente global. Empieza local, sube si duele.\n\
+         4. Maneja SIEMPRE los 4 estados de un dato remoto: loading, error, vacío (empty) y con datos. La UI que solo pinta el caso feliz se rompe en cuanto algo tarda o falla.\n\
+         5. Formularios: estado controlado + validación en submit y en blur, error junto al campo, submit deshabilitado mientras envía. Usa React Hook Form/Formik para forms no triviales.\n\
+         6. No dupliques el estado del servidor en cliente; deriva lo que puedas. Tras una mutación, invalida/revalida la query (no edites el caché a mano salvo optimistic update consciente).\n\
+         7. COMPONE con «layout y CSS moderno»/«accesibilidad» (pintar los estados) y «API REST» (de dónde vienen los datos).",
+    ),
+    (
+        "configuración y secretos por entorno",
+        "USAR cuando: configuración, variables de entorno, env, .env, secretos, API keys, feature flags, config por entorno, 12-factor, settings, ajustes por ambiente dev/staging/prod. Palabras: config, configuración, env, variable de entorno, secreto, API key, feature flag, ambiente, entorno, settings, 12-factor. NO para vulnerabilidades (ver «seguridad OWASP») ni para el login (ver «autenticación y autorización»).",
+        "1. Config FUERA del código: nada hardcodeado. Lee de variables de entorno (12-factor); valida al ARRANCAR que las requeridas existen y falla RUIDOSO si falta una (no a mitad de ejecución).\n\
+         2. Secretos (keys, tokens, contraseña de BD) NUNCA en el repo: `.env` solo en dev y en `.gitignore`; en prod, un gestor (Vault, AWS Secrets Manager, Doppler) o las variables del entorno de despliegue.\n\
+         3. Config POR AMBIENTE sin duplicar: una base + overrides por entorno. El código no pregunta 'en qué ambiente estoy' por todos lados; lee valores YA resueltos.\n\
+         4. Centraliza y TIPA la config en UN objeto validado al inicio (zod/Pydantic/struct), no `process.env.X` esparcido por el código.\n\
+         5. Feature flags para activar/desactivar sin desplegar; mantenlos efímeros (bórralos cuando la feature ya es estable, no los dejes pudrir).\n\
+         6. Distingue config de BUILD (compile-time) de config de RUNTIME; los secretos JAMÁS en el bundle del frontend.\n\
+         7. COMPONE con «seguridad OWASP» (manejo de secretos) y «autenticación y autorización» (claves de auth).",
+    ),
+    (
+        "integración con servicios externos",
+        "USAR cuando: integrar una API de terceros, cliente HTTP, llamar a un servicio externo, webhook, rate limit del proveedor, SDK, circuit breaker, fetch a otra API (Stripe, Twilio, etc.). Palabras: integración, API externa, tercero, cliente HTTP, webhook, rate limit, SDK, circuit breaker, servicio externo, proveedor. NO para diseñar TU propia API (ver «API REST»).",
+        "1. Aísla cada servicio externo tras un CLIENTE/adaptador propio: el resto del código llama a TU interfaz, no al SDK crudo. Así lo cambias o lo mockeas sin tocar todo.\n\
+         2. Toda llamada externa: timeout + reintento con backoff (si es idempotente) + manejo del fallo. La red SIEMPRE falla tarde o temprano; no asumas éxito.\n\
+         3. Respeta los rate limits del proveedor (lee sus headers, espacía/encola las llamadas); cachea lo que no cambia para no re-pedirlo.\n\
+         4. Circuit breaker para servicios flaky: si está caído, deja de martillarlo y degrada con gracia (valor por defecto, cola, mensaje claro) en vez de colgar todo.\n\
+         5. Webhooks que RECIBES: verifica la firma, responde rápido (200) y procesa async; trátalos como idempotentes (llegan duplicados o fuera de orden).\n\
+         6. Nunca confíes en la forma de la respuesta externa: valídala al entrar; que un cambio en su API no corrompa tu sistema.\n\
+         7. COMPONE con «manejo de errores robusto» (fallar bien) y «concurrencia y async» (timeouts, colas, idempotencia).",
+    ),
+    (
+        "documentación que sí sirve",
+        "USAR cuando: documentar, README, docs, comentarios, ADR, docstrings, guía de uso, CHANGELOG, explicar una decisión de diseño en el repo. Palabras: documentar, documentación, README, comentario, ADR, docstring, CHANGELOG, guía, doc. NO para enseñarle un concepto al usuario (eso es tu rol de mentor normal).",
+        "1. Documenta el PORQUÉ, no el qué: el código ya dice qué hace; los comentarios y docs explican decisiones, trade-offs y lo no-obvio. Un comentario que repite el código es ruido.\n\
+         2. README con lo justo para EMPEZAR: qué es, cómo se corre, cómo se prueba, en menos de 2 minutos de lectura. Nada de novelas.\n\
+         3. Para decisiones de arquitectura importantes, un ADR corto (contexto → decisión → consecuencias): el futuro-tú agradece saber por qué se eligió X.\n\
+         4. API/funciones públicas: documenta el CONTRATO (entradas, salidas, errores que lanza, efectos), no la implementación. Docstrings/JSDoc en lo que otros consumen.\n\
+         5. La doc vive CON el código y se actualiza en el MISMO cambio; doc desincronizada miente y es peor que no tenerla.\n\
+         6. Ejemplos > prosa: un fragmento de uso real enseña más que tres párrafos.\n\
+         7. COMPONE con «arquitectura de una feature» (ADRs) y «API REST» (documentar el contrato).",
+    ),
+    (
+        "refactorización segura",
+        "USAR cuando: refactorizar sin cambiar comportamiento, mover código, extraer una función/módulo, reorganizar, limpiar deuda técnica sin romper, reestructurar. Palabras: refactor, refactorizar, mover, extraer, reorganizar, reestructurar, deuda técnica, limpiar sin romper. NO para escribir una función nueva legible (ver «escribir funciones limpias») ni para arreglar un bug (ver «depuración sistemática»).",
+        "1. Refactor = cambiar la FORMA sin cambiar el COMPORTAMIENTO. Si cambias comportamiento, eso es feature/fix, no refactor — NO los mezcles en el mismo cambio.\n\
+         2. Red de seguridad PRIMERO: que haya tests cubriendo el comportamiento actual; si no, escríbelos ANTES de tocar. Así sabes que no rompiste nada.\n\
+         3. Pasos PEQUEÑOS y verdes: cada micro-cambio compila y pasa tests antes del siguiente. Nada de refactors gigantes de una sentada que dejan todo roto a la mitad.\n\
+         4. Para renombrar o mover un símbolo usado en varios sitios, usa `rename_symbol` (exacto, cross-file) o `find_references` antes de tocar a mano: editar a ciegas deja referencias colgando.\n\
+         5. Patrones seguros, uno a la vez: extraer función (nombra un bloque), extraer módulo, condicional anidado → guard clauses, introducir parámetro/objeto.\n\
+         6. Commitea el refactor APARTE de cambios de comportamiento, para que el diff sea revisable y reversible.\n\
+         7. COMPONE con «escribir funciones limpias» (el objetivo) y «estrategia de testing» (la red de seguridad).",
+    ),
+    (
+        "gestión de dependencias",
+        "USAR cuando: añadir una dependencia, elegir librería, gestionar deps, package.json/Cargo.toml/requirements, lockfile, auditar dependencias, actualizar versiones, vendoring, sub-dependencias. Palabras: dependencia, librería, dep, paquete, package, lockfile, npm, cargo, pip, auditar, actualizar versión, vendoring. NO para diseñar la arquitectura del módulo (ver «arquitectura de una feature»).",
+        "1. Antes de añadir una dep, pregúntate si vale la pena: ¿resuelve un problema real y difícil, o son 10 líneas que escribes tú? Cada dep es superficie de ataque, peso y mantenimiento.\n\
+         2. Elige por SALUD, no por estrellas: mantenida (commits recientes), pocas sub-deps, licencia compatible, sin vulnerabilidades conocidas.\n\
+         3. Lockfile SIEMPRE commiteado (package-lock/Cargo.lock/poetry.lock) → builds reproducibles. Versiones con rango sensato, nunca `*`.\n\
+         4. Audita regularmente (`npm audit`/`cargo audit`/dependabot) y actualiza con INTENCIÓN: lee el changelog de un bump mayor, no actualices a ciegas.\n\
+         5. Una dep que usas en UN sitio trivial = candidata a quitar. Menos deps = menos cosas que se rompen solas.\n\
+         6. Un solo gestor por proyecto; evita la misma dep en dos versiones distintas.\n\
+         7. COMPONE con «seguridad OWASP» (auditar) y «arquitectura de una feature» (qué construir vs traer).",
+    ),
+    (
+        "git y flujo de cambios",
+        "USAR cuando: git, commit, branch, rama, pull request, PR, merge, conflicto, historial, versionar cambios, .gitignore, rebase, stash. Palabras: git, commit, branch, rama, PR, pull request, merge, conflicto, rebase, gitignore, historial, stash. NO para versionar una API pública (ver «API REST»).",
+        "1. Commits ATÓMICOS: uno por cambio lógico coherente, que compila y pasa tests por sí solo. Nada de un commit 'arreglos varios' que mezcla cinco cosas.\n\
+         2. Mensaje que explica QUÉ y POR QUÉ, en imperativo ('añade validación de email'), no 'cambios' ni 'wip'. El historial es documentación.\n\
+         3. Rama por feature/fix; mantenla CORTA y al día con la base (rebase/merge frecuente) para evitar conflictos monstruo.\n\
+         4. Antes de un PR: diff limpio (sin prints de debug ni archivos basura), tests verdes, y descripción de qué y por qué.\n\
+         5. Conflictos: entiende AMBOS lados antes de resolver; no descartes el cambio del otro a ciegas. Tras resolver, RE-CORRE los tests.\n\
+         6. `.gitignore` desde el inicio (build, deps, secretos, caches); NUNCA commitees `.env`, `node_modules` ni `target`.\n\
+         7. COMPONE con «refactorización segura» (commit aparte del refactor) y la disciplina de cambio mínimo.",
+    ),
+    (
+        "construir con IA / LLMs",
+        "USAR cuando: construir con IA, LLM, integrar un modelo de lenguaje, prompt, OpenAI/Anthropic/etc., tokens, streaming de respuesta, RAG, embeddings, ventana de contexto, agente, function calling. Palabras: IA, LLM, modelo de lenguaje, prompt, token, streaming, RAG, embedding, contexto, agente, OpenAI, Anthropic, inferencia. NO para los gates internos de dpx.",
+        "1. Trata al LLM como un componente NO determinista y falible: valida/parsea su salida (esquema), maneja que devuelva basura y ten un fallback. Nunca asumas que la respuesta es correcta o bien formada.\n\
+         2. El CONTEXTO es el recurso caro: mete solo lo relevante (recupera, no vuelques todo); vigila la ventana y el costo por tokens. Poco contexto bueno > mucho contexto ruidoso.\n\
+         3. Streaming para respuestas largas (mejor UX); maneja cortes a mitad y reintentos. Timeouts como cualquier llamada externa.\n\
+         4. Prompts versionados y con EVALS: un cambio de prompt ES un cambio de comportamiento — ten casos de prueba que midan si sigue haciendo lo correcto antes de tocarlo.\n\
+         5. RAG cuando necesitas conocimiento externo/actual: chunking sensato + embeddings + recuperar top-k relevante; la calidad del retrieve manda sobre el modelo.\n\
+         6. Key por entorno, rate limit y costo monitoreado; NUNCA expongas la API key en el cliente.\n\
+         7. COMPONE con «integración con servicios externos» (el LLM ES un servicio externo), «manejo de errores robusto» y «configuración y secretos por entorno».",
+    ),
 ];
