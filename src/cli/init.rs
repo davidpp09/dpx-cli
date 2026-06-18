@@ -54,6 +54,31 @@ pub fn onboarding(cwd: &Path, mode: Mode, brain: Brain) -> Result<ProjectConfig>
         auto,
     };
     config.save(cwd).context("No se pudo guardar la configuración")?;
+
+    // Template de hooks: un ejemplo comentado para que el usuario sepa cómo arrancar.
+    let hooks_toml = cwd.join(".dpx").join("hooks.toml");
+    if !hooks_toml.exists() {
+        let _ = std::fs::write(
+            &hooks_toml,
+            "# hooks automáticos de dpx (opcional)\n\
+             # Cada [[hooks]] define un comando que se ejecuta automáticamente ante\n\
+             # un evento del ciclo de vida: PreToolUse, PostToolUse, OnSessionStart,\n\
+             # OnSessionEnd, PreCommit.\n\
+             #\n\
+             # Ejemplos:\n\
+             #\n\
+             # [[hooks]]\n\
+             # event = \"PreCommit\"\n\
+             # command = \"cargo test\"\n\
+             #\n\
+             # [[hooks]]\n\
+             # event = \"PostToolUse\"\n\
+             # tools = [\"write_file\", \"edit_file\"]\n\
+             # command = \"cargo fmt\"\n\
+             ",
+        );
+    }
+
     println!("\n  {}", ui::dim("⎿ configuración guardada en .dpx/config.toml · ya puedes empezar"));
     Ok(config)
 }

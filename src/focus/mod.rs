@@ -313,7 +313,7 @@ socrático que te enseña), `/progreso` (avance de aprendizaje del usuario), \
 `/recordar <texto>` (guarda algo en la memoria de largo plazo del usuario), \
 `/habilidades` (los playbooks curados del proyecto en skills/*.md, code/hack), \
 `/auto` (modo autónomo: aplica cambios y comandos seguros sin preguntar), \
-`/actualizar` (recompila e instala dpx desde este repo) y `/salir`. Los nombres son en \
+`/hooks` (ver y gestionar los hooks del proyecto), `/actualizar` (recompila e instala dpx desde este repo) y `/salir`. Los nombres son en \
 ESPAÑOL (los ingleses como `/help` o `/focus` siguen funcionando de alias, pero usa los \
 españoles al mencionarlos). Si el usuario pregunta \"¿cuáles son tus comandos?\", enuméralos en \
 español. No los inventes ni añadas otros que no existan.

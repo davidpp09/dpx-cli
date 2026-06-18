@@ -243,6 +243,11 @@ pub(crate) fn handle_command(
             }
         }
 
+        "hooks" => {
+            let hooks = store.load_hooks();
+            ui::hooks_panel(&hooks);
+        }
+
         "panel" => {
             let has_context = store.prior_context().is_some();
             let plan_progress = store.read_plan()

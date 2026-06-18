@@ -494,6 +494,50 @@ pub fn welcome(focus: &str, mode: &str, brain: &str, cwd: &str) {
     draw_box(&lines, grad, None);
 }
 
+/// Panel de hooks (comando `/hooks`): muestra los hooks cargados desde
+/// `.dpx/hooks.toml` con su evento, comando y filtro de tools.
+pub fn hooks_panel(hooks: &[crate::cli::hooks::Hook]) {
+    use crate::cli::hooks::HookEvent;
+
+    let mut lines: Vec<String> = vec![grad("hooks del proyecto"), String::new()];
+
+    if hooks.is_empty() {
+        lines.push(dim("  (sin hooks configurados)"));
+        lines.push(String::new());
+        lines.push(dim(
+            "  crea .dpx/hooks.toml con [[hooks]] para definir comandos automáticos.",
+        ));
+        draw_box(&lines, grad, None);
+        return;
+    }
+
+    for hook in hooks {
+        let icon = match hook.event {
+            HookEvent::PreCommit => "⚠",
+            _ => "⚡",
+        };
+        let event_label = hook.event.as_str();
+        let cmd_short: String = hook.command.chars().take(56).collect();
+        let mut line = format!(
+            "  {} {}  {}",
+            accent(icon),
+            accent(event_label),
+            dim(&cmd_short),
+        );
+        if let Some(ref tools) = hook.tools {
+            let tools_str = tools.join(", ");
+            let tools_short: String = tools_str.chars().take(40).collect();
+            line.push_str(&format!("  {}", dim(&format!("→ {tools_short}"))));
+        }
+        lines.push(line);
+    }
+
+    lines.push(String::new());
+    lines.push(dim("PreCommit veta el commit si falla · los demás son best-effort."));
+
+    draw_box(&lines, grad, None);
+}
+
 /// Dashboard de proyecto (comando `/panel`): 3 tarjetas de modo con el color
 /// de su propia identidad visual (code azul, hack ámbar, learn verde), más un
 /// contador de recuerdos y skills del agente. Todo centrado en una caja.
@@ -1215,6 +1259,7 @@ pub fn print_help(mode: crate::focus::Mode) {
         ("/examen [tema]", "el tutor te interroga para fijar lo aprendido", &[Mode::Learn]),
         ("/recordar <texto>", "guarda algo en memoria de largo plazo", &[]),
         ("/habilidades", "playbooks curados del proyecto (skills/*.md)", &[Mode::Code, Mode::Hack]),
+        ("/hooks", "hooks del proyecto (.dpx/hooks.toml): ver y gestionar", &[]),
         ("/cerebro [modelo]", "cerebro (dpx usa solo deepseek)", &[]),
         ("/auto [off|all]", "modo autónomo: cambios sin preguntar", &[Mode::Code, Mode::Hack]),
         ("/actualizar", "recompila e instala dpx desde este repo", &[]),
