@@ -812,6 +812,10 @@ async fn run_turn(
     // diff contra lo pedido) y cuántas rondas de corrección por revisión llevamos.
     let mut changed_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut review_forced = 0usize;
+    // AMBIGÜEDAD: cuántas veces auto amplió el presupuesto en este turno. La 2ª
+    // ampliación (≥16 rondas sin terminar) es señal inequívoca de over-scoping
+    // en tarea ambigua → se inyecta un freno de alcance ("slice mínimo primero").
+    let mut auto_extensions = 0usize;
     // Último `dpx:plan` del turno = criterios de aceptación para la autorrevisión.
     let mut latest_plan: Option<String> = None;
     // Checkpoint del turno: captura el estado de cada archivo antes de tocarlo
@@ -1124,7 +1128,7 @@ async fn run_turn(
         // mitad"). En manual pregunta; en auto amplía solo hasta el tope duro.
         if wants_more
             && round >= round_budget
-            && !extend_rounds(&mut *ask, round, auto, &mut round_budget)
+            && !extend_rounds(&mut *ask, round, auto, &mut round_budget, &mut auto_extensions)
         {
             // Si encima la verificación quedó en ROJO, no lo disfraces de pausa
             // tranquila: dilo claro para que el usuario sepa que el build/tests
@@ -1242,6 +1246,18 @@ async fn run_turn(
                      tu respuesta final."
                 )
             };
+            // SCOPE NUDGE: si auto amplió 2+ veces (≥16 rondas sin terminar),
+            // es señal inequívoca de over-scoping en tarea ambigua → freno.
+            if auto_extensions >= 2 {
+                to_send = format!(
+                    "[SCOPE NUDGE: llevas {auto_extensions}+ ampliaciones de presupuesto ({round} \
+                     rondas) y la tarea sigue sin terminar. POSIBLEMENTE SOBRE-ESCOPASTE. \
+                     NO intentes la versión completa ni features avanzadas: construye AHORA el \
+                     NÚCLEO MÍNIMO que compile y pase tests, y deja las extensiones para otro \
+                     turno. Reduce drásticamente el alcance YA.]\n\n{to_send}"
+                );
+                auto_extensions = 0; // solo una vez, no saturar cada ronda
+            }
             continue;
         }
         // 🟢 GREEN-GATE: el modelo no pidió más acciones → se da por terminado.
@@ -1384,6 +1400,7 @@ fn extend_rounds(
     round: usize,
     auto: crate::cli::AutoMode,
     budget: &mut usize,
+    auto_extensions: &mut usize,
 ) -> bool {
     // Guardrail de gasto: si se rebasó el presupuesto de tokens, el modo auto
     // NO sigue solo — cae al prompt manual para que decidas si quemar más.
@@ -1397,6 +1414,7 @@ fn extend_rounds(
             );
             return false;
         }
+        *auto_extensions += 1;
         println!(
             "\n{}",
             ui::dim(&format!("auto {round} rondas y la tarea sigue · ampliando presupuesto"))

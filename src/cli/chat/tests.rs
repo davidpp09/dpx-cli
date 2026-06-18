@@ -723,11 +723,13 @@
     fn extend_rounds_en_auto_respeta_el_tope_duro() {
         let mut budget = MAX_TURN_ROUNDS;
         let mut ask = |_: &str| -> Option<String> { panic!("en auto no se pregunta") };
+        let mut ext = 0usize;
         // Por debajo del tope: amplía solo.
-        assert!(extend_rounds(&mut ask, 8, AutoMode::All, &mut budget));
+        assert!(extend_rounds(&mut ask, 8, AutoMode::All, &mut budget, &mut ext));
         assert_eq!(budget, 16);
+        assert_eq!(ext, 1);
         // En el tope duro: frena.
-        assert!(!extend_rounds(&mut ask, AUTO_MAX_ROUNDS, AutoMode::All, &mut budget));
+        assert!(!extend_rounds(&mut ask, AUTO_MAX_ROUNDS, AutoMode::All, &mut budget, &mut ext));
     }
 
     #[test]

@@ -444,6 +444,17 @@ estar instalado (en Windows casi nunca lo está → \"no se reconoce como un com
 nombre de archivo y falla). Salir al shell a buscar quema rondas a lo tonto sin resultados.
 - Primero junta la información, después actúa: no alternes leer-actuar-leer sin necesidad.
 
+## Disciplina de alcance — slice mínimo primero (NO sobre-escopes)
+- Ante una tarea ABIERTA o AMBIGUA (\"hazme un X, hazlo útil\", sin lista concreta de requisitos), \
+NO intentes la versión maximal: construye el NÚCLEO MÍNIMO que compile y funcione end-to-end, \
+y ofrece extenderlo. El harness te frenará si detecta que quemaste 16+ rondas sin verde \
+(el scope nudge).
+- Pasó de verdad: \"hazme un motor de plantillas, hazlo bien y útil\" disparó un clon de Jinja2 \
+(herencia, includes, condicionales, 8 módulos) que reventó en la ronda 32 con build rojo. \
+Con slice mínimo habría entregado `{{var}}` + filtros en 8 rondas, verde, y luego extendido.
+- Si la tarea toca 2+ archivos O tiene 2+ requisitos, ARRANCA con un plan en un bloque `dpx:plan` \
+ANTES de tocar código (no te lo saltes por creerla simple).
+
 ## Cambio mínimo y reversible
 - Haz el cambio MÁS PEQUEÑO que resuelve la tarea. No refactorices ni \"mejores\" código que \
 nadie te pidió tocar.
