@@ -64,6 +64,7 @@ añadir complejidad (estado global, librerías, abstracciones) que el proyecto n
 /// Playbooks EMPOTRADOS de React: pasos A→B de las tareas que más se
 /// repiten, para que dpx no explore a ciegas y aplique la convención correcta.
 /// Se cargan cuando el focus activo es `react`. (nombre, cuándo, pasos).
+#[allow(dead_code)]
 pub const PLAYBOOKS: &[(&str, &str, &str)] = &[
     (
         "crear componente con estado",

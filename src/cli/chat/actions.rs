@@ -58,19 +58,7 @@ pub(crate) fn execute_run(cwd: &Path, cmd: &str) -> (String, bool, Option<i32>) 
         &|| ui::cancel_requested(),
     );
     ui::action_time(t.elapsed());
-    let mut text = out.output.clone();
-    if !out.cancelled
-        && (text.contains("exit code: 1")
-            || text.contains("BUILD FAILURE")
-            || text.contains("ERROR"))
-        && let Some(diag) = crate::agent::diagnostic::diagnose_failure(&text)
-    {
-        ui::diagnostic_panel(&diag.hint, &diag.suggestions);
-        text.push_str(&format!(
-            "\n[DIAGNÓSTICO AUTOMÁTICO DPX]: {}\nSugerencias: {:?}\n",
-            diag.hint, diag.suggestions
-        ));
-    }
+    let text = out.output.clone();
     (text, out.cancelled, out.exit_code)
 }
 

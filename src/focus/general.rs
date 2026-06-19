@@ -4,6 +4,7 @@
 //! Buenas prácticas a 2026; si dudas de un dato que cambia con el tiempo,
 //! `web_search` antes de afirmar.
 
+#[allow(dead_code)]
 pub const PLAYBOOKS: &[(&str, &str, &str)] = &[
     (
         "layout y CSS moderno",

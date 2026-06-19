@@ -621,7 +621,7 @@
             FakeMentor::new((0..12).map(|_| FakeMentor::ok(pide_leer)).collect());
         let (out, _) = fake_turn(&fake, &dir, "n").await;
         assert!(matches!(out, TurnOutcome::Reply(_)));
-        assert_eq!(fake.inputs.borrow().len(), 8, "con 'n' el turno para en el presupuesto");
+        assert_eq!(fake.inputs.borrow().len(), 4, "con 'n' el turno para en el presupuesto");
     }
 
     #[tokio::test]
@@ -725,8 +725,8 @@
         let mut ask = |_: &str| -> Option<String> { panic!("en auto no se pregunta") };
         let mut ext = 0usize;
         // Por debajo del tope: amplía solo.
-        assert!(extend_rounds(&mut ask, 8, AutoMode::All, &mut budget, &mut ext));
-        assert_eq!(budget, 16);
+        assert!(extend_rounds(&mut ask, 4, AutoMode::All, &mut budget, &mut ext));
+        assert_eq!(budget, 8);
         assert_eq!(ext, 1);
         // En el tope duro: frena.
         assert!(!extend_rounds(&mut ask, AUTO_MAX_ROUNDS, AutoMode::All, &mut budget, &mut ext));
@@ -922,16 +922,10 @@
     }
 
     #[test]
-    fn subagent_preamble_aplica_la_identidad_del_rol() {
-        use crate::agent::roles::AgentRole;
+    fn subagent_preamble_incluye_reglas_de_solo_lectura() {
         let dir = tmp("sub-role");
-        // El rol elegido inyecta su identidad; el default es investigador.
-        let rev = subagent_preamble(&dir, "revisa fs/mod.rs", AgentRole::Reviewer);
-        assert!(rev.contains("REVISOR"), "debe llevar la identidad del revisor: {rev}");
-        let def = subagent_preamble(&dir, "x", AgentRole::parse(None));
-        assert!(def.contains("INVESTIGADOR"), "el default es investigador");
-        // En cualquier rol, las reglas de solo-lectura siguen presentes.
-        assert!(rev.contains("SOLO LECTURA") && def.contains("SOLO LECTURA"));
+        let preamble = subagent_preamble(&dir, "revisa fs/mod.rs");
+        assert!(preamble.contains("SOLO LECTURA"), "debe indicar solo lectura");
     }
 
     // ----- compactación de tool-outputs viejos -----

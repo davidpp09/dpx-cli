@@ -19,39 +19,19 @@ pub enum DpxCall {
     Delete { path: String },
     Run { command: String },
     WebSearch { query: String },
-    /// Lanza un subagente AISLADO de solo lectura para una tarea acotada; solo
-    /// su conclusión vuelve al agente principal (ahorra contexto). `role` elige
-    /// la especialidad (researcher por defecto); ver `agent::roles`.
     Spawn { task: String, role: Option<String> },
-    /// Diagnósticos REALES de un archivo vía language server (errores/warnings).
-    LspDiagnostics { path: String },
-    /// Referencias REALES (ground truth del compilador) a un símbolo, vía LSP.
-    FindReferences { path: String, line: usize, symbol: String },
-    /// Renombra un símbolo en TODO el proyecto vía LSP (refactor exacto).
-    RenameSymbol { path: String, line: usize, symbol: String, new_name: String },
     GitStatus,
     GitDiff { path: Option<String> },
     GitLog { n: Option<usize> },
     GitCommit { message: String },
-    /// Tool de un servidor MCP externo (prefijo `mcp__<server>__<tool>`).
-    McpTool { name: String, args: Value },
 }
 
 /// Las definiciones que se anuncian al modelo en cada petición.
-/// Fusiona las 15 tools nativas con las tools MCP cacheadas (si las hay).
 pub fn definitions() -> Vec<ToolDefinition> {
-    let mut defs = native_definitions();
-    for tool in crate::mcp::McpManager::cached_tools() {
-        defs.push(ToolDefinition {
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.input_schema,
-        });
-    }
-    defs
+    native_definitions()
 }
 
-/// Solo las 15 definiciones nativas, sin MCP.
+/// Solo las definiciones nativas.
 fn native_definitions() -> Vec<ToolDefinition> {
     fn def(name: &str, description: &str, props: Value, required: &[&str]) -> ToolDefinition {
         ToolDefinition {
@@ -138,69 +118,15 @@ fn native_definitions() -> Vec<ToolDefinition> {
         ),
         def(
             "spawn_agent",
-            &format!(
-                "Lanza un SUBAGENTE AISLADO para una tarea acotada de lectura/análisis. Corre en \
-                 el cerebro BARATO y en su PROPIO contexto: solo te devuelve su conclusión en \
-                 texto, sin llenar TU contexto con archivos largos (ahorra dinero y foco). \
-                 DELEGA de forma agresiva. Es de SOLO LECTURA: no escribe, edita, ejecuta ni \
-                 commitea — para ACTUAR usa tus propias herramientas a partir de su conclusión. \
-                 Elige el `role` adecuado: {roster}. Dale una tarea clara y autosuficiente \
-                 (incluye las rutas que ya conozcas; no comparte tu conversación).",
-                roster = crate::agent::roles::roster_blurb()
-            ),
+            "Lanza un SUBAGENTE AISLADO para una tarea acotada de lectura/análisis. Corre en \
+             el cerebro BARATO y en su PROPIO contexto: solo te devuelve su conclusión en \
+             texto, sin llenar TU contexto con archivos largos (ahorra dinero y foco). \
+             DELEGA de forma agresiva. Es de SOLO LECTURA. Dale una tarea clara y autosuficiente \
+             (incluye las rutas que ya conozcas; no comparte tu conversación).",
             json!({
                 "task": { "type": "string", "description": "La tarea, específica y autosuficiente, p.ej. 'Localiza dónde se valida el token JWT y resume el flujo'" },
-                "role": {
-                    "type": "string",
-                    "enum": crate::agent::roles::AgentRole::all().iter().map(|r| r.name()).collect::<Vec<_>>(),
-                    "description": "Especialidad del subagente (opcional; researcher por defecto)"
-                },
             }),
             &["task"],
-        ),
-        def(
-            "lsp_diagnostics",
-            "Devuelve los diagnósticos REALES (errores y warnings, con línea y columna) de un \
-             archivo según su language server (rust-analyzer, typescript-language-server, \
-             pyright, gopls). Es grounding de calidad de compilador SIN compilar el proyecto \
-             entero: úsala para verificar puntualmente un archivo que editaste o para ubicar un \
-             error con precisión. Si el language server no está instalado, te lo dice (no falla \
-             la tarea). Soporta .rs, .ts/.tsx, .js/.jsx, .py y .go.",
-            json!({ "path": path("Ruta relativa al archivo a diagnosticar, p.ej. src/main.rs") }),
-            &["path"],
-        ),
-        def(
-            "find_references",
-            "Encuentra TODAS las referencias a un símbolo (función, variable, tipo, método) en el \
-             proyecto usando el language server — ground truth del COMPILADOR, no texto. Mucho \
-             más fiable que search_project para esto: no trae falsos positivos (otra cosa con el \
-             mismo nombre) ni se pierde usos. ÚSALA antes de renombrar o borrar algo, para ver \
-             qué se rompería. Indica el archivo donde está el símbolo, la línea (1-based, la que \
-             ves al leer) y el NOMBRE del símbolo. Soporta .rs, .ts/.tsx, .js/.jsx, .py y .go; si \
-             el language server no está instalado te lo dice (no falla la tarea).",
-            json!({
-                "path": path("Archivo donde aparece el símbolo, p.ej. src/cli/chat/mod.rs"),
-                "line": { "type": "integer", "description": "Línea (1-based) donde está el símbolo en ese archivo" },
-                "symbol": { "type": "string", "description": "Nombre exacto del símbolo, p.ej. run_turn" },
-            }),
-            &["path", "line", "symbol"],
-        ),
-        def(
-            "rename_symbol",
-            "Renombra un símbolo (función, variable, tipo, método) en TODO el proyecto usando el \
-             language server: un refactor EXACTO calculado por el compilador, no un \
-             find-and-replace. Actualiza la declaración y TODAS sus referencias de forma \
-             consistente; el usuario verá un diff por archivo y confirma. ÚSALO en vez de editar \
-             a mano archivo por archivo cuando cambies el nombre de algo usado en varios sitios. \
-             Indica el archivo donde está el símbolo, la línea (1-based), su nombre ACTUAL y el \
-             NUEVO. Soporta .rs, .ts/.tsx, .js/.jsx, .py y .go.",
-            json!({
-                "path": path("Archivo donde aparece el símbolo, p.ej. src/lsp.rs"),
-                "line": { "type": "integer", "description": "Línea (1-based) donde está el símbolo" },
-                "symbol": { "type": "string", "description": "Nombre ACTUAL del símbolo, p.ej. run_turn" },
-                "new_name": { "type": "string", "description": "Nombre NUEVO, p.ej. ejecutar_turno" },
-            }),
-            &["path", "line", "symbol", "new_name"],
         ),
         def(
             "git_status",
@@ -234,14 +160,6 @@ fn native_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
-/// Extrae el argumento `line` (entero 1-based) con un error explicable si falta.
-fn line_arg(args: &Value, name: &str) -> Result<usize, String> {
-    args.get("line")
-        .and_then(Value::as_u64)
-        .map(|v| v as usize)
-        .ok_or_else(|| format!("falta el argumento `line` (entero) en la llamada a `{name}`"))
-}
-
 /// Valida y convierte una llamada cruda (nombre + argumentos JSON) en un
 /// [`DpxCall`]. El `Err` es un mensaje pensado para devolvérselo al modelo.
 pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
@@ -271,18 +189,6 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
             task: arg("task")?,
             role: args.get("role").and_then(Value::as_str).map(str::to_string),
         }),
-        "lsp_diagnostics" => Ok(DpxCall::LspDiagnostics { path: arg("path")? }),
-        "find_references" => Ok(DpxCall::FindReferences {
-            path: arg("path")?,
-            line: line_arg(args, name)?,
-            symbol: arg("symbol")?,
-        }),
-        "rename_symbol" => Ok(DpxCall::RenameSymbol {
-            path: arg("path")?,
-            line: line_arg(args, name)?,
-            symbol: arg("symbol")?,
-            new_name: arg("new_name")?,
-        }),
         "git_status" => Ok(DpxCall::GitStatus),
         "git_diff" => {
             let path = args.get("path").and_then(Value::as_str).map(str::to_string);
@@ -293,15 +199,10 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
             Ok(DpxCall::GitLog { n })
         }
         "git_commit" => Ok(DpxCall::GitCommit { message: arg("message")? }),
-        other if other.starts_with("mcp__") => Ok(DpxCall::McpTool {
-            name: other.to_string(),
-            args: args.clone(),
-        }),
         other => Err(format!(
             "herramienta desconocida: `{other}`. Las disponibles son: read_file, search_project, \
              write_file, edit_file, delete_file, run_command, web_search, spawn_agent, \
-             lsp_diagnostics, find_references, rename_symbol, git_status, git_diff, git_log, \
-             git_commit."
+             git_status, git_diff, git_log, git_commit."
         )),
     }
 }
@@ -313,7 +214,7 @@ mod tests {
     #[test]
     fn definiciones_completas_y_con_schema() {
         let defs = definitions();
-        assert!(defs.len() >= 13, "esperaba al menos 13 tools nativas");
+        assert!(defs.len() >= 9, "esperaba al menos 9 tools nativas");
         for d in &defs {
             assert!(!d.description.is_empty());
             assert_eq!(d.parameters["type"], "object");
@@ -358,40 +259,6 @@ mod tests {
             spawn_role,
             Ok(DpxCall::Spawn { task: "revisa fs/mod.rs".into(), role: Some("reviewer".into()) })
         );
-
-        // find_references: requiere path + line (entero) + symbol.
-        let refs = parse_call(
-            "find_references",
-            &json!({ "path": "src/lib.rs", "line": 42, "symbol": "run_turn" }),
-        );
-        assert_eq!(
-            refs,
-            Ok(DpxCall::FindReferences {
-                path: "src/lib.rs".into(),
-                line: 42,
-                symbol: "run_turn".into()
-            })
-        );
-        // line faltante → error explicable, no panic.
-        let sin_line = parse_call("find_references", &json!({ "path": "a.rs", "symbol": "x" })).unwrap_err();
-        assert!(sin_line.contains("line"));
-
-        // rename_symbol: path + line + symbol + new_name.
-        let rename = parse_call(
-            "rename_symbol",
-            &json!({ "path": "src/lsp.rs", "line": 10, "symbol": "foo", "new_name": "bar" }),
-        );
-        assert_eq!(
-            rename,
-            Ok(DpxCall::RenameSymbol {
-                path: "src/lsp.rs".into(),
-                line: 10,
-                symbol: "foo".into(),
-                new_name: "bar".into()
-            })
-        );
-        let sin_nuevo = parse_call("rename_symbol", &json!({ "path": "a.rs", "line": 1, "symbol": "x" })).unwrap_err();
-        assert!(sin_nuevo.contains("new_name"));
 
         let desconocida = parse_call("rm_rf", &json!({})).unwrap_err();
         assert!(desconocida.contains("desconocida"));

@@ -66,6 +66,7 @@ vive en `src/cli/editor.rs`. Hechos exactos de esa versión:
 /// Playbooks EMPOTRADOS de Rust: pasos A→B de las tareas que más se repiten,
 /// para que dpx no explore a ciegas y aplique la convención correcta.
 /// Se cargan cuando el focus activo es `rust`. (nombre, cuándo, pasos).
+#[allow(dead_code)]
 pub const PLAYBOOKS: &[(&str, &str, &str)] = &[
     (
         "crear CLI con clap",

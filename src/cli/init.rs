@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use crate::config::ProjectConfig;
 use crate::fs;
 use crate::focus;
-use crate::agent::Brain;
+use crate::agent::BRAIN_LABEL;
 use crate::focus::Mode;
 use crate::cli::AutoMode;
 use crate::ui;
@@ -29,7 +29,7 @@ use crate::ui;
 /// un proyecto que aún no tiene `.dpx/`. Es como `dpx init` pero el MODO ya lo
 /// fijó el subcomando (no se pregunta), y al terminar la sesión continúa.
 /// Devuelve la config guardada para que el REPL la adopte (focus + auto).
-pub fn onboarding(cwd: &Path, mode: Mode, brain: Brain) -> Result<ProjectConfig> {
+pub fn onboarding(cwd: &Path, mode: Mode) -> Result<ProjectConfig> {
     println!();
     println!("  {} primer arranque · vamos a configurar este proyecto", ui::accent("✻"));
     println!(
@@ -49,7 +49,7 @@ pub fn onboarding(cwd: &Path, mode: Mode, brain: Brain) -> Result<ProjectConfig>
 
     let config = ProjectConfig {
         focus: focus_id,
-        brain: brain.name().to_string(),
+        brain: "deepseek".to_string(),
         mode: mode.name().to_string(),
         auto,
     };
@@ -96,13 +96,12 @@ pub fn run(cwd: &Path) -> Result<()> {
 
     let stack = fs::detect_stack(cwd);
     let focus_id = step_focus(stack)?;
-    let brain = step_brain()?;
     let mode = step_mode()?;
     let auto = step_auto()?;
 
     let config = ProjectConfig {
         focus: focus_id.clone(),
-        brain: brain.name().to_string(),
+        brain: "deepseek".to_string(),
         mode: mode.name().to_string(),
         auto,
     };
@@ -119,7 +118,7 @@ pub fn run(cwd: &Path) -> Result<()> {
         .map(|id| focus::display_name(Some(id)))
         .unwrap_or("(general, sin stack específico)");
     println!("  {}   {}", ui::dim("enfoque"), focus_display);
-    println!("  {}    {}", ui::dim("cerebro"), brain.label());
+    println!("  {}    {}", ui::dim("cerebro"), BRAIN_LABEL);
     let mode_human = match mode {
         Mode::Code => "code (agente autónomo)",
         Mode::Hack => "hack (construir rápido con criterio)",
@@ -130,7 +129,7 @@ pub fn run(cwd: &Path) -> Result<()> {
     println!("  {}   {}   {}", ui::dim("auto"), ui::accent(auto_label), ui::dim("· /auto para cambiar"));
     println!();
     println!("  {}", ui::dim("Puedes cambiarlo en cualquier momento desde el REPL"));
-    println!("  {}  {}", ui::dim("con /focus, /brain, /mode, /auto, o volviendo a ejecutar"), ui::accent("dpx init"));
+    println!("  {}  {}", ui::dim("con /focus, /mode, /auto, o volviendo a ejecutar"), ui::accent("dpx init"));
     println!();
 
     Ok(())
@@ -204,51 +203,7 @@ fn step_focus(detected: Option<&str>) -> Result<Option<String>> {
     Ok(chosen)
 }
 
-/// Paso 2: cerebro por defecto.
-fn step_brain() -> Result<Brain> {
-    println!();
-    println!("{}", ui::accent("⏺ 2. Cerebro por defecto"));
-
-    let brains = Brain::all();
-    let default = if brains[0].has_key() { brains[0] } else { brains.iter().find(|b| b.has_key()).copied().unwrap_or(brains[0]) };
-
-    println!("  {}", ui::dim("Cerebros disponibles:"));
-    for b in &brains {
-        let active_mark = if *b == default { ui::accent("● ") } else { ui::dim("○ ") };
-        let key_str = if b.has_key() { ui::accent("✓ key") } else { ui::dim("✗ key") };
-        println!("    {} {:<9} {}   {}", active_mark, b.name(), key_str, ui::dim(b.capability()));
-    }
-    println!();
-
-    let answer = read_with_default(
-        &format!("  Cerebro [{}]: ", default.name()),
-        default.name(),
-    )?;
-
-    let chosen = Brain::parse(&answer).unwrap_or_else(|| {
-        eprintln!(
-            "  {} '{}' no reconocido, usando {}",
-            ui::dim("⚠"),
-            answer,
-            default.name()
-        );
-        default
-    });
-
-    if !chosen.has_key() {
-        println!(
-            "  {} No hay API key para {} en tu .env (variable {}).",
-            ui::dim("⚠"),
-            chosen.label(),
-            chosen.env_var()
-        );
-        println!("    Puedes cambiarlo luego con /brain en el REPL.");
-    }
-
-    Ok(chosen)
-}
-
-/// Paso 3: modo.
+/// Paso 2: modo.
 fn step_mode() -> Result<Mode> {
     println!();
     println!("{}", ui::accent("⏺ 3. Modo de trabajo"));
@@ -283,14 +238,6 @@ fn step_auto() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn brain_parse_coincide_con_router() {
-        // dpx usa solo DeepSeek; cualquier otro nombre no resuelve.
-        assert!(matches!(Brain::parse("deepseek"), Some(Brain::Deepseek)));
-        assert!(Brain::parse("kimi").is_none());
-        assert!(Brain::parse("claude").is_none());
-    }
 
     #[test]
     fn config_defaults_son_consistentes() {

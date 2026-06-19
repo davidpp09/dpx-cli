@@ -228,11 +228,6 @@ pub fn term_width() -> usize {
         .clamp(40, 100)
 }
 
-/// Regla horizontal del ancho de la terminal, con degradado dinámico.
-pub fn rule() -> String {
-    grad(&"─".repeat(term_width()))
-}
-
 /// Ancho visible de una cadena, ignorando las secuencias ANSI (para padding).
 pub(crate) fn visible_width(s: &str) -> usize {
     let mut width = 0;
@@ -252,7 +247,7 @@ pub(crate) fn visible_width(s: &str) -> usize {
     width
 }
 
-/// Logo de inicio (bloques estilo "ANSI Shadow") en color de acento.
+/// Logo de inicio con version.
 pub fn logo() {
     const ART: &str = "\
 ██████╗ ██████╗ ██╗  ██╗
@@ -265,46 +260,32 @@ pub fn logo() {
     let last = lines.len().saturating_sub(1).max(1);
     println!();
     for (i, line) in lines.iter().enumerate() {
-        // Degradado VERTICAL: el color baja del extremo claro al oscuro por fila.
         let color = lerp_rgb(grad_from(), grad_to(), i as f64 / last as f64);
         println!("  {}", rgb(line, color));
     }
+    println!("  {} — v{}", dim("tu mentor senior en la terminal"), env!("CARGO_PKG_VERSION"));
+    println!();
 }
 
 /// Banner de arranque al detectar el stack de un proyecto nuevo.
 pub fn detected_banner(stack: &str) {
-    println!("\n  {} proyecto detectado: {}", accent("⏺"), accent(stack));
+    println!("  {} {}", accent("stack"), stack);
 }
 
 /// Banner de arranque al retomar un proyecto con contexto previo.
 pub fn resume_banner(project: &str, last_step: &str) {
-    println!("\n  {} retomando: {} · {}", accent("⏺"), accent(project), last_step);
+    println!("  {} {} · {}", accent("retomando"), project, dim(last_step));
 }
 
-/// Cartel de arranque PROPIO de cada modo: deja claro en cuál estás y qué
-/// esperar. Se pinta al iniciar la sesión y se reúsa el color del tema activo.
+/// Banner de arranque: una linea por modo.
 pub fn mode_banner(mode: crate::focus::Mode) {
     use crate::focus::Mode;
-    let (title, l1, l2) = match mode {
-        Mode::Code => (
-            "modo code activado",
-            "hago el trabajo: escribo, ejecuto y corrijo hasta dejarlo funcionando.",
-            "pídeme una tarea y voy a ello · /modo para cambiar de modo.",
-        ),
-        Mode::Hack => (
-            "modo hack activado",
-            "construyo rápido y con criterio: lo imprescindible que corre ya, sin chapuza.",
-            "cuéntame qué quieres montar · /comité <idea> para evaluarla con un comité.",
-        ),
-        Mode::Learn => (
-            "modo learn activado",
-            "te hago pensar y te enseño el porqué — tú escribes, yo te guío.",
-            "mira tu avance cuando quieras con /progreso · /temario para el plan.",
-        ),
+    let (emoji, desc) = match mode {
+        Mode::Code => ("◆", "code · yo hago el trabajo, tu decides"),
+        Mode::Hack => ("⚡", "hack · velocidad con criterio"),
+        Mode::Learn => ("●", "learn · tu escribes, yo te guio"),
     };
-    println!("\n  {}", grad(title));
-    println!("  {}", dim(l1));
-    println!("  {}", dim(l2));
+    println!("{} {}", accent(emoji), dim(desc));
 }
 
 /// Dibuja una caja redondeada con bordes ╭─╮ ╰─╯ usando el color indicado.
@@ -425,27 +406,20 @@ pub fn format_input_status(
     brain: &str,
     auto: crate::cli::AutoMode,
 ) -> String {
-    let badge = |label: &str, val: &str| format!("{} {}", dim(label), grad(val));
-    let sep = dim(" · ");
     let mut bar = format!(
-        "  {}{sep}{}{sep}{}",
-        badge("focus", focus),
-        badge("mode", mode),
-        badge("brain", brain),
+        "{}  {}  {}",
+        accent(focus),
+        dim(mode),
+        dim(brain),
     );
     if auto != crate::cli::AutoMode::Off {
-        bar.push_str(&format!("{sep}{} {}", grad("auto"), dim(auto.label())));
-    }
-    // Truncar al ancho real de la terminal (con margen mínimo); si la barra
-    // es más larga, se corta el excedente para que no desborde la línea.
-    let max_w = real_term_width().saturating_sub(2);
-    if visible_width(&bar) > max_w {
-        bar = truncate_visible(&bar, max_w);
+        bar.push_str(&format!("  {}", dim(&format!("auto:{}", auto.label()))));
     }
     bar
 }
 
 /// Trunca una cadena CON códigos ANSI a un ancho VISIBLE máximo.
+#[allow(dead_code)]
 fn truncate_visible(s: &str, max_visible: usize) -> String {
     let mut out = String::new();
     let mut visible = 0;
@@ -474,6 +448,7 @@ fn truncate_visible(s: &str, max_visible: usize) -> String {
 
 /// Ancho real de la terminal (sin el clamp estético de `term_width`), para
 /// el wrapping del área de entrada.
+#[allow(dead_code)]
 pub fn real_term_width() -> usize {
     termimad::crossterm::terminal::size()
         .map(|(w, _)| w as usize)
@@ -481,123 +456,13 @@ pub fn real_term_width() -> usize {
         .max(1)
 }
 
-/// Caja de bienvenida con bordes redondeados.
+/// Caja de bienvenida compacta, sin bordes.
 pub fn welcome(focus: &str, mode: &str, brain: &str, cwd: &str) {
-    let lines = vec![
-        format!("{} {}", grad("✻"), grad("dpx · tu mentor senior en la terminal")),
-        String::new(),
-        format!("{}   {focus}", dim("enfoque")),
-        format!("{}      {mode}    {}  {brain}", dim("modo"), dim("cerebro")),
-        format!("{}   {cwd}", dim("carpeta")),
-    ];
-
-    draw_box(&lines, grad, None);
-}
-
-/// Panel de hooks (comando `/hooks`): muestra los hooks cargados desde
-/// `.dpx/hooks.toml` con su evento, comando y filtro de tools.
-pub fn hooks_panel(hooks: &[crate::cli::hooks::Hook]) {
-    use crate::cli::hooks::HookEvent;
-
-    let mut lines: Vec<String> = vec![grad("hooks del proyecto"), String::new()];
-
-    if hooks.is_empty() {
-        lines.push(dim("  (sin hooks configurados)"));
-        lines.push(String::new());
-        lines.push(dim(
-            "  crea .dpx/hooks.toml con [[hooks]] para definir comandos automáticos.",
-        ));
-        draw_box(&lines, grad, None);
-        return;
-    }
-
-    for hook in hooks {
-        let icon = match hook.event {
-            HookEvent::PreCommit => "⚠",
-            _ => "⚡",
-        };
-        let event_label = hook.event.as_str();
-        let cmd_short: String = hook.command.chars().take(56).collect();
-        let mut line = format!(
-            "  {} {}  {}",
-            accent(icon),
-            accent(event_label),
-            dim(&cmd_short),
-        );
-        if let Some(ref tools) = hook.tools {
-            let tools_str = tools.join(", ");
-            let tools_short: String = tools_str.chars().take(40).collect();
-            line.push_str(&format!("  {}", dim(&format!("→ {tools_short}"))));
-        }
-        lines.push(line);
-    }
-
-    lines.push(String::new());
-    lines.push(dim("PreCommit veta el commit si falla · los demás son best-effort."));
-
-    draw_box(&lines, grad, None);
-}
-
-/// Dashboard de proyecto (comando `/panel`): 3 tarjetas de modo con el color
-/// de su propia identidad visual (code azul, hack ámbar, learn verde), más un
-/// contador de recuerdos y skills del agente. Todo centrado en una caja.
-pub fn project_panel(
-    has_context: bool,
-    plan_progress: Option<(usize, usize)>, // (hechas, total)
-    skills_dominados: usize,
-    skills_total: usize,
-    recuerdos: usize,
-    agent_skills: usize,
-) {
-    // ── colores de identidad FIJA de cada modo (no el tema activo) ──
-    let mode_accent = |r: u8, g: u8, b: u8, s: &str| -> String {
-        format!("\x1b[38;2;{r};{g};{b}m{s}{RESET}")
-    };
-    let (cr, cg, cb) = (74u8, 144u8, 226u8); // code — azul
-    let (hr, hg, hb) = (224u8, 138u8, 38u8); // hack — ámbar
-    let (lr, lg, lb) = (76u8, 175u8, 110u8); // learn — verde
-
-    // ── tarjeta code ──
-    let code_header = mode_accent(cr, cg, cb, "code");
-    let code_status = if has_context {
-        "contexto guardado · listo para construir"
-    } else {
-        "sin contexto aún · inicia una tarea"
-    };
-
-    // ── tarjeta hack ──
-    let hack_header = mode_accent(hr, hg, hb, "hack");
-    let hack_status = match plan_progress {
-        Some((done, total)) => {
-            let pct = done.checked_mul(100).and_then(|n| n.checked_div(total)).unwrap_or(0);
-            format!("plan {done}/{total} ({pct}%) · en marcha")
-        }
-        None => "sin plan · lanza una idea en modo hack".to_string(),
-    };
-
-    // ── tarjeta learn ──
-    let learn_header = mode_accent(lr, lg, lb, "learn");
-    let learn_status = if skills_total > 0 {
-        let resto = skills_total.saturating_sub(skills_dominados);
-        format!("{skills_total} conceptos · {skills_dominados} dominados · {resto} por repasar")
-    } else {
-        "sin skills aún · explora en modo learn".to_string()
-    };
-
-    let lines: Vec<String> = vec![
-        grad("panel del proyecto"),
-        String::new(),
-        format!("  {code_header}   {}", dim(code_status)),
-        format!("  {hack_header}   {}", dim(&hack_status)),
-        format!("  {learn_header}  {}", dim(&learn_status)),
-        String::new(),
-        dim(&format!(
-            "{} recuerdos · {} skills del agente",
-            recuerdos, agent_skills
-        )),
-    ];
-
-    draw_box(&lines, grad, None);
+    println!();
+    println!("  {}  {}", accent("enfoque"), focus);
+    println!("  {}    {}", dim("modo"), mode);
+    println!("  {}  {}", dim("cerebro"), brain);
+    println!("  {}    {}", dim("carpeta"), cwd);
 }
 
 /// Vista del modo hack: resumen del proyecto, enfoque activo, ideas del
@@ -730,9 +595,9 @@ pub fn print_markdown(skin: &MadSkin, label: &str, markdown: &str) {
     skin.print_text(markdown);
 }
 
-/// Cabecera de una respuesta del mentor.
+/// Cabecera limpia de respuesta.
 pub fn reply_header() {
-    println!("\n{}", accent("⏺ dpx"));
+    println!("\n{}", accent("│"));
 }
 
 /// Renderiza el cuerpo de una respuesta: la prosa con termimad (tablas, headers…)
@@ -888,12 +753,13 @@ pub fn checklist(items: &[(bool, String)]) {
     }
 }
 
-/// Línea de acción "leyendo archivo" en color de acento (estilo Claude Code).
+/// Accion "leyendo archivo" con arbol.
 pub fn action_read(path: &str) {
-    println!("{}", accent(&format!("  ⎁ leyendo {path}")));
+    println!("{}", dim(&format!("  │ leyendo {path}")));
 }
 
 /// Formatea una duración de forma compacta: `0.4s`, `1.3s`, `2m 3s`.
+#[allow(dead_code)]
 pub fn fmt_elapsed(d: Duration) -> String {
     let secs = d.as_secs_f64();
     if secs < 60.0 {
@@ -905,9 +771,8 @@ pub fn fmt_elapsed(d: Duration) -> String {
     }
 }
 
-/// Línea de cierre de una acción ejecutada, con cuánto tardó (estilo `⎿`).
 pub fn action_time(d: Duration) {
-    println!("{}", dim(&format!("  ⎿ completado en {}", fmt_elapsed(d))));
+    println!("{}", dim(&format!("  │ {:.1}s", d.as_secs_f64())));
 }
 
 /// Envuelve texto plano a un ancho dado (por palabras), para los paneles.
@@ -981,6 +846,7 @@ pub fn danger_panel(title: &str, body: &str) {
     println!("{}", red(&format!("╰{}╯", "─".repeat(w + 2))));
 }
 
+#[allow(dead_code)]
 pub fn diagnostic_panel(hint: &str, suggestions: &[String]) {
     let warning_color = "\x1b[38;2;245;184;66m"; // Naranja amarillento
     println!("\n{} dpx diagnóstico automático {}", warning_color, RESET);
@@ -1174,54 +1040,6 @@ pub fn status_panel(
     );
 }
 
-/// Lista los playbooks curados del proyecto (`skills/*.md`, comando `/skills`).
-pub fn skills_list(skills: &[&crate::agent_skill::AgentSkill]) {
-    if skills.is_empty() {
-        println!("\n{}", accent("⏺ skills del proyecto"));
-        println!(
-            "  {}",
-            dim("aún ninguno · crea un .md en skills/ con los pasos de una tarea que se repita")
-        );
-        return;
-    }
-    println!(
-        "\n{} {}",
-        accent("⏺ skills del proyecto"),
-        dim(&format!("· {} playbooks curados · edítalos en skills/", skills.len()))
-    );
-    println!();
-    for s in skills {
-        let stack = if s.focus.is_empty() { String::new() } else { format!(" · {}", s.focus) };
-        println!("  {} {}", accent(&format!("• {}", s.name)), dim(&stack));
-        // "Cuándo se usa" (frase de disparo), si la trae.
-        if !s.when.trim().is_empty() {
-            println!("     {}", dim(&format!("cuándo: {}", s.when)));
-        }
-        // Cuerpo recortado a una línea para la vista de lista.
-        let body = s.body.replace('\n', " ");
-        let body: String = body.chars().take(96).collect();
-        if !body.trim().is_empty() {
-            println!("     {}", dim(&body));
-        }
-    }
-    println!("\n  {}", dim("dpx las recupera por significado y las aplica cuando encajan con tu tarea"));
-}
-
-/// "Doctor" de skills (parte de `/skills`): muestra problemas de salud del
-/// catálogo — gatillos vacíos, cuerpos triviales y, lo más útil con muchos
-/// skills, pares cuyos gatillos colisionan (dpx dispararía el equivocado).
-pub fn skills_doctor(warnings: &[String]) {
-    if warnings.is_empty() {
-        println!("  {}", dim("⏺ doctor: catálogo sano · sin gatillos en colisión"));
-        return;
-    }
-    println!("\n  {}", accent("⏺ doctor de skills"));
-    for w in warnings {
-        println!("  {} {}", red("⚠"), dim(w));
-    }
-    println!("  {}", dim("afina el «cuando» de los que colisionan para que dpx dispare el correcto"));
-}
-
 /// Lista de cerebros con su superpoder (comando `/models`).
 pub fn models_list(brains: &[BrainRow]) {
     println!("\n{}", accent("⏺ cerebros · /cerebro <id> para cambiar"));
@@ -1241,13 +1059,10 @@ pub fn print_help(mode: crate::focus::Mode) {
     // (comando, descripción, modos donde aplica — vacío = global).
     let rows: &[(&str, &str, &[Mode])] = &[
         ("/ayuda", "esta ayuda", &[]),
-        ("/panel", "dashboard del proyecto: contexto, plan, skills y recuerdos", &[]),
         ("/estado", "estado de la sesión: config, cerebros y memoria", &[]),
         ("/costo", "tokens reales gastados en la sesión + % de caché y costo aprox", &[]),
         ("/presupuesto [N]", "tope de tokens de la sesión (ej. /presupuesto 100k)", &[]),
         ("/modelos", "lista los cerebros y cuál tiene API key", &[]),
-        ("/cambios", "muestra todo lo que dpx cambió en la sesión", &[Mode::Code, Mode::Hack]),
-        ("/deshacer", "deshace los cambios de archivos del último turno", &[Mode::Code, Mode::Hack]),
         ("/limpiar", "reinicia la conversación (olvida esta sesión)", &[]),
         ("/compactar", "resume la conversación para liberar contexto", &[]),
         ("/comité <idea>", "convoca al comité (4 roles) a evaluar tu idea", &[Mode::Hack]),
@@ -1257,9 +1072,6 @@ pub fn print_help(mode: crate::focus::Mode) {
         ("/progreso", "tu progreso de aprendizaje: nivel por tema y qué repasar", &[Mode::Learn]),
         ("/temario", "el temario del stack y cuánto llevas", &[Mode::Learn]),
         ("/examen [tema]", "el tutor te interroga para fijar lo aprendido", &[Mode::Learn]),
-        ("/recordar <texto>", "guarda algo en memoria de largo plazo", &[]),
-        ("/habilidades", "playbooks curados del proyecto (skills/*.md)", &[Mode::Code, Mode::Hack]),
-        ("/hooks", "hooks del proyecto (.dpx/hooks.toml): ver y gestionar", &[]),
         ("/cerebro [modelo]", "cerebro (dpx usa solo deepseek)", &[]),
         ("/auto [off|all]", "modo autónomo: cambios sin preguntar", &[Mode::Code, Mode::Hack]),
         ("/actualizar", "recompila e instala dpx desde este repo", &[]),

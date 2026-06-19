@@ -29,18 +29,6 @@ pub struct Turn {
     pub text: String,
 }
 
-/// Un comando slash personalizado definido por el proyecto en
-/// `.dpx/commands.toml`.
-#[derive(Debug, Clone)]
-pub struct CustomCommand {
-    pub name: String,
-    pub description: String,
-    /// El prompt que se inyecta al modelo como tarea.
-    pub prompt: String,
-    /// Si requiere confirmación explícita del usuario antes de lanzarlo.
-    pub confirm: bool,
-}
-
 /// Maneja el directorio `.dpx/` del proyecto actual.
 pub struct ProjectStore {
     root: PathBuf,
@@ -103,11 +91,6 @@ impl ProjectStore {
         Ok(())
     }
 
-    /// Ruta de la carpeta `.dpx/` del proyecto (para la memoria semántica).
-    pub fn dpx_dir(&self) -> &std::path::Path {
-        &self.root
-    }
-
     /// Lee las habilidades aprendidas (modo learn), si las hay.
     pub fn read_skills(&self) -> Vec<crate::skill::Skill> {
         match fs::read_to_string(self.root.join("skills.md")) {
@@ -147,54 +130,7 @@ impl ProjectStore {
         Ok(())
     }
 
-    /// Carga los hooks del proyecto desde `.dpx/hooks.toml`.
-    pub fn load_hooks(&self) -> Vec<crate::cli::hooks::Hook> {
-        crate::cli::hooks::load_hooks(&self.root)
-    }
-
     /// El directorio raíz del proyecto (padre de `.dpx/`).
-    pub fn project_dir(&self) -> &Path {
-        self.root.parent().unwrap_or(Path::new("."))
-    }
-
-    /// Carga los comandos slash personalizados desde `.dpx/commands.toml`.
-    /// Formato:
-    /// ```toml
-    /// [commands.test]
-    /// description = "Ejecuta los tests y diagnostica"
-    /// prompt = "Ejecuta los tests, analiza los fallos y corrígelos"
-    /// confirm = false  # opcional, por defecto false
-    /// ```
-    pub fn load_custom_commands(&self) -> Vec<CustomCommand> {
-        let path = self.root.join("commands.toml");
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
-        };
-        let parsed: toml::Value = match toml::from_str(&content) {
-            Ok(v) => v,
-            Err(_) => return Vec::new(),
-        };
-        let Some(cmds) = parsed.get("commands").and_then(|c| c.as_table()) else {
-            return Vec::new();
-        };
-        cmds.iter()
-            .filter_map(|(name, def)| {
-                let desc = def.get("description")?.as_str()?.to_string();
-                let prompt = def.get("prompt")?.as_str()?.to_string();
-                let confirm = def
-                    .get("confirm")
-                    .and_then(|c| c.as_bool())
-                    .unwrap_or(false);
-                Some(CustomCommand {
-                    name: name.clone(),
-                    description: desc,
-                    prompt,
-                    confirm,
-                })
-            })
-            .collect()
-    }
 
     /// Comandos que el usuario marcó como "permitir siempre" en este proyecto
     /// (`.dpx/allowed_commands`, uno por línea, coincidencia exacta).

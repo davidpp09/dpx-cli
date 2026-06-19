@@ -86,6 +86,7 @@ Modelas con soltura entidades comunes y sus relaciones reales: User, Product, Or
 /// Playbooks EMPOTRADOS de Spring Boot: pasos A→B de las tareas que más se
 /// repiten, para que dpx no explore a ciegas y aplique la convención correcta.
 /// Se cargan cuando el focus activo es `spring-boot`. (nombre, cuándo, pasos).
+#[allow(dead_code)]
 pub const PLAYBOOKS: &[(&str, &str, &str)] = &[
     (
         "crear endpoint REST",

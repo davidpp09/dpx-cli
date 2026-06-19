@@ -19,8 +19,8 @@ pub fn project_tree(root: &Path) -> String {
 fn tree_walk(dir: &Path, prefix: &str, depth: usize, out: &mut String, count: &mut usize) {
     // Profundo a propósito: los paquetes Java anidan mucho (src/main/java/com/app/…),
     // y si cortamos pronto el modelo no ve los archivos .java reales.
-    const MAX_DEPTH: usize = 10;
-    const MAX_ENTRIES: usize = 300;
+    const MAX_DEPTH: usize = 6;
+    const MAX_ENTRIES: usize = 120;
     if depth > MAX_DEPTH {
         return;
     }

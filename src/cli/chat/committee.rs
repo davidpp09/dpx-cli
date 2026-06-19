@@ -70,7 +70,7 @@ pub(crate) async fn run_committee(cwd: &Path, idea: &str) -> String {
     for role in &roles {
         println!("{} · {}", ui::accent("  comité"), ui::dim(role.label));
         let task = crate::focus::committee::role_task(role, idea);
-        let contrib = run_subagent(cwd, &task, None).await;
+        let contrib = run_subagent(cwd, &task).await;
         contributions.push((role.label.to_string(), contrib));
     }
 
@@ -80,5 +80,5 @@ pub(crate) async fn run_committee(cwd: &Path, idea: &str) -> String {
         synth = ui::dim("sintetizando aportes…")
     );
     let synthesis_task = crate::focus::committee::synthesis_prompt(&contributions, idea);
-    run_subagent(cwd, &synthesis_task, None).await
+    run_subagent(cwd, &synthesis_task).await
 }

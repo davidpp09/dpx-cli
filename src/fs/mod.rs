@@ -237,8 +237,7 @@ pub fn strip_action_blocks(text: &str) -> String {
                 || parse_delete_marker(info).is_some()
                 || is_run_fence(info)
                 || is_plan_fence(info)
-                || crate::skill::is_skill_fence(info)
-                || crate::agent_skill::is_learned_fence(info);
+                || crate::skill::is_skill_fence(info);
             let on_next = lines.peek().is_some_and(|n| {
                 parse_path_marker(n).is_some()
                     || parse_read_marker(n).is_some()
@@ -248,7 +247,6 @@ pub fn strip_action_blocks(text: &str) -> String {
                     || is_run_fence(n)
                     || is_plan_fence(n)
                     || crate::skill::is_skill_fence(n)
-                    || crate::agent_skill::is_learned_fence(n)
             });
             if on_fence || on_next {
                 // Saltar el bloque entero hasta el cierre ```.
@@ -404,8 +402,6 @@ pub fn safe_target(project_root: &Path, rel: &str) -> Result<PathBuf> {
 /// Escribe el archivo en disco, creando los directorios padres necesarios.
 pub fn apply(project_root: &Path, write: &FileWrite) -> Result<PathBuf> {
     let target = safe_target(project_root, &write.path)?;
-    // Snapshot del estado anterior (para `/undo`) ANTES de sobrescribir.
-    crate::checkpoint::record_before(&target);
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| anyhow!("no pude crear {}: {e}", parent.display()))?;
@@ -558,8 +554,6 @@ pub fn parse_searches(text: &str) -> Vec<String> {
 pub fn delete_file(project_root: &Path, rel: &str) -> Result<()> {
     let target = safe_target(project_root, rel)?;
     if target.exists() {
-        // Snapshot del contenido ANTES de borrar (para `/undo`).
-        crate::checkpoint::record_before(&target);
         fs::remove_file(&target)
             .map_err(|e| anyhow::anyhow!("no pude borrar {}: {}", target.display(), e))?;
     }

@@ -13,7 +13,7 @@ use rig_core::completion::message::{ToolResultContent, UserContent};
 
 use super::editor::{InputEditor, ReadResult};
 use crate::agent::tools::{self, DpxCall};
-use crate::agent::{Brain, ChatReply, Mentor, ModelRouter};
+use crate::agent::{ChatReply, Mentor, ModelRouter};
 use crate::cli::AutoMode;
 use crate::focus::{self, Mode};
 use crate::session::{self, ProjectStore, Turn};
@@ -24,10 +24,9 @@ mod actions;
 mod commands;
 mod recall;
 mod committee;
-mod review;
 pub(crate) use actions::*;
-pub(crate) use commands::{build_quiz_prompt, handle_command, remember};
-pub(crate) use recall::{maybe_auto_delegate, recall_context, recall_skills, run_subagent};
+pub(crate) use commands::{build_quiz_prompt, handle_command};
+pub(crate) use recall::{maybe_auto_delegate, run_subagent};
 #[cfg(test)]
 pub(crate) use recall::{classify_delegation, subagent_preamble, subagent_tool};
 pub(crate) use committee::run_comite_command;
@@ -35,16 +34,13 @@ pub(crate) use helpers::{
     canonical_cmd, command_in_mode, mode_label, mode_label_compact, reject_command, short_path,
 };
 
-/// El cerebro con el que lanzar un subagente: DeepSeek si tiene API key (el
-/// subagente investiga; necesita un cerebro vivo).
-fn subagent_brain() -> Option<Brain> {
-    Brain::all().into_iter().find(|b| b.has_key())
+fn has_deepseek_key() -> bool {
+    crate::agent::has_key()
 }
 
 pub async fn run(
     focus: Option<String>,
     mode: Mode,
-    brain: Brain,
     auto: AutoMode,
 ) -> Result<()> {
     let cwd = env::current_dir()?;
@@ -65,7 +61,7 @@ pub async fn run(
     // fijó el subcomando. Adopta el focus/auto elegidos. Sin `.dpx` no hay
     // memoria previa, así que `prior = None` y no se corre `startup_flow`.
     let (focus_id, prior) = if fresh_project {
-        let cfg = crate::cli::init::onboarding(&cwd, mode, brain)?;
+        let cfg = crate::cli::init::onboarding(&cwd, mode)?;
         auto = AutoMode::parse(&cfg.auto).unwrap_or(auto);
         (focus.or(cfg.focus), None)
     } else {
@@ -86,8 +82,7 @@ pub async fn run(
     // Estado mutable de la sesión (los comandos pueden cambiarlo en caliente).
     let mut focus_id = focus_id;
     let mut mode = mode;
-    let mut brain = brain;
-    let mut router = ModelRouter::new(brain);
+    let mut router = ModelRouter::new();
     let mut mentor = build_mentor(&router, focus_id.as_deref(), mode, prior.as_deref())?;
 
     ui::welcome(
@@ -125,13 +120,8 @@ pub async fn run(
     }
     println!(
         "\n{}",
-        ui::dim("escribe tu mensaje · @archivo lee código · Shift+Enter salto de línea · Ctrl-C cancela · /salir")
+        ui::dim("@archivo para leer código · \\ al final para multilínea · /salir para terminar")
     );
-
-    // Hooks del proyecto (.dpx/hooks.toml): se disparan ante eventos del ciclo
-    // de vida. OnSessionStart se ejecuta aquí, al inicio.
-    let hooks = store.load_hooks();
-    crate::cli::hooks::run_hooks(&hooks, &crate::cli::hooks::HookEvent::OnSessionStart, None, &cwd);
 
     let mut history: Vec<Message> = Vec::new();
     let mut turns: Vec<Turn> = Vec::new();
@@ -161,44 +151,15 @@ pub async fn run(
         );
     }
 
-    // Memoria semántica de largo plazo. El store se carga barato (lee el jsonl);
-    // el motor de embeddings se carga PEREZOSAMENTE solo si de verdad se usa
-    // (primer /recordar o primera recuperación con memoria existente), para no
-    // penalizar el arranque de quien no usa la memoria.
-    let mut mem_store = crate::memory::MemoryStore::load(store.dpx_dir());
-    let mut embedder: Option<crate::memory::Embedder> = None;
-
-    // Skills del proyecto: CURADOS (`skills/*.md`, locales) + EMPOTRADOS del stack
-    // activo (vienen en dpx). Carga barata; el embedder solo si de verdad se usan.
-    let mut skillbook = crate::agent_skill::SkillBook::from_dir(&cwd.join("skills"));
-    skillbook.extend(
-        crate::focus::builtin_playbooks(focus_id.as_deref())
-            .iter()
-            .map(|(n, w, b)| {
-                crate::agent_skill::AgentSkill::builtin(n, w, b, focus_id.as_deref().unwrap_or(""))
-            })
-            .collect(),
-    );
-    // Playbooks GENERALES (arquitectura, CSS/UI, lógica de negocio): cross-stack,
-    // se cargan siempre y se inyectan cuando la petición encaja con alguno.
-    skillbook.extend(
-        crate::focus::general_playbooks()
-            .iter()
-            .map(|(n, w, b)| crate::agent_skill::AgentSkill::builtin(n, w, b, "general"))
-            .collect(),
-    );
-
     loop {
-        // De vuelta en el prompt: la pestaña muestra dpx en reposo.
         ui::title_idle(&proj_label);
-        let bar = ui::format_input_status(
-            focus::display_name(focus_id.as_deref()),
-            mode_label_compact(mode),
-            router.brain_label(),
-            auto,
+        let tag = format!(
+            "{} {}",
+            ui::dim(&focus::display_name(focus_id.as_deref()).replace(' ', "-").to_lowercase()),
+            ui::dim(mode_label_compact(mode)),
         );
 
-        match ed.read_input(&bar) {
+        match ed.read_input(&tag) {
             Ok(ReadResult::Line(line)) => {
                 let input = line.trim();
                 if input.is_empty() {
@@ -231,49 +192,6 @@ pub async fn run(
                     } else {
                         reject_command("comite", mode);
                     }
-                    continue;
-                }
-
-                // /recordar <texto>: guarda algo en la memoria de largo plazo. Se
-                // traerá solo cuando sea relevante a una consulta futura.
-                if single_line && let Some(text) = input.strip_prefix("/recordar ") {
-                    let text = text.trim();
-                    if text.is_empty() {
-                        println!("{}", ui::dim("uso: /recordar <algo que quieras que dpx recuerde>"));
-                    } else {
-                        match remember(text, &mut mem_store, &mut embedder, "nota") {
-                            Ok(()) => println!(
-                                "{}",
-                                ui::dim(&format!(
-                                    "⎿ recordado · {} en memoria · lo traeré cuando sea relevante",
-                                    mem_store.len()
-                                ))
-                            ),
-                            Err(e) => println!("{} {}", ui::dim("no pude recordar:"), ui::dim(&e.to_string())),
-                        }
-                    }
-                    continue;
-                }
-
-                // /skills: los playbooks del proyecto (curados + built-in del stack),
-                // y un DOCTOR que audita el catálogo con el propio motor de
-                // embeddings: gatillos vacíos, cuerpos triviales y colisiones de
-                // gatillo (dos skills tan parecidos que dpx dispararía el equivocado).
-                if single_line
-                    && matches!(input, "/habilidades" | "/skills" | "/skill")
-                {
-                    ui::skills_list(&skillbook.ranked());
-                    let mut warnings = skillbook.lint();
-                    if let Ok(engine) = ensure_embedder(&mut embedder) {
-                        skillbook.embed_pending(|t| engine.embed_one(t).ok());
-                        for (a, b, score) in skillbook.overlaps(0.90) {
-                            warnings.push(format!(
-                                "«{a}» ↔ «{b}» colisionan ({:.0}% de parecido)",
-                                score * 100.0
-                            ));
-                        }
-                    }
-                    ui::skills_doctor(&warnings);
                     continue;
                 }
 
@@ -316,37 +234,9 @@ pub async fn run(
                     if matches!(cmd, "salir" | "exit" | "q") {
                         break;
                     }
-                    // Comandos personalizados del proyecto (.dpx/commands.toml)
-                    let ccmds = store.load_custom_commands();
-                    if let Some(prompt) =
-                        super::commands::dispatch_custom_command(&ccmds, cmd).await
-                    {
-                        store.checkpoint("user", input)?;
-                        turns.push(Turn {
-                            role: "user",
-                            text: input.to_string(),
-                        });
-                        ui::clear_cancel();
-                        let outcome = run_turn(
-                            &mentor, &mut history, &cwd, &skin,
-                            &mut |p| ed.confirm_line(p), &store,
-                            &prompt, auto,
-                        ).await;
-                        match outcome {
-                            TurnOutcome::Reply(full) => {
-                                store.checkpoint("assistant", &full)?;
-                                turns.push(Turn { role: "assistant", text: full });
-                            }
-                            TurnOutcome::Empty => {}
-                            TurnOutcome::ModelFailed(err) => {
-                                ui::panel("⚠ error del modelo", &ui::friendly_error(&err));
-                            }
-                        }
-                        continue;
-                    }
                     handle_command(
                         cmd, &skin, &store, &prior, &mut router, &mut mentor, &mut focus_id,
-                        &mut mode, &mut brain, &mut auto, &mut history, &cwd,
+                        &mut mode, &mut auto, &mut history, &cwd,
                         turns.len(),
                     );
                     continue;
@@ -363,26 +253,7 @@ pub async fn run(
                 store.checkpoint("user", input)?;
                 turns.push(Turn { role: "user", text: input.to_string() });
 
-                // Memoria de largo plazo: recupera fragmentos relevantes a la
-                // consulta y los antepone al turno (si hay memoria y algo encaja).
-                let mut turn_input = match recall_context(input, &mem_store, &mut embedder) {
-                    Some(ctx) => {
-                        println!("{}", ui::dim("⎿ recordando contexto relevante…"));
-                        format!("{ctx}\n\n{input}")
-                    }
-                    None => input.to_string(),
-                };
-                // Skills curados (code/hack): trae los playbooks `skills/*.md`
-                // que encajan con la petición y los antepone para que dpx los
-                // siga paso a paso. En learn no aplica (no ejecuta).
-                if mode != Mode::Learn
-                    && let Some(sk) = recall_skills(input, &mut skillbook, &mut embedder)
-                {
-                    turn_input = format!("{sk}\n\n{turn_input}");
-                }
-                // Auto-delegación: si la petición es de investigación, un subagente
-                // FLASH (barato, contexto aislado) la resuelve y antepone su
-                // conclusión — el trabajo de lectura NO lo paga el cerebro caro.
+                let mut turn_input = input.to_string();
                 if mode != Mode::Learn
                     && let Some(research) = maybe_auto_delegate(input, &cwd).await
                 {
@@ -396,7 +267,7 @@ pub async fn run(
                 ui::clear_cancel();
                 // Snapshot del consumo ANTES del turno: el delta = lo que costó.
                 let tok_before = crate::token::totals();
-                let mut outcome = run_turn(
+                let outcome = run_turn(
                     &mentor,
                     &mut history,
                     &cwd,
@@ -409,37 +280,11 @@ pub async fn run(
                 .await;
                 if let TurnOutcome::ModelFailed(err) = &outcome {
                     let err = err.clone();
-                    if let Some(next) = fallback_brain(brain) {
-                        println!(
-                            "\n{} {} no responde → probando con {}",
-                            ui::accent("⏺"),
-                            router.brain_label(),
-                            next.label()
-                        );
-                        println!("  {}", ui::dim(&ui::friendly_error(&err)));
-                        let new_router = ModelRouter::new(next);
-                        match build_mentor(
-                            &new_router, focus_id.as_deref(), mode, prior.as_deref(),
-                        ) {
-                            Ok(m) => {
-                                router = new_router;
-                                mentor = m;
-                                brain = next;
-                                outcome = run_turn(
-                                    &mentor,
-                                    &mut history,
-                                    &cwd,
-                                    &skin,
-                                    &mut |p| ed.confirm_line(p),
-                                    &store,
-                                    &turn_input,
-                                    auto,
-                                )
-                                .await;
-                            }
-                            Err(e) => println!("{} {e}", ui::dim("no pude cambiar de cerebro:")),
-                        }
-                    }
+                    println!(
+                        "\n{} DeepSeek no responde",
+                        ui::accent("X")
+                    );
+                    println!("  {}", ui::dim(&ui::friendly_error(&err)));
                 }
                 match outcome {
                     TurnOutcome::Reply(full) => {
@@ -470,7 +315,7 @@ pub async fn run(
                 }
 
                 // Compactación automática al acercarse al límite de contexto.
-                if estimate_tokens(&history) > compact_threshold(brain) {
+                if estimate_tokens(&history) > compact_threshold() {
                     println!(
                         "\n{}",
                         ui::dim("el contexto se acerca al límite · compactando automáticamente")
@@ -491,7 +336,7 @@ pub async fn run(
         }
     }
 
-    close_session(&router, &store, &turns, prior.as_deref(), &mut mem_store, &mut embedder).await;
+    close_session(&router, &store, &turns, prior.as_deref()).await;
     // Devuelve el título de la pestaña a algo neutro al salir.
     ui::set_title("dpx");
     Ok(())
@@ -590,7 +435,7 @@ fn ask_continue() -> bool {
 /// itera). Al agotarse, el turno NO muere: se le pregunta al usuario si dpx
 /// sigue (checkpoint humano) y el presupuesto se amplía en bloques de este
 /// tamaño. En modo auto se amplía solo, hasta [`AUTO_MAX_ROUNDS`].
-const MAX_TURN_ROUNDS: usize = 8;
+const MAX_TURN_ROUNDS: usize = 4;
 
 /// Tope duro de rondas en modo auto (sin humano que frene, algo tiene que hacerlo).
 const AUTO_MAX_ROUNDS: usize = 32;
@@ -605,12 +450,7 @@ const MAX_STREAM_RETRIES: usize = 2;
 /// que un falso "listo"). No queremos un bucle infinito contra un fallo real.
 const GATE_MAX_FORCED: usize = 3;
 
-/// Rondas EXTRA que el gate de AUTORREVISIÓN fuerza cuando el revisor encuentra
-/// problemas P0/P1. Acotado para no ciclar contra un revisor exigente: tras
-/// estos intentos se cierra (el humano del modo auto verá el último estado).
-const SELF_REVIEW_MAX_ROUNDS: usize = 2;
-
-/// Resultado de un turno completo.
+/// Rondas EXTRA
 enum TurnOutcome {
     /// Respuesta (posiblemente parcial) del asistente, para memoria.
     Reply(String),
@@ -624,8 +464,8 @@ enum TurnOutcome {
 /// Umbral de compactación automática: al superar el 75% de la ventana del
 /// cerebro ACTIVO, el historial se resume con el modelo barato. Depende del
 /// cerebro (DeepSeek: 128k).
-fn compact_threshold(brain: Brain) -> usize {
-    brain.context_budget() * 3 / 4
+fn compact_threshold() -> usize {
+    crate::agent::CONTEXT_BUDGET * 3 / 4
 }
 
 /// Mensajes recientes que se conservan intactos al compactar (los últimos
@@ -750,15 +590,7 @@ async fn wait_for_cancel() {
     }
 }
 
-/// El siguiente cerebro disponible (con API key) distinto del actual, en orden
-/// de utilidad agéntica, para degradar cuando el activo no responde.
-fn fallback_brain(current: Brain) -> Option<Brain> {
-    Brain::all()
-        .into_iter()
-        .find(|b| b.name() != current.name() && b.has_key())
-}
-
-/// Lo ÚNICO que `run_turn` necesita del modelo — costura de testabilidad: en
+/// Lo UNICO que `run_turn` necesita del modelo — costura de testabilidad: en
 /// producción lo implementa [`Mentor`]; en tests, un fake con respuestas
 /// guionadas que permite ejercitar el loop agéntico completo sin red.
 trait TurnBrain {
@@ -808,24 +640,7 @@ async fn run_turn(
     // extra forzamos para que un build irreparable no cicle eternamente.
     let mut verify_red = false;
     let mut gate_forced = 0usize;
-    // AUTORREVISIÓN: archivos que el turno cambió (para que el revisor compare el
-    // diff contra lo pedido) y cuántas rondas de corrección por revisión llevamos.
-    let mut changed_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut review_forced = 0usize;
-    // AMBIGÜEDAD: cuántas veces auto amplió el presupuesto en este turno. La 2ª
-    // ampliación (≥16 rondas sin terminar) es señal inequívoca de over-scoping
-    // en tarea ambigua → se inyecta un freno de alcance ("slice mínimo primero").
     let mut auto_extensions = 0usize;
-    // Último `dpx:plan` del turno = criterios de aceptación para la autorrevisión.
-    let mut latest_plan: Option<String> = None;
-    // Checkpoint del turno: captura el estado de cada archivo antes de tocarlo
-    // (vía fs::apply/delete_file) y lo apila al terminar para que `/undo` pueda
-    // revertir TODO lo que dpx escribió este turno. Se commitea al soltar el
-    // guard, pase lo que pase (incluido un return temprano).
-    let _checkpoint = crate::checkpoint::TurnGuard::begin();
-    // Archivos ya inyectados en ESTE turno: si el modelo vuelve a pedir el mismo
-    // en otra ronda, su contenido ya está en el historial → no lo re-mandamos
-    // (ahorro de tokens en loops agénticos que releen lo mismo).
     let mut read_paths_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Compactación ligera al empezar el turno: elide el cuerpo de los tool
@@ -909,7 +724,6 @@ async fn run_turn(
         // autorrevisión (la vara contra la que el revisor mide los cambios).
         if let Some(plan) = crate::fs::parse_plan(&reply) {
             ui::checklist(&plan);
-            latest_plan = Some(crate::fs::plan_to_markdown(&plan));
         }
 
         // Modo learn: si el tutor registró habilidades (bloque `dpx:skill`), las
@@ -967,22 +781,6 @@ async fn run_turn(
         let deletes = if quarantined { Vec::new() } else { crate::fs::parse_deletes(&reply) };
         report.absorb(process_deletes(cwd, &deletes, &mut *ask));
 
-        // Hooks PostToolUse: tras aplicar cambios, ejecutar comandos
-        // (p.ej. cargo fmt después de writes/edits).
-        let all_tools_used = {
-            let mut names: Vec<&str> = Vec::new();
-            if !writes.is_empty() { names.push("write_file"); }
-            if !edits.is_empty() { names.push("edit_file"); }
-            if !deletes.is_empty() { names.push("delete_file"); }
-            names
-        };
-        if !all_tools_used.is_empty() {
-            let hooks = store.load_hooks();
-            for name in &all_tools_used {
-                crate::cli::hooks::run_hooks(&hooks, &crate::cli::hooks::HookEvent::PostToolUse, Some(name), cwd);
-            }
-        }
-
         // 2b. Tool calls nativas (function calling): la vía estructurada y
         //     preferida. Se atienden SIEMPRE y cada una deja su tool result en
         //     el historial — sin un resultado por llamada, la siguiente
@@ -1033,20 +831,7 @@ async fn run_turn(
             };
         }
 
-        // 3. Hooks PostToolUse para tool calls nativas que modificaron.
-        let native_modifiers: Vec<&str> = calls
-            .iter()
-            .map(|c| c.function.name.as_str())
-            .filter(|n| matches!(*n, "write_file" | "edit_file" | "delete_file"))
-            .collect();
-        if !native_modifiers.is_empty() {
-            let hooks = store.load_hooks();
-            for name in native_modifiers {
-                crate::cli::hooks::run_hooks(&hooks, &crate::cli::hooks::HookEvent::PostToolUse, Some(name), cwd);
-            }
-        }
-
-        // 4. Lecturas, búsquedas y ejecuciones (también en cuarentena si aplica:
+        // 3. Lecturas, búsquedas y ejecuciones (también en cuarentena si aplica:
         //    el `mvn` fantasma de un fence roto era justamente un run parseado).
         let mut reads = Vec::new();
         if !quarantined {
@@ -1059,19 +844,6 @@ async fn run_turn(
 
         let searches = if quarantined { Vec::new() } else { crate::fs::parse_searches(&reply) };
         let mut runs = if quarantined { Vec::new() } else { crate::fs::parse_runs(&reply) };
-
-        // AUTORREVISIÓN: acumula los archivos que esta ronda cambió (en modo auto
-        // ya se aplicaron sin preguntar) para que el revisor los compare contra lo
-        // pedido al cerrar. Dedup por el HashSet.
-        for p in writes
-            .iter()
-            .map(|w| &w.path)
-            .chain(s_writes.iter().map(|w| &w.path))
-            .chain(edits.iter().map(|e| &e.path))
-            .chain(s_edits.iter().map(|e| &e.path))
-        {
-            changed_paths.insert(p.clone());
-        }
 
         // Verificación de build automática: si escribimos código fuente y hay un
         // proyecto Maven/Gradle/Cargo, dpx propone compilar y realimenta los
@@ -1286,30 +1058,6 @@ async fn run_turn(
                 ui::red("🔴 INCOMPLETO · el build/tests sigue en rojo tras varios intentos de arreglo")
             );
         }
-        // 🔎 AUTORREVISIÓN (solo modo auto, build VERDE): antes de cerrar un turno
-        // autónomo que cambió código, un revisor compara los cambios contra lo que
-        // pidió el usuario. Si hay P0/P1, se fuerza una ronda de corrección — el
-        // green-gate pero de COMPORTAMIENTO, no de compilación. Acotado por
-        // `SELF_REVIEW_MAX_ROUNDS`. En interactivo el humano ES la revisión.
-        if !verify_red
-            && auto.commands()
-            && !changed_paths.is_empty()
-            && review_forced < SELF_REVIEW_MAX_ROUNDS
-            && let Some(critique) =
-                review::run_self_review(cwd, user_input, latest_plan.as_deref(), &changed_paths).await
-        {
-            review_forced += 1;
-            println!(
-                "{}",
-                ui::accent("⏺ autorrevisión: hay P0/P1 que corregir antes de cerrar")
-            );
-            to_send = format!(
-                "[AUTORREVISIÓN: un revisor evaluó tus cambios contra lo que pidió el usuario y \
-                 encontró problemas que DEBES corregir antes de cerrar. Arréglalos; si crees que el \
-                 revisor se equivoca en algo, explícalo con evidencia en vez de ignorarlo.\n\n{critique}\n]"
-            );
-            continue;
-        }
         break;
     }
 
@@ -1496,76 +1244,8 @@ async fn run_tool_call(
                 Err(e) => format!("[web_search falló: {e}]"),
             })
         }
-        Ok(DpxCall::Spawn { task, role }) => {
-            ToolOutcome::Done(run_subagent(cwd, &task, role.as_deref()).await)
-        }
-        Ok(DpxCall::LspDiagnostics { path }) => {
-            println!("{}", ui::accent(&format!("  language server: {path}")));
-            // El cliente LSP bloquea (espera diagnósticos con timeout): lo sacamos
-            // del hilo async para no congelar el runtime.
-            let cwd2 = cwd.to_path_buf();
-            let p = path.clone();
-            let out = match tokio::task::spawn_blocking(move || crate::lsp::diagnostics(&cwd2, &p)).await {
-                Ok(Ok(s)) => s,
-                Ok(Err(e)) => format!("[lsp_diagnostics: {e}]"),
-                Err(e) => format!("[lsp_diagnostics se interrumpió: {e}]"),
-            };
-            ToolOutcome::Done(out)
-        }
-        Ok(DpxCall::FindReferences { path, line, symbol }) => {
-            println!("{}", ui::accent(&format!("  find_references: {symbol} ({path}:{line})")));
-            // El cliente LSP bloquea (indexa + espera respuesta): fuera del runtime.
-            let cwd2 = cwd.to_path_buf();
-            let (p, s) = (path.clone(), symbol.clone());
-            let out = match tokio::task::spawn_blocking(move || {
-                crate::lsp::references(&cwd2, &p, line, &s)
-            })
-            .await
-            {
-                Ok(Ok(text)) => text,
-                Ok(Err(e)) => format!("[find_references: {e}]"),
-                Err(e) => format!("[find_references se interrumpió: {e}]"),
-            };
-            ToolOutcome::Done(out)
-        }
-        Ok(DpxCall::RenameSymbol { path, line, symbol, new_name }) => {
-            println!(
-                "{}",
-                ui::accent(&format!("  rename_symbol: {symbol} → {new_name} ({path}:{line})"))
-            );
-            let cwd2 = cwd.to_path_buf();
-            let (p, s, nn) = (path.clone(), symbol.clone(), new_name.clone());
-            let result = tokio::task::spawn_blocking(move || {
-                crate::lsp::rename(&cwd2, &p, line, &s, &nn)
-            })
-            .await;
-            match result {
-                Ok(Ok((rename_writes, notes))) => {
-                    if rename_writes.is_empty() {
-                        ToolOutcome::Done(
-                            "[rename_symbol: el language server no devolvió cambios (¿símbolo no \
-                             renombrable, o aún indexando? reintenta en unos segundos)]"
-                                .to_string(),
-                        )
-                    } else {
-                        println!(
-                            "{}",
-                            ui::dim(&format!("  ⎿ {} archivo(s) afectado(s)", rename_writes.len()))
-                        );
-                        // Pasa por el flujo normal: diff + confirmación + checkpoint
-                        // (/undo) + auto-build (green-gate) por cada archivo tocado.
-                        let report = process_writes(cwd, &rename_writes, ask, auto);
-                        let mut out = report.notes.clone();
-                        out.extend(notes);
-                        for w in rename_writes {
-                            writes.push(w);
-                        }
-                        ToolOutcome::Done(out.join("\n"))
-                    }
-                }
-                Ok(Err(e)) => ToolOutcome::Done(format!("[rename_symbol: {e}]")),
-                Err(e) => ToolOutcome::Done(format!("[rename_symbol se interrumpió: {e}]")),
-            }
+        Ok(DpxCall::Spawn { task, .. }) => {
+            ToolOutcome::Done(run_subagent(cwd, &task).await)
         }
         Ok(DpxCall::Write { path, content }) => {
             let w = crate::fs::FileWrite { path, content };
@@ -1605,12 +1285,6 @@ async fn run_tool_call(
                 println!("{}", ui::dim("omitido."));
                 ToolOutcome::Done("[el usuario rechazó crear el commit]".to_string())
             } else {
-                // Hooks PreCommit: si fallan, el commit se cancela.
-                let hooks = store.load_hooks();
-                if !crate::cli::hooks::run_hooks(&hooks, &crate::cli::hooks::HookEvent::PreCommit, None, cwd) {
-                    println!("{}", ui::dim("commit cancelado: el hook PreCommit falló"));
-                    return ToolOutcome::Done("[commit cancelado: el hook PreCommit falló]".to_string());
-                }
                 let add = run_git(cwd, &["add", "-A"]);
                 let commit = run_git(cwd, &["commit", "-m", &message]);
                 ToolOutcome::Done(format!("git add -A:\n{add}\ngit commit:\n{commit}"))
@@ -1630,28 +1304,8 @@ async fn run_tool_call(
                 if cancelled { ToolOutcome::Cancelled(out) } else { ToolOutcome::Done(out) }
             }
         },
-        Ok(DpxCall::McpTool { name, args }) => {
-            println!("{}", ui::accent(&format!("  MCP: {name}")));
-            match crate::mcp::McpManager::call_tool(&name, &args) {
-                Ok(out) => ToolOutcome::Done(out),
-                Err(e) => ToolOutcome::Done(format!("[error MCP {name}: {e}]")),
-            }
-        },
     }
 }
-
-/// Carga (o reutiliza) el motor de embeddings. Centraliza la carga perezosa.
-fn ensure_embedder(
-    emb: &mut Option<crate::memory::Embedder>,
-) -> anyhow::Result<&mut crate::memory::Embedder> {
-    if emb.is_none() {
-        *emb = Some(crate::memory::Embedder::new()?);
-    }
-    Ok(emb.as_mut().expect("recién inicializado"))
-}
-
-
-
 
 fn build_mentor(
     router: &ModelRouter,
@@ -1726,18 +1380,14 @@ fn parse_token_count(s: &str) -> Option<u64> {
     Some((val * mult).round() as u64)
 }
 
-/// Construye las filas de cerebros para `/status` y `/models`, marcando el activo
-/// y consultando si cada uno tiene su API key en el entorno.
-fn brain_rows(active: Brain) -> Vec<ui::BrainRow> {
-    Brain::all()
-        .into_iter()
-        .map(|b| ui::BrainRow {
-            name: b.name(),
-            capability: b.capability(),
-            has_key: b.has_key(),
-            active: b.name() == active.name(),
-        })
-        .collect()
+/// Construye las filas para `/status` y `/models`.
+fn brain_rows() -> Vec<ui::BrainRow> {
+    vec![ui::BrainRow {
+        name: crate::agent::BRAIN_NAME,
+        capability: crate::agent::BRAIN_LABEL,
+        has_key: crate::agent::has_key(),
+        active: true,
+    }]
 }
 
 /// Cierre limpio: genera y persiste el contexto del proyecto.
@@ -1792,24 +1442,12 @@ async fn close_session(
     store: &ProjectStore,
     turns: &[Turn],
     prior: Option<&str>,
-    mem: &mut crate::memory::MemoryStore,
-    emb: &mut Option<crate::memory::Embedder>,
 ) {
-    // Hooks OnSessionEnd: se ejecutan antes del resumen, incluso si la sesión
-    // está vacía (un hook puede querer correr igual).
-    {
-        let hooks = store.load_hooks();
-        let cwd = store.project_dir();
-        crate::cli::hooks::run_hooks(&hooks, &crate::cli::hooks::HookEvent::OnSessionEnd, None, cwd);
-    }
-
     if turns.is_empty() {
         println!("\n{}", ui::dim("sesión vacía: no hay nada que recordar. Hasta luego."));
         return;
     }
 
-    // El plan se persiste aparte del resumen (y antes: si el modelo del
-    // resumen falla, el plan no se pierde).
     persist_plan(store, turns);
 
     let spinner = ui::Spinner::start("Guardando memoria…");
@@ -1823,18 +1461,9 @@ async fn close_session(
                     "{} contexto guardado en .dpx/context.md · la próxima vez retomo desde aquí.",
                     ui::accent("⏺")
                 );
-                // Auto-ingesta: el resumen de esta sesión entra en la memoria de
-                // largo plazo, para recordarlo por SEMÁNTICA en sesiones futuras
-                // (no solo lo que el usuario marcó con /recordar). Best-effort:
-                // si el motor de embeddings no carga, no pasa nada.
-                if remember(&md, mem, emb, "resumen").is_ok() {
-                    println!("{}", ui::dim("⎿ sesión añadida a tu memoria de largo plazo"));
-                }
             }
             Err(e) => eprintln!("{} no pude escribir el contexto: {e}", ui::accent("⏺")),
         },
-        // Si el resumen falla (p.ej. modelo saturado), no perdemos la sesión:
-        // guardamos la transcripción cruda como respaldo.
         Err(e) => {
             eprintln!("{} no pude generar el resumen: {}", ui::dim("⏺ aviso"), ui::friendly_error(&e.to_string()));
             let raw = session::fallback_context(turns, prior);

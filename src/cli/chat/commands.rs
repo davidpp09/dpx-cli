@@ -6,10 +6,10 @@ use std::path::Path;
 use rig_core::completion::Message;
 
 use super::{
-    brain_rows, build_mentor, canonical_cmd, command_in_mode, ensure_embedder, estimate_tokens,
+    brain_rows, build_mentor, canonical_cmd, command_in_mode, estimate_tokens,
     mode_label, parse_token_count, reject_command, self_update, short_path,
 };
-use crate::agent::{Brain, Mentor, ModelRouter};
+use crate::agent::{Mentor, ModelRouter, CONTEXT_BUDGET};
 use crate::focus::{self, Mode};
 use crate::session::ProjectStore;
 use crate::ui;
@@ -48,24 +48,6 @@ pub(crate) fn build_quiz_prompt(store: &ProjectStore, focus_id: Option<&str>, to
     }
 }
 
-/// Guarda un recuerdo en la memoria de largo plazo: embebe el texto y lo
-/// persiste. Carga el motor de embeddings perezosamente la primera vez.
-pub(crate) fn remember(
-    text: &str,
-    mem: &mut crate::memory::MemoryStore,
-    emb: &mut Option<crate::memory::Embedder>,
-    kind: &str,
-) -> anyhow::Result<()> {
-    let engine = ensure_embedder(emb)?;
-    let vector = engine.embed_one(text)?;
-    mem.add(crate::memory::MemoryEntry {
-        text: text.to_string(),
-        vector,
-        kind: kind.to_string(),
-        created: crate::skill::today(),
-    })
-}
-
 /// Despacha un comando del REPL. Muta el estado de la sesión cuando aplica.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_command(
@@ -77,7 +59,6 @@ pub(crate) fn handle_command(
     mentor: &mut Mentor,
     focus_id: &mut Option<String>,
     mode: &mut Mode,
-    brain: &mut Brain,
     auto: &mut crate::cli::AutoMode,
     history: &mut Vec<Message>,
     cwd: &Path,
@@ -105,14 +86,14 @@ pub(crate) fn handle_command(
             focus::display_name(focus_id.as_deref()),
             mode_label(*mode),
             router.brain_label(),
-            &brain_rows(*brain),
+            &brain_rows(),
             turn_count,
             prior.is_some(),
             estimate_tokens(history),
-            brain.context_budget(),
+            CONTEXT_BUDGET,
         ),
 
-        "models" | "model" => ui::models_list(&brain_rows(*brain)),
+        "models" | "model" => ui::models_list(&brain_rows()),
 
         // Modo autónomo: cambios y comandos SEGUROS sin preguntar. Las puertas
         // duras (peligrosos, prohibidos, guards anti-truncado, borrados) se
@@ -154,8 +135,6 @@ pub(crate) fn handle_command(
             );
         }
 
-        // Consumo de tokens REAL de la sesión (de la API, no estimado), con el
-        // % servido desde el caché de contexto y el costo aproximado.
         "cost" => match crate::token::session_summary() {
             Some(s) => {
                 println!("\n{}  {}", ui::accent("⏺ tokens · sesión"), ui::dim(&s));
@@ -170,8 +149,6 @@ pub(crate) fn handle_command(
             ),
         },
 
-        // Tope de tokens de la sesión: `/budget 100k`, `/budget off`, o sin arg
-        // para ver el estado. Al superarlo, el modo auto se pausa y pregunta.
         "budget" => match arg.map(str::to_ascii_lowercase).as_deref() {
             None => match crate::token::budget_status() {
                 Some(s) => println!("{} {}", ui::accent("⏺ presupuesto:"), ui::dim(&s)),
@@ -196,81 +173,6 @@ pub(crate) fn handle_command(
                 None => println!("{} {}", ui::dim("no entendí la cantidad:"), s),
             },
         },
-
-        // Deshace los cambios de archivos del último turno de dpx (restaura lo
-        // que existía, borra lo que creó). No toca git ni tus cambios propios.
-        "undo" => match crate::checkpoint::undo() {
-            Some((restored, deleted)) => {
-                println!(
-                    "{} {}",
-                    ui::accent("⏺ deshecho"),
-                    ui::dim(&format!(
-                        "{restored} archivo(s) restaurado(s), {deleted} borrado(s) · el modelo aún cree que los hizo: dile qué revertiste"
-                    ))
-                );
-            }
-            None => println!(
-                "{}",
-                ui::dim("nada que deshacer (dpx no ha modificado archivos esta sesión)")
-            ),
-        },
-
-        // Muestra TODO lo que dpx cambió en la sesión (base vs. actual), para
-        // revisar antes de confiar/commitear. Solo lectura.
-        "diff" => {
-            let changes = crate::checkpoint::session_changes();
-            if changes.is_empty() {
-                println!(
-                    "{}",
-                    ui::dim("dpx no ha cambiado archivos esta sesión (o ya los revertiste)")
-                );
-            } else {
-                println!(
-                    "\n{} {}",
-                    ui::accent("⏺ cambios de la sesión"),
-                    ui::dim(&format!("({} archivo(s))", changes.len()))
-                );
-                for ch in &changes {
-                    let rel = ch.path.strip_prefix(cwd).unwrap_or(&ch.path);
-                    match &ch.now {
-                        None => println!("\n{} {}", ui::red("borrado:"), rel.display()),
-                        Some(now) => {
-                            println!("\n{} {}", ui::accent("●"), rel.display());
-                            ui::preview_diff(ch.before.as_deref(), now);
-                        }
-                    }
-                }
-            }
-        }
-
-        "hooks" => {
-            let hooks = store.load_hooks();
-            ui::hooks_panel(&hooks);
-        }
-
-        "panel" => {
-            let has_context = store.prior_context().is_some();
-            let plan_progress = store.read_plan()
-                .as_deref()
-                .and_then(crate::fs::parse_plan)
-                .map(|items| {
-                    let done = items.iter().filter(|(d, _)| *d).count();
-                    (done, items.len())
-                });
-            let skills = store.read_skills();
-            let dominados = skills.iter()
-                .filter(|s| s.level == crate::skill::SkillLevel::Dominado)
-                .count();
-            let total_skills = skills.len();
-            let recuerdos = crate::memory::MemoryStore::load(store.dpx_dir()).len();
-            let skills_dir = store
-                .dpx_dir()
-                .parent()
-                .map(|p| p.join("skills"))
-                .unwrap_or_else(|| std::path::PathBuf::from("skills"));
-            let agent_skills = crate::agent_skill::SkillBook::from_dir(&skills_dir).len();
-            ui::project_panel(has_context, plan_progress, dominados, total_skills, recuerdos, agent_skills);
-        }
 
         "context" => match store.prior_context() {
             Some(c) => ui::print_markdown(skin, "⏺ memoria del proyecto", &c),
@@ -336,8 +238,6 @@ pub(crate) fn handle_command(
         }
 
         "brain" => {
-            // Easter egg: `/brain fable` (o mythos) rinde tributo. No son cerebros
-            // reales — dpx no usa Anthropic — así que no cambian nada.
             let id = arg.map(|a| a.to_ascii_lowercase());
             if matches!(
                 id.as_deref(),
@@ -345,24 +245,29 @@ pub(crate) fn handle_command(
             ) {
                 ui::fable_tribute();
             } else {
-                match arg.and_then(Brain::parse) {
-                    Some(b) => {
-                        let new_router = ModelRouter::new(b);
-                        match build_mentor(&new_router, focus_id.as_deref(), *mode, prior.as_deref()) {
-                            Ok(agent) => {
-                                *router = new_router;
-                                *mentor = agent;
-                                *brain = b;
-                                println!("{} {}", ui::accent("⏺ cerebro →"), router.brain_label());
-                            }
-                            Err(e) => println!("{} {e}", ui::dim("no pude cambiar de cerebro:")),
-                        }
+                let has_key = crate::agent::has_key();
+                let key_status = if has_key { ui::green("✓ key") } else { ui::red("✗ sin key") };
+                println!(
+                    "\n{}  {}",
+                    ui::accent("⏺ cerebro"),
+                    ui::accent("DeepSeek Reasoner (deepseek-v4-pro)")
+                );
+                println!("  {}  {}", ui::dim("estado:"), key_status);
+                println!(
+                    "  {}  {}",
+                    ui::dim("presupuesto:"),
+                    ui::dim(&crate::token::budget_status().unwrap_or_else(|| "sin tope".to_string()))
+                );
+                if has_key {
+                    match crate::token::session_summary() {
+                        Some(s) => println!("  {}  {}", ui::dim("consumo:"), ui::dim(&s)),
+                        None => {}
                     }
-                    None => println!(
-                        "{} (actual: {})",
-                        ui::dim("dpx usa solo DeepSeek"),
-                        router.brain_label()
-                    ),
+                } else {
+                    println!(
+                        "  {}",
+                        ui::dim("configura DEEPSEEK_API_KEY en tu .env o ~/.dpx/.env")
+                    );
                 }
             }
         }
