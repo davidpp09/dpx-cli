@@ -1,6 +1,6 @@
-//! Ediciones quirúrgicas `dpx:edit`: parseo del bloque SEARCH/REPLACE y su
-//! aplicación sobre el contenido — exacta, tolerante a CRLF y fuzzy por
-//! indentación, con pista útil si no encuentra. Extraído de `fs`.
+//! Ediciones quirúrgicas (`edit_file`): aplicación de un bloque SEARCH/REPLACE
+//! sobre el contenido — exacta, tolerante a CRLF y fuzzy por indentación, con
+//! pista útil si no encuentra. Extraído de `fs`.
 
 use anyhow::{Result, anyhow};
 
@@ -10,94 +10,6 @@ pub struct FileEdit {
     pub path: String,
     pub search: String,
     pub replace: String,
-}
-
-/// Extrae el marcador `dpx:edit ... path=<ruta>` de una línea, si lo tiene.
-pub fn parse_edit_marker(s: &str) -> Option<String> {
-    let rest = s.trim().strip_prefix("dpx:edit")?;
-    rest.split_whitespace()
-        .find_map(|tok| tok.strip_prefix("path="))
-        .map(|p| p.trim_matches('"').to_string())
-        .filter(|p| !p.is_empty())
-}
-
-/// Extrae las ediciones `dpx:edit` de una respuesta. Dentro de cada bloque, un
-/// par `<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` define la edición (se
-/// admiten varios pares por bloque, todos sobre el mismo archivo).
-pub fn parse_edits(text: &str) -> Vec<FileEdit> {
-    let mut edits = Vec::new();
-    let mut lines = text.lines().peekable();
-    while let Some(line) = lines.next() {
-        let Some(info) = line.trim_start().strip_prefix("```") else {
-            continue;
-        };
-        let mut path = parse_edit_marker(info);
-        if path.is_none()
-            && let Some(first) = lines.peek()
-                && let Some(p) = parse_edit_marker(first) {
-                    path = Some(p);
-                    lines.next();
-                }
-        let Some(path) = path else { continue };
-
-        let mut search = String::new();
-        let mut replace = String::new();
-        let mut state = EditState::Outside;
-        for body in lines.by_ref() {
-            if body.trim_start().starts_with("```") {
-                break;
-            }
-            match body.trim() {
-                "<<<<<<< SEARCH" => {
-                    search.clear();
-                    replace.clear();
-                    state = EditState::InSearch;
-                }
-                "=======" if state == EditState::InSearch => state = EditState::InReplace,
-                ">>>>>>> REPLACE" => {
-                    if state == EditState::InReplace && !search.trim().is_empty() {
-                        edits.push(FileEdit {
-                            path: path.clone(),
-                            search: take_block(&mut search),
-                            replace: take_block(&mut replace),
-                        });
-                    }
-                    search.clear();
-                    replace.clear();
-                    state = EditState::Outside;
-                }
-                _ => match state {
-                    EditState::InSearch => {
-                        search.push_str(body);
-                        search.push('\n');
-                    }
-                    EditState::InReplace => {
-                        replace.push_str(body);
-                        replace.push('\n');
-                    }
-                    EditState::Outside => {}
-                },
-            }
-        }
-    }
-    edits
-}
-
-#[derive(PartialEq)]
-enum EditState {
-    Outside,
-    InSearch,
-    InReplace,
-}
-
-/// Vacía el acumulador quitando el `\n` final que añade el parser línea a línea
-/// (así la búsqueda literal no exige un salto de línea tras el fragmento).
-fn take_block(s: &mut String) -> String {
-    let mut out = std::mem::take(s);
-    if out.ends_with('\n') {
-        out.pop();
-    }
-    out
 }
 
 /// Aplica una edición sobre el contenido actual: busca `search` de forma LITERAL
@@ -293,40 +205,6 @@ fn search_hint(current: &str, search: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_edit_basico() {
-        let text = "cambio:\n```dpx:edit path=src/A.java\n<<<<<<< SEARCH\nfoo\n=======\nbar\n>>>>>>> REPLACE\n```";
-        let e = parse_edits(text);
-        assert_eq!(e.len(), 1);
-        assert_eq!(e[0].path, "src/A.java");
-        assert_eq!(e[0].search, "foo");
-        assert_eq!(e[0].replace, "bar");
-    }
-
-    #[test]
-    fn parse_edit_preserva_indentacion() {
-        let text = "```dpx:edit path=a.py\n<<<<<<< SEARCH\n    def x():\n        pass\n=======\n    def x():\n        return 1\n>>>>>>> REPLACE\n```";
-        let e = parse_edits(text);
-        assert_eq!(e.len(), 1);
-        assert_eq!(e[0].search, "    def x():\n        pass");
-        assert_eq!(e[0].replace, "    def x():\n        return 1");
-    }
-
-    #[test]
-    fn parse_edit_varios_bloques() {
-        let text = "```dpx:edit path=a.txt\n<<<<<<< SEARCH\nuno\n=======\n1\n>>>>>>> REPLACE\n```\ny\n```dpx:edit path=b.txt\n<<<<<<< SEARCH\ndos\n=======\n2\n>>>>>>> REPLACE\n```";
-        let e = parse_edits(text);
-        assert_eq!(e.len(), 2);
-        assert_eq!(e[0].path, "a.txt");
-        assert_eq!(e[1].path, "b.txt");
-    }
-
-    #[test]
-    fn parse_edit_ignora_bloques_normales() {
-        let text = "```java\nint x = 1;\n```";
-        assert!(parse_edits(text).is_empty());
-    }
 
     #[test]
     fn apply_edit_reemplaza_primera_aparicion() {

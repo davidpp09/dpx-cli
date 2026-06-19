@@ -1,4 +1,4 @@
-//! Capa de seguridad heurística para `dpx:run`.
+//! Capa de seguridad heurística para `run_command`.
 //!
 //! NO es un sandbox real (el proceso ejecutado tiene los permisos del
 //! usuario): es una clasificación del comando ANTES de pedir confirmación,

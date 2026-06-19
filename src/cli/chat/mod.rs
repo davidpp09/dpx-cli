@@ -260,7 +260,7 @@ pub async fn run(
                     turn_input = format!("{research}\n\n{turn_input}");
                 }
 
-                // Turno (puede ser agéntico: el mentor pide archivos con dpx:read,
+                // Turno (puede ser agéntico: el mentor pide archivos con read_file,
                 // se los leemos y continúa, hasta dar su respuesta final).
                 // Si el cerebro no llega a responder nada (sin saldo, cuota, caído),
                 // se degrada al siguiente con API key y se reintenta UNA vez.
@@ -614,8 +614,9 @@ impl TurnBrain for Mentor {
 }
 
 /// Ejecuta un turno completo, posiblemente agéntico. En cada ronda: renderiza la
-/// narración, aplica escrituras (con confirmación), y atiende lecturas (libres) y
-/// ejecuciones `dpx:run` (con confirmación); si hubo acciones, devuelve los
+/// narración, atiende las tool calls nativas (lecturas/búsquedas libres;
+/// escrituras/ediciones/comandos con confirmación) y, si tocó código, dispara la
+/// verificación automática (build/tests). Si hubo acciones, devuelve los
 /// resultados al modelo y vuelve a iterar, hasta que da su respuesta final.
 /// `ask` responde las confirmaciones (producción: el editor; tests: respuestas fijas).
 #[allow(clippy::too_many_arguments)]
@@ -641,7 +642,6 @@ async fn run_turn(
     let mut verify_red = false;
     let mut gate_forced = 0usize;
     let mut auto_extensions = 0usize;
-    let mut read_paths_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Compactación ligera al empezar el turno: elide el cuerpo de los tool
     // results viejos y voluminosos de turnos anteriores (su contenido ya cumplió
@@ -742,49 +742,11 @@ async fn run_turn(
             }
         }
 
-        // CUARENTENA: una respuesta con bloques dpx malformados no es de fiar —
-        // un fence roto puede convertir texto en "comandos" fantasma (pasó en
-        // vivo: un ejemplo de `mvn` dentro de un edit roto casi se ejecuta).
-        // Si hay CUALQUIER bloque malformado, NINGÚN bloque de texto de esta
-        // respuesta se ejecuta; el modelo re-emite. Las tool calls nativas no
-        // se ven afectadas (llegan validadas por el API, sin parseo de fences).
-        let mut report = ActionReport::default();
-        let malformed = crate::fs::detect_malformed_actions(&reply);
-        let quarantined = !malformed.is_empty();
-        if quarantined {
-            println!(
-                "\n{}",
-                ui::dim("⚠ bloques dpx malformados · cuarentena: ningún bloque de texto de esta respuesta se ejecuta")
-            );
-            report.followup(
-                "[CUARENTENA: tu respuesta contenía bloques dpx:* malformados, así que NINGUNA \
-                 acción en bloques de texto de esa respuesta se ejecutó (ni siquiera las bien \
-                 formadas). Re-emite TODAS tus acciones pendientes, preferiblemente como tool \
-                 calls nativas (inmunes a este problema).]"
-                    .to_string(),
-            );
-            for warning in malformed {
-                report.followup(warning);
-            }
-        }
-
-        // 2. Cambios propuestos en esta ronda (escrituras, ediciones quirúrgicas y
-        //    borrados): confirmar y aplicar YA, guardando el resultado de cada uno
-        //    para informárselo al modelo (que no asuma que algo se aplicó si el
-        //    usuario lo rechazó o falló).
-        let writes = if quarantined { Vec::new() } else { crate::fs::parse_writes(&reply) };
-        report.absorb(process_writes(cwd, &writes, &mut *ask, auto));
-
-        let edits = if quarantined { Vec::new() } else { crate::fs::parse_edits(&reply) };
-        report.absorb(process_edits(cwd, &edits, &mut *ask, auto));
-
-        let deletes = if quarantined { Vec::new() } else { crate::fs::parse_deletes(&reply) };
-        report.absorb(process_deletes(cwd, &deletes, &mut *ask));
-
-        // 2b. Tool calls nativas (function calling): la vía estructurada y
-        //     preferida. Se atienden SIEMPRE y cada una deja su tool result en
-        //     el historial — sin un resultado por llamada, la siguiente
-        //     petición al proveedor sería inválida (tool_calls colgados).
+        // 2. Tool calls nativas (function calling): la ÚNICA vía de acción.
+        //     Se atienden SIEMPRE y cada una deja su tool result en el historial
+        //     — sin un resultado por llamada, la siguiente petición al proveedor
+        //     sería inválida (tool_calls colgados). Las escrituras/ediciones se
+        //     acumulan en `s_writes`/`s_edits` para disparar el auto-build.
         let mut s_writes: Vec<crate::fs::FileWrite> = Vec::new();
         let mut s_edits: Vec<crate::fs::FileEdit> = Vec::new();
         let mut cancelled_at: Option<usize> = None;
@@ -831,19 +793,10 @@ async fn run_turn(
             };
         }
 
-        // 3. Lecturas, búsquedas y ejecuciones (también en cuarentena si aplica:
-        //    el `mvn` fantasma de un fence roto era justamente un run parseado).
-        let mut reads = Vec::new();
-        if !quarantined {
-            for r in crate::fs::parse_reads(&reply) {
-                if !reads.contains(&r) {
-                    reads.push(r);
-                }
-            }
-        }
-
-        let searches = if quarantined { Vec::new() } else { crate::fs::parse_searches(&reply) };
-        let mut runs = if quarantined { Vec::new() } else { crate::fs::parse_runs(&reply) };
+        // 3. Verificación de build automática. Las lecturas/búsquedas/ejecuciones
+        //    del modelo ya pasaron como tool calls nativas arriba; aquí `runs`
+        //    arranca vacío y solo recoge la verificación que inyecta dpx.
+        let mut runs: Vec<String> = Vec::new();
 
         // Verificación de build automática: si escribimos código fuente y hay un
         // proyecto Maven/Gradle/Cargo, dpx propone compilar y realimenta los
@@ -854,11 +807,7 @@ async fn run_turn(
         // Frontera: lo que va DESPUÉS de este índice en `runs` es verificación
         // que inyectó dpx (no comandos del modelo) → es lo que vigila el gate.
         let runs_before_verify = runs.len();
-        if crate::fs::touches_build(&writes)
-            || crate::fs::edits_touch_build(&edits)
-            || crate::fs::touches_build(&s_writes)
-            || crate::fs::edits_touch_build(&s_edits)
-        {
+        if crate::fs::touches_build(&s_writes) || crate::fs::edits_touch_build(&s_edits) {
             let already = runs
                 .iter()
                 .any(|r| r.contains("mvn") || r.contains("gradle") || r.contains("cargo"));
@@ -891,9 +840,7 @@ async fn run_turn(
             }
         }
 
-        let has_requests =
-            !reads.is_empty() || !searches.is_empty() || !runs.is_empty() || !calls.is_empty();
-        let wants_more = has_requests || report.needs_followup;
+        let wants_more = !runs.is_empty() || !calls.is_empty();
 
         // Presupuesto de rondas agotado con la tarea aún VIVA: checkpoint en
         // vez de muerte silenciosa (la causa nº 1 de turnos "muertos a la
@@ -920,40 +867,6 @@ async fn run_turn(
         }
         if wants_more {
             let mut ctx = String::new();
-            if !report.notes.is_empty() {
-                ctx.push_str("\n--- resultado de los cambios propuestos ---\n");
-                for note in &report.notes {
-                    ctx.push_str(note);
-                    ctx.push('\n');
-                }
-                ctx.push_str("--- fin ---\n");
-            }
-            if !reads.is_empty() {
-                ui::title_busy("explorando código");
-            }
-            for r in &reads {
-                ui::action_read(r);
-                // Ya leído en este turno: su contenido está más arriba en la
-                // conversación, no lo duplicamos (ahorro de tokens).
-                if !read_paths_seen.insert(r.clone()) {
-                    ctx.push_str(&format!(
-                        "\n--- `{r}` ya lo leíste antes en este turno; su contenido está más arriba. No lo volví a pegar. ---\n"
-                    ));
-                    continue;
-                }
-                match crate::fs::read_file(cwd, r) {
-                    Ok(c) => ctx.push_str(&format!("\n--- `{r}` ---\n{c}\n--- fin `{r}` ---\n")),
-                    Err(e) => ctx.push_str(&format!("\n[no pude leer `{r}`: {e}]\n")),
-                }
-            }
-            if !searches.is_empty() {
-                ui::title_busy("buscando en el proyecto");
-            }
-            for s in &searches {
-                println!("{}", ui::accent(&format!("  ⎁ buscando: {}", s)));
-                let out = crate::fs::search_in_project(cwd, s);
-                ctx.push_str(&format!("\n--- resultados de búsqueda para `{s}` ---\n{out}\n--- fin ---\n"));
-            }
             if auto_tested && auto_built {
                 println!("\n{}", ui::dim("dpx verifica con el linter estricto y la suite de tests…"));
             } else if auto_tested {
@@ -972,7 +885,7 @@ async fn run_turn(
                 match confirm_run(&mut *ask, store, cwd, cmd, auto) {
                     RunDecision::Blocked(reason) => {
                         ctx.push_str(&format!(
-                            "\n[dpx BLOQUEÓ el comando `{cmd}`: {reason}. Está prohibido vía dpx:run; \
+                            "\n[dpx BLOQUEÓ el comando `{cmd}`: {reason}. Está prohibido vía run_command; \
                              NO lo vuelvas a proponer, busca otra forma o pídele al usuario que lo haga a mano.]\n"
                         ));
                         continue;
@@ -1317,10 +1230,9 @@ fn build_mentor(
     // Le damos el árbol del proyecto para que sepa qué archivos puede pedir leer.
     let cwd = env::current_dir().unwrap_or_default();
     preamble.push_str(
-        "\n\n# Herramientas: tool calls nativas PRIMERO\n\
-         Tienes herramientas NATIVAS (function calling): emite tool calls, no describas \
-         acciones en prosa ni uses los bloques dpx:* de texto salvo que el function calling \
-         no esté disponible.\n\n\
+        "\n\n# Herramientas: tool calls nativas\n\
+         Toda acción (leer, buscar, escribir, editar, borrar, ejecutar) va por tool calls \
+         NATIVAS (function calling): emítelas, no describas la acción en prosa.\n\n\
          # Árbol del proyecto actual\n\
          Estos son los archivos que existen AHORA en el proyecto. Léelos con `read_file` \
          o bórralos con `delete_file` cuando los necesites (no le pidas al usuario que lo haga):\n\n```\n",

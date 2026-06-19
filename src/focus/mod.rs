@@ -14,7 +14,6 @@
 pub mod committee;
 pub mod curriculum;
 mod dpx;
-mod general;
 mod node;
 mod python;
 mod react;
@@ -183,29 +182,6 @@ fn domain_skills(focus_id: &str) -> Option<&'static str> {
         "dpx" => Some(dpx::SKILLS),
         _ => None,
     }
-}
-
-/// Playbooks EMPOTRADOS (built-in) del stack activo: `(nombre, cuándo, pasos)`.
-/// Vienen DENTRO de dpx, así un usuario obtiene playbooks A→B expertos sin
-/// escribir skills. Se cargan junto a los curados de `skills/` (el CLI los
-/// recupera por similitud antes del turno). Vacío = sin playbooks para ese stack.
-#[allow(dead_code)]
-pub fn builtin_playbooks(focus_id: Option<&str>) -> &'static [(&'static str, &'static str, &'static str)] {
-    match focus_id {
-        Some("spring-boot") => spring_boot::PLAYBOOKS,
-        Some("react") => react::PLAYBOOKS,
-        Some("node") => node::PLAYBOOKS,
-        Some("python") => python::PLAYBOOKS,
-        Some("rust") => rust::PLAYBOOKS,
-        _ => &[],
-    }
-}
-
-/// Playbooks GENERALES (cross-stack): arquitectura, CSS/UI, lógica de negocio.
-/// Se cargan SIEMPRE, sin importar el focus — aplican a cualquier proyecto.
-#[allow(dead_code)]
-pub fn general_playbooks() -> &'static [(&'static str, &'static str, &'static str)] {
-    general::PLAYBOOKS
 }
 
 /// Devuelve el nombre legible de un focus pack (para banners).

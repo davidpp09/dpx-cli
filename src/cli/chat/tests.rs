@@ -137,7 +137,7 @@
         let edits = vec![FileEdit { path: "nada.txt".into(), search: "x".into(), replace: "y".into() }];
         let report = process_edits(&dir, &edits, &mut |_| Some("s".into()), AutoMode::Off);
         assert!(report.needs_followup);
-        assert!(report.notes[0].contains("dpx:write"));
+        assert!(report.notes[0].contains("write_file"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -160,17 +160,6 @@
         assert!(!dir.join("x.txt").exists());
         assert!(!report.needs_followup);
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn report_absorb_acumula_y_propaga_followup() {
-        let mut a = ActionReport::default();
-        a.ok("[escrito: a]".into());
-        let mut b = ActionReport::default();
-        b.followup("[ERROR en b]".into());
-        a.absorb(b);
-        assert_eq!(a.notes.len(), 2);
-        assert!(a.needs_followup);
     }
 
     #[test]
@@ -294,18 +283,23 @@
     }
 
     #[tokio::test]
-    async fn dpx_read_realimenta_el_archivo_y_continua() {
+    async fn read_file_realimenta_el_archivo_y_continua() {
         let dir = tmp("turn-read");
         std::fs::write(dir.join("datos.txt"), "SECRETO42").unwrap();
         let fake = FakeMentor::new(vec![
-            FakeMentor::ok("voy a mirar\n```dpx:read path=datos.txt\n```\n"),
+            FakeMentor::ok_with_calls(
+                "voy a mirar",
+                vec![test_call("c1", "read_file", serde_json::json!({ "path": "datos.txt" }))],
+            ),
             FakeMentor::ok("listo, ya lo vi"),
         ]);
-        let (out, _) = fake_turn(&fake, &dir, "s").await;
+        let (out, history) = fake_turn(&fake, &dir, "s").await;
         assert!(matches!(out, TurnOutcome::Reply(_)));
-        let inputs = fake.inputs.borrow();
-        assert_eq!(inputs.len(), 2);
-        assert!(inputs[1].contains("SECRETO42"), "la ronda 2 debe llevar el contenido leído");
+        assert_eq!(fake.inputs.borrow().len(), 2);
+        // El contenido leído viaja en el historial como tool result, no en el
+        // prompt de la ronda siguiente.
+        let hist = serde_json::to_string(&history).unwrap();
+        assert!(hist.contains("SECRETO42"), "el resultado de read_file debe quedar en el historial");
     }
 
     #[tokio::test]
@@ -323,7 +317,10 @@
         let dir = tmp("turn-fail2");
         std::fs::write(dir.join("a.txt"), "x").unwrap();
         let fake = FakeMentor::new(vec![
-            FakeMentor::ok("primera parte\n```dpx:read path=a.txt\n```\n"),
+            FakeMentor::ok_with_calls(
+                "primera parte",
+                vec![test_call("c1", "read_file", serde_json::json!({ "path": "a.txt" }))],
+            ),
             FakeMentor::fail("403 forbidden"),
         ]);
         match fake_turn(&fake, &dir, "s").await.0 {
@@ -336,18 +333,25 @@
     async fn write_rechazado_se_informa_al_modelo_sin_escribir() {
         let dir = tmp("turn-write-no");
         let fake = FakeMentor::new(vec![
-            FakeMentor::ok("te propongo\n```dpx:write path=nuevo.txt\nhola\n```\n"),
+            FakeMentor::ok_with_calls(
+                "te propongo",
+                vec![test_call(
+                    "c1",
+                    "write_file",
+                    serde_json::json!({ "path": "nuevo.txt", "content": "hola" }),
+                )],
+            ),
             FakeMentor::ok("entendido, no lo escribo"),
         ]);
-        let (out, _) = fake_turn(&fake, &dir, "n").await;
+        let (out, history) = fake_turn(&fake, &dir, "n").await;
         assert!(matches!(out, TurnOutcome::Reply(_)));
-        let inputs = fake.inputs.borrow();
-        assert_eq!(inputs.len(), 2, "el rechazo debe disparar una ronda de followup");
-        assert!(inputs[1].contains("rechazó escribir"));
+        assert_eq!(fake.inputs.borrow().len(), 2, "el rechazo debe disparar una ronda de followup");
+        let hist = serde_json::to_string(&history).unwrap();
+        assert!(hist.contains("rechazó escribir"));
         assert!(!dir.join("nuevo.txt").exists());
     }
 
-    // ----- sandbox de dpx:run -----
+    // ----- sandbox de run_command -----
 
     #[test]
     fn comando_peligroso_exige_reescribir_la_primera_palabra() {
@@ -408,28 +412,34 @@
     async fn run_prohibido_avisa_al_modelo_que_no_insista() {
         let dir = tmp("turn-run-block");
         let fake = FakeMentor::new(vec![
-            FakeMentor::ok("limpio el disco\n```dpx:run\nformat c: /q\n```\n"),
+            FakeMentor::ok_with_calls(
+                "limpio el disco",
+                vec![test_call("c1", "run_command", serde_json::json!({ "command": "format c: /q" }))],
+            ),
             FakeMentor::ok("entendido, no lo propongo más"),
         ]);
-        let (out, _) = fake_turn(&fake, &dir, "s").await;
+        let (out, history) = fake_turn(&fake, &dir, "s").await;
         assert!(matches!(out, TurnOutcome::Reply(_)));
-        let inputs = fake.inputs.borrow();
-        assert_eq!(inputs.len(), 2);
-        assert!(inputs[1].contains("BLOQUEÓ"), "el modelo debe saber que fue dpx quien bloqueó");
+        assert_eq!(fake.inputs.borrow().len(), 2);
+        let hist = serde_json::to_string(&history).unwrap();
+        assert!(hist.contains("BLOQUEÓ"), "el modelo debe saber que fue dpx quien bloqueó");
     }
 
     #[tokio::test]
     async fn run_rechazado_se_informa_al_modelo() {
         let dir = tmp("turn-run-no");
         let fake = FakeMentor::new(vec![
-            FakeMentor::ok("ejecuto\n```dpx:run\necho hola\n```\n"),
+            FakeMentor::ok_with_calls(
+                "ejecuto",
+                vec![test_call("c1", "run_command", serde_json::json!({ "command": "echo hola" }))],
+            ),
             FakeMentor::ok("vale, no lo ejecuto"),
         ]);
-        let (out, _) = fake_turn(&fake, &dir, "n").await;
+        let (out, history) = fake_turn(&fake, &dir, "n").await;
         assert!(matches!(out, TurnOutcome::Reply(_)));
-        let inputs = fake.inputs.borrow();
-        assert_eq!(inputs.len(), 2);
-        assert!(inputs[1].contains("rechazó ejecutar"));
+        assert_eq!(fake.inputs.borrow().len(), 2);
+        let hist = serde_json::to_string(&history).unwrap();
+        assert!(hist.contains("rechazó ejecutar"));
     }
 
     // ----- guard anti-truncado en writes -----
@@ -518,26 +528,6 @@
         assert!(respuestas.next().is_none(), "debió preguntar dos veces");
     }
 
-    #[tokio::test]
-    async fn cuarentena_un_bloque_roto_anula_todos_los_bloques_de_texto() {
-        let dir = tmp("turn-quarantine");
-        // Marcador dpx:edit suelto (fuera de bloque) = malformado; el dpx:write
-        // está BIEN formado, pero la cuarentena también lo anula.
-        let reply = "voy a editar\ndpx:edit path=a.rs\n```dpx:write path=ok.txt\nhola\n```\n";
-        let fake = FakeMentor::new(vec![
-            FakeMentor::ok(reply),
-            FakeMentor::ok("re-emito como tool calls"),
-        ]);
-        let (out, _) = fake_turn(&fake, &dir, "s").await;
-        assert!(matches!(out, TurnOutcome::Reply(_)));
-        // El write bien formado NO se aplicó (ni se preguntó).
-        assert!(!dir.join("ok.txt").exists());
-        // El modelo recibe la cuarentena y una ronda para corregir.
-        let inputs = fake.inputs.borrow();
-        assert_eq!(inputs.len(), 2);
-        assert!(inputs[1].contains("CUARENTENA"));
-    }
-
     // ----- ciclo del plan persistente (.dpx/plan.md) -----
 
     fn turn_with_plan(marks: &str) -> Vec<Turn> {
@@ -597,9 +587,13 @@
     async fn el_turno_continua_mas_alla_de_8_rondas_si_el_usuario_acepta() {
         let dir = tmp("turn-extend");
         std::fs::write(dir.join("a.txt"), "x").unwrap();
-        let pide_leer = "sigo\n```dpx:read path=a.txt\n```\n";
-        let mut replies: Vec<Result<ChatReply>> =
-            (0..11).map(|_| FakeMentor::ok(pide_leer)).collect();
+        let pide_leer = || {
+            FakeMentor::ok_with_calls(
+                "sigo",
+                vec![test_call("c1", "read_file", serde_json::json!({ "path": "a.txt" }))],
+            )
+        };
+        let mut replies: Vec<Result<ChatReply>> = (0..11).map(|_| pide_leer()).collect();
         replies.push(FakeMentor::ok("terminé"));
         let fake = FakeMentor::new(replies);
         // "s" responde tanto al checkpoint de rondas como a cualquier confirm.
@@ -616,9 +610,13 @@
     async fn el_usuario_puede_frenar_el_turno_en_el_checkpoint() {
         let dir = tmp("turn-stop");
         std::fs::write(dir.join("a.txt"), "x").unwrap();
-        let pide_leer = "sigo\n```dpx:read path=a.txt\n```\n";
-        let fake =
-            FakeMentor::new((0..12).map(|_| FakeMentor::ok(pide_leer)).collect());
+        let pide_leer = || {
+            FakeMentor::ok_with_calls(
+                "sigo",
+                vec![test_call("c1", "read_file", serde_json::json!({ "path": "a.txt" }))],
+            )
+        };
+        let fake = FakeMentor::new((0..12).map(|_| pide_leer()).collect());
         let (out, _) = fake_turn(&fake, &dir, "n").await;
         assert!(matches!(out, TurnOutcome::Reply(_)));
         assert_eq!(fake.inputs.borrow().len(), 4, "con 'n' el turno para en el presupuesto");
@@ -629,7 +627,10 @@
         let dir = tmp("turn-cut");
         std::fs::write(dir.join("a.txt"), "x").unwrap();
         let fake = FakeMentor::new(vec![
-            FakeMentor::ok("primera parte\n```dpx:read path=a.txt\n```\n"),
+            FakeMentor::ok_with_calls(
+                "primera parte",
+                vec![test_call("c1", "read_file", serde_json::json!({ "path": "a.txt" }))],
+            ),
             FakeMentor::fail("error sending request: connection reset"),
             FakeMentor::ok("segunda parte, terminé"),
         ]);
@@ -651,7 +652,10 @@
         let dir = tmp("turn-cut-perm");
         std::fs::write(dir.join("a.txt"), "x").unwrap();
         let fake = FakeMentor::new(vec![
-            FakeMentor::ok("avancé\n```dpx:read path=a.txt\n```\n"),
+            FakeMentor::ok_with_calls(
+                "avancé",
+                vec![test_call("c1", "read_file", serde_json::json!({ "path": "a.txt" }))],
+            ),
             FakeMentor::fail("402 Insufficient Balance"),
         ]);
         let (out, _) = fake_turn(&fake, &dir, "s").await;

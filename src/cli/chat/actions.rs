@@ -80,11 +80,6 @@ impl ActionReport {
         self.notes.push(note);
         self.needs_followup = true;
     }
-
-    pub(crate) fn absorb(&mut self, other: ActionReport) {
-        self.notes.extend(other.notes);
-        self.needs_followup |= other.needs_followup;
-    }
 }
 
 /// Procesa las propuestas de escritura: por cada archivo muestra un preview
@@ -193,14 +188,14 @@ pub(crate) fn process_writes(
             report.followup(format!(
                 "[el usuario rechazó escribir {} — AVISO de dpx: tu contenido reduciría el \
                  archivo de {old} a {new} líneas; casi seguro tu salida quedó TRUNCADA. NO \
-                 reescribas archivos grandes enteros: aplica cambios pequeños con edit_file/dpx:edit.]",
+                 reescribas archivos grandes enteros: aplica cambios pequeños con edit_file.]",
                 w.path
             ));
         } else if big_rewrite {
             println!("{}", ui::dim("omitido."));
             report.followup(format!(
                 "[el usuario rechazó escribir {} — AVISO de dpx: propusiste reescribir COMPLETO \
-                 un archivo existente grande; la regla es edit_file/dpx:edit para archivos que \
+                 un archivo existente grande; la regla es edit_file para archivos que \
                  ya existen. Re-propón el cambio como edits quirúrgicos pequeños.]",
                 w.path
             ));
@@ -232,7 +227,7 @@ pub(crate) fn big_rewrite_warning(current: Option<&str>) -> Option<usize> {
     (old >= MIN_LINES).then_some(old)
 }
 
-/// Procesa las ediciones quirúrgicas (`dpx:edit`): localiza el bloque SEARCH de
+/// Procesa las ediciones quirúrgicas (`edit_file`): localiza el bloque SEARCH de
 /// forma literal, muestra el diff +/- contra el archivo actual y aplica SOLO si
 /// el usuario confirma. Si el bloque no aparece, error claro y no se toca nada.
 pub(crate) fn process_edits(
@@ -246,12 +241,12 @@ pub(crate) fn process_edits(
         println!("\n{} editar {}", ui::accent("⏺"), ui::accent(&e.path));
         let Some(current) = crate::fs::current_content(cwd, &e.path) else {
             eprintln!(
-                "{} no existe `{}` (para crear archivos es dpx:write)",
+                "{} no existe `{}` (para crear archivos es write_file)",
                 ui::accent("⏺ error"),
                 e.path
             );
             report.followup(format!(
-                "[ERROR en dpx:edit: no existe `{}` — para crear archivos usa dpx:write]",
+                "[ERROR en edit_file: no existe `{}` — para crear archivos usa write_file]",
                 e.path
             ));
             continue;
@@ -283,7 +278,7 @@ pub(crate) fn process_edits(
             Err(err) => {
                 eprintln!("{} {err}", ui::accent("⏺ error"));
                 report.followup(format!(
-                    "[ERROR en dpx:edit {}: {err}. Lee el archivo con dpx:read y reintenta con el texto EXACTO]",
+                    "[ERROR en edit_file {}: {err}. Lee el archivo con read_file y reintenta con el texto EXACTO]",
                     e.path
                 ));
             }
@@ -292,7 +287,7 @@ pub(crate) fn process_edits(
     report
 }
 
-/// Procesa los borrados (`dpx:delete`), cada uno bajo confirmación.
+/// Procesa los borrados (`delete_file`), cada uno bajo confirmación.
 pub(crate) fn process_deletes(
     cwd: &std::path::Path,
     deletes: &[String],
@@ -340,7 +335,7 @@ pub(crate) fn process_deletes(
     report
 }
 
-/// Qué se decidió sobre un `dpx:run` propuesto, para informar al modelo con
+/// Qué se decidió sobre un `run_command` propuesto, para informar al modelo con
 /// precisión (no es lo mismo "el usuario no quiso" que "dpx lo prohibió").
 pub(crate) enum RunDecision {
     Run,

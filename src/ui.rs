@@ -398,64 +398,6 @@ pub fn learn_panel(skills: &[crate::skill::Skill], today: &str) {
     draw_box(&lines, grad, None);
 }
 
-/// Línea de estado del área de entrada (focus · modo · cerebro · auto).
-/// Trunca al ancho REAL de la terminal para evitar que desborde y corte la barra.
-pub fn format_input_status(
-    focus: &str,
-    mode: &str,
-    brain: &str,
-    auto: crate::cli::AutoMode,
-) -> String {
-    let mut bar = format!(
-        "{}  {}  {}",
-        accent(focus),
-        dim(mode),
-        dim(brain),
-    );
-    if auto != crate::cli::AutoMode::Off {
-        bar.push_str(&format!("  {}", dim(&format!("auto:{}", auto.label()))));
-    }
-    bar
-}
-
-/// Trunca una cadena CON códigos ANSI a un ancho VISIBLE máximo.
-#[allow(dead_code)]
-fn truncate_visible(s: &str, max_visible: usize) -> String {
-    let mut out = String::new();
-    let mut visible = 0;
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            out.push(c);
-            for e in chars.by_ref() {
-                out.push(e);
-                if e == 'm' {
-                    break;
-                }
-            }
-        } else {
-            if visible >= max_visible {
-                // Ya llegamos al límite: cerrar cualquier secuencia ANSI abierta.
-                out.push_str("\x1b[0m");
-                break;
-            }
-            visible += 1;
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Ancho real de la terminal (sin el clamp estético de `term_width`), para
-/// el wrapping del área de entrada.
-#[allow(dead_code)]
-pub fn real_term_width() -> usize {
-    termimad::crossterm::terminal::size()
-        .map(|(w, _)| w as usize)
-        .unwrap_or(80)
-        .max(1)
-}
-
 /// Caja de bienvenida compacta, sin bordes.
 pub fn welcome(focus: &str, mode: &str, brain: &str, cwd: &str) {
     println!();
@@ -756,19 +698,6 @@ pub fn checklist(items: &[(bool, String)]) {
 /// Accion "leyendo archivo" con arbol.
 pub fn action_read(path: &str) {
     println!("{}", dim(&format!("  │ leyendo {path}")));
-}
-
-/// Formatea una duración de forma compacta: `0.4s`, `1.3s`, `2m 3s`.
-#[allow(dead_code)]
-pub fn fmt_elapsed(d: Duration) -> String {
-    let secs = d.as_secs_f64();
-    if secs < 60.0 {
-        format!("{secs:.1}s")
-    } else {
-        let m = (secs / 60.0).floor() as u64;
-        let s = secs - (m as f64) * 60.0;
-        format!("{m}m {s:.0}s")
-    }
 }
 
 pub fn action_time(d: Duration) {

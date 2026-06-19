@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::cap_tail;
 
-/// Tiempo máximo de ejecución de un comando (`dpx:run` y búsquedas). Un proceso
+/// Tiempo máximo de ejecución de un comando (`run_command` y búsquedas). Un proceso
 /// que no termina (servidor, watch) se corta y se le explica al modelo.
 pub const RUN_TIMEOUT_SECS: u64 = 180;
 
@@ -166,7 +166,7 @@ pub fn run_command_streaming(
     if timed_out {
         s.push_str(&format!(
             "[TIMEOUT: el comando superó {timeout_secs}s y fue terminado. Si es un proceso de larga \
-             duración (servidor, watch), NO lo ejecutes con dpx:run: pídele al usuario que lo corra \
+             duración (servidor, watch), NO lo ejecutes con run_command: pídele al usuario que lo corra \
              en su propia terminal.]\n"
         ));
     }

@@ -130,8 +130,6 @@ impl ProjectStore {
         Ok(())
     }
 
-    /// El directorio raíz del proyecto (padre de `.dpx/`).
-
     /// Comandos que el usuario marcó como "permitir siempre" en este proyecto
     /// (`.dpx/allowed_commands`, uno por línea, coincidencia exacta).
     pub fn allowed_commands(&self) -> Vec<String> {

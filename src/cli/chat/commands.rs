@@ -259,9 +259,8 @@ pub(crate) fn handle_command(
                     ui::dim(&crate::token::budget_status().unwrap_or_else(|| "sin tope".to_string()))
                 );
                 if has_key {
-                    match crate::token::session_summary() {
-                        Some(s) => println!("  {}  {}", ui::dim("consumo:"), ui::dim(&s)),
-                        None => {}
+                    if let Some(s) = crate::token::session_summary() {
+                        println!("  {}  {}", ui::dim("consumo:"), ui::dim(&s));
                     }
                 } else {
                     println!(

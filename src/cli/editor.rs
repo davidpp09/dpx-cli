@@ -193,7 +193,7 @@ impl InputEditor {
                     return Ok(ReadResult::Line(lines));
                 }
                 Err(e) => {
-                    return Err(io::Error::new(io::ErrorKind::Other, e));
+                    return Err(io::Error::other(e));
                 }
             }
         }

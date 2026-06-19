@@ -1,16 +1,11 @@
 //! Escritura de archivos al proyecto, con seguridad y bajo confirmación.
 //!
-//! El mentor propone archivos en bloques con la forma:
-//!
-//! ````text
-//! ```dpx:write path=src/main/java/com/app/User.java
-//! <contenido del archivo>
-//! ```
-//! ````
-//!
-//! Este módulo extrae esas propuestas del texto de la respuesta. El REPL muestra
-//! un preview y pide confirmación antes de escribir nada. Nunca se escribe fuera
-//! del directorio del proyecto.
+//! El agente propone cambios vía tool calls nativas (`write_file`/`edit_file`/
+//! `delete_file`); este módulo las aplica. El REPL muestra un preview y pide
+//! confirmación antes de escribir nada. Nunca se escribe fuera del directorio
+//! del proyecto. Los únicos bloques de texto que aún se parsean son `dpx:plan`
+//! (checklist) y `dpx:skill` (progreso del modo learn), que no tienen
+//! equivalente nativo.
 
 pub mod safety;
 mod detect;
@@ -24,7 +19,7 @@ mod tree;
 pub use detect::{
     build_manifest, detect_build, detect_stack, detect_test, edits_touch_build, touches_build,
 };
-pub use edit::*; // FileEdit, parse_edit_marker, parse_edits, apply_edit
+pub use edit::*; // FileEdit, apply_edit
 pub use exec::{RUN_TIMEOUT_SECS, run_command, run_command_streaming};
 pub use grep::{orphan_refs, search_in_project};
 pub use tree::{project_tree, symbol_map};
@@ -45,99 +40,6 @@ impl FileWrite {
     pub fn line_count(&self) -> usize {
         self.content.lines().count()
     }
-}
-
-/// Extrae el marcador `dpx:write ... path=<ruta>` de una línea, si lo tiene.
-pub fn parse_path_marker(s: &str) -> Option<String> {
-    let rest = s.trim().strip_prefix("dpx:write")?;
-    rest.split_whitespace()
-        .find_map(|tok| tok.strip_prefix("path="))
-        .map(|p| p.trim_matches('"').to_string())
-        .filter(|p| !p.is_empty())
-}
-
-/// Extrae el marcador `dpx:read ... path=<ruta>` de una línea, si lo tiene.
-pub fn parse_read_marker(s: &str) -> Option<String> {
-    let rest = s.trim().strip_prefix("dpx:read")?;
-    rest.split_whitespace()
-        .find_map(|tok| tok.strip_prefix("path="))
-        .map(|p| p.trim_matches('"').to_string())
-        .filter(|p| !p.is_empty())
-}
-
-/// Extrae las peticiones de lectura `dpx:read path=...` de una respuesta.
-/// Acepta el marcador en el fence o como primera línea del bloque.
-pub fn parse_reads(text: &str) -> Vec<String> {
-    let mut reads = Vec::new();
-    let mut lines = text.lines().peekable();
-    while let Some(line) = lines.next() {
-        let Some(info) = line.trim_start().strip_prefix("```") else {
-            continue;
-        };
-        let mut path = parse_read_marker(info);
-        if path.is_none()
-            && let Some(first) = lines.peek()
-                && let Some(p) = parse_read_marker(first) {
-                    path = Some(p);
-                    lines.next();
-                }
-        if let Some(p) = path {
-            reads.push(p);
-            for body in lines.by_ref() {
-                if body.trim_start().starts_with("```") {
-                    break;
-                }
-            }
-        }
-    }
-    reads
-}
-
-/// ¿La info-string de un fence es una petición de ejecución `dpx:run`?
-fn is_run_fence(s: &str) -> bool {
-    let t = s.trim();
-    t == "dpx:run" || t.starts_with("dpx:run ")
-}
-
-/// Extrae las peticiones de ejecución `dpx:run` (el contenido del bloque es el comando).
-pub fn parse_runs(text: &str) -> Vec<String> {
-    let mut runs = Vec::new();
-    let mut lines = text.lines().peekable();
-    while let Some(line) = lines.next() {
-        let Some(info) = line.trim_start().strip_prefix("```") else {
-            continue;
-        };
-        let mut skip_marker = false;
-        let is_run = if is_run_fence(info) {
-            true
-        } else if lines.peek().is_some_and(|n| is_run_fence(n)) {
-            skip_marker = true;
-            true
-        } else {
-            false
-        };
-        if !is_run {
-            continue;
-        }
-        if skip_marker {
-            lines.next();
-        }
-        let mut cmd = String::new();
-        for body in lines.by_ref() {
-            if body.trim_start().starts_with("```") {
-                break;
-            }
-            if !cmd.is_empty() {
-                cmd.push('\n');
-            }
-            cmd.push_str(body);
-        }
-        let cmd = cmd.trim().to_string();
-        if !cmd.is_empty() {
-            runs.push(cmd);
-        }
-    }
-    runs
 }
 
 /// ¿La info-string de un fence es un plan `dpx:plan`?
@@ -223,31 +125,17 @@ fn cap_tail(s: &str, max_lines: usize) -> String {
     }
 }
 
-/// Quita del texto los bloques de acción (`dpx:read` / `dpx:write` / `dpx:run`) para
-/// poder renderizar solo la prosa como Markdown. Los bloques normales se conservan.
+/// Quita del texto los bloques `dpx:plan` y `dpx:skill` para poder renderizar
+/// solo la prosa como Markdown. Los bloques de código normales se conservan.
 pub fn strip_action_blocks(text: &str) -> String {
     let mut out = String::new();
     let mut lines = text.lines().peekable();
     while let Some(line) = lines.next() {
         if let Some(info) = line.trim_start().strip_prefix("```") {
-            let on_fence = parse_path_marker(info).is_some()
-                || parse_read_marker(info).is_some()
-                || parse_edit_marker(info).is_some()
-                || parse_search_marker(info).is_some()
-                || parse_delete_marker(info).is_some()
-                || is_run_fence(info)
-                || is_plan_fence(info)
-                || crate::skill::is_skill_fence(info);
-            let on_next = lines.peek().is_some_and(|n| {
-                parse_path_marker(n).is_some()
-                    || parse_read_marker(n).is_some()
-                    || parse_edit_marker(n).is_some()
-                    || parse_search_marker(n).is_some()
-                    || parse_delete_marker(n).is_some()
-                    || is_run_fence(n)
-                    || is_plan_fence(n)
-                    || crate::skill::is_skill_fence(n)
-            });
+            let on_fence = is_plan_fence(info) || crate::skill::is_skill_fence(info);
+            let on_next = lines
+                .peek()
+                .is_some_and(|n| is_plan_fence(n) || crate::skill::is_skill_fence(n));
             if on_fence || on_next {
                 // Saltar el bloque entero hasta el cierre ```.
                 for body in lines.by_ref() {
@@ -262,122 +150,6 @@ pub fn strip_action_blocks(text: &str) -> String {
         out.push('\n');
     }
     out
-}
-
-/// Detecta intentos de acción malformados, para avisar al modelo en vez de
-/// ignorarlos en silencio (el fallo silencioso deja la conversación sobre un
-/// estado falso): marcadores `dpx:*` fuera de un bloque ```, bloques `dpx:edit`
-/// sin el trío SEARCH/`=======`/REPLACE completo, y SEARCH/REPLACE sueltos.
-pub fn detect_malformed_actions(text: &str) -> Vec<String> {
-    const MARKERS: [&str; 5] = [
-        "dpx:write path=",
-        "dpx:edit path=",
-        "dpx:read path=",
-        "dpx:delete path=",
-        "dpx:search pattern=",
-    ];
-    let mut warnings = Vec::new();
-    let mut lines = text.lines().peekable();
-    while let Some(line) = lines.next() {
-        let t = line.trim();
-        if let Some(info) = t.strip_prefix("```") {
-            let is_edit = parse_edit_marker(info).is_some()
-                || lines.peek().is_some_and(|n| parse_edit_marker(n).is_some());
-            let mut edit_path = parse_edit_marker(info);
-            let (mut has_search, mut has_sep, mut has_replace) = (false, false, false);
-            for body in lines.by_ref() {
-                let bt = body.trim();
-                if bt.starts_with("```") {
-                    break;
-                }
-                if edit_path.is_none() {
-                    edit_path = parse_edit_marker(bt);
-                }
-                match bt {
-                    "<<<<<<< SEARCH" => has_search = true,
-                    "=======" => has_sep = true,
-                    ">>>>>>> REPLACE" => has_replace = true,
-                    _ => {}
-                }
-            }
-            if is_edit && !(has_search && has_sep && has_replace) {
-                let target = edit_path.map(|p| format!(" de `{p}`")).unwrap_or_default();
-                warnings.push(format!(
-                    "[AVISO: el bloque dpx:edit{target} está malformado (faltan los marcadores exactos \
-                     `<<<<<<< SEARCH`, `=======` o `>>>>>>> REPLACE`) — NO se aplicó nada. Re-emítelo completo.]"
-                ));
-            }
-            continue;
-        }
-        if MARKERS.iter().any(|m| t.starts_with(m)) {
-            let shown: String = t.chars().take(60).collect();
-            warnings.push(format!(
-                "[AVISO: emitiste `{shown}` FUERA de un bloque ``` — la acción NO se ejecutó. \
-                 Re-emítela dentro de un bloque ```dpx:...```.]"
-            ));
-        } else if t == "<<<<<<< SEARCH" || t == ">>>>>>> REPLACE" {
-            warnings.push(
-                "[AVISO: hay marcadores SEARCH/REPLACE fuera de un bloque ```dpx:edit — la edición \
-                 NO se aplicó. Re-emítela dentro del bloque.]"
-                    .to_string(),
-            );
-        }
-    }
-    warnings
-}
-
-/// Extrae las propuestas `dpx:write` del texto de una respuesta del mentor.
-///
-/// Acepta el marcador de dos formas (los modelos varían): en el propio fence
-/// (```` ```dpx:write path=… ````) o como primera línea dentro de un bloque de
-/// código normal (p.ej. tras ```` ```xml ````).
-pub fn parse_writes(text: &str) -> Vec<FileWrite> {
-    let mut writes = Vec::new();
-    let mut lines = text.lines().peekable();
-
-    while let Some(line) = lines.next() {
-        let Some(info) = line.trim_start().strip_prefix("```") else {
-            continue;
-        };
-
-        // ¿El marcador está en el fence, o en la primera línea de dentro?
-        let mut path = parse_path_marker(info);
-        let mut skip_marker_line = false;
-        if path.is_none()
-            && let Some(first) = lines.peek()
-                && let Some(p) = parse_path_marker(first) {
-                    path = Some(p);
-                    skip_marker_line = true;
-                }
-
-        match path {
-            Some(path) => {
-                if skip_marker_line {
-                    lines.next(); // descartar la línea del marcador
-                }
-                let mut content = String::new();
-                for body in lines.by_ref() {
-                    if body.trim_start().starts_with("```") {
-                        break;
-                    }
-                    content.push_str(body);
-                    content.push('\n');
-                }
-                writes.push(FileWrite { path, content });
-            }
-            // Bloque de código normal: consumir hasta su cierre para no confundir
-            // el ``` final con la apertura de otro bloque.
-            None => {
-                for body in lines.by_ref() {
-                    if body.trim_start().starts_with("```") {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    writes
 }
 
 /// Resuelve la ruta destino DENTRO del proyecto, rechazando rutas absolutas o
@@ -478,78 +250,6 @@ pub fn read_file_range(
     Ok(out)
 }
 
-/// Extrae el marcador `dpx:delete path=<ruta>`
-pub fn parse_delete_marker(s: &str) -> Option<String> {
-    let rest = s.trim().strip_prefix("dpx:delete")?;
-    rest.split_whitespace()
-        .find_map(|tok| tok.strip_prefix("path="))
-        .map(|p| p.trim_matches('"').to_string())
-        .filter(|p| !p.is_empty())
-}
-
-/// Extrae las peticiones de borrado `dpx:delete path=...`
-pub fn parse_deletes(text: &str) -> Vec<String> {
-    let mut deletes = Vec::new();
-    let mut lines = text.lines().peekable();
-    while let Some(line) = lines.next() {
-        let Some(info) = line.trim_start().strip_prefix("```") else { continue; };
-        let mut path = parse_delete_marker(info);
-        if path.is_none()
-            && let Some(first) = lines.peek()
-                && let Some(p) = parse_delete_marker(first) {
-                    path = Some(p);
-                    lines.next();
-                }
-        if let Some(p) = path {
-            deletes.push(p);
-            for body in lines.by_ref() {
-                if body.trim_start().starts_with("```") { break; }
-            }
-        }
-    }
-    deletes
-}
-
-/// Extrae el marcador `dpx:search pattern=<patron>`
-pub fn parse_search_marker(s: &str) -> Option<String> {
-    let rest = s.trim().strip_prefix("dpx:search")?;
-    let pat = rest.split_whitespace().find_map(|tok| tok.strip_prefix("pattern="));
-    if let Some(p) = pat {
-        let cleaned = p.trim_matches('"').to_string();
-        if !cleaned.is_empty() { return Some(cleaned); }
-    }
-    if let Some(idx) = rest.find("pattern=\"") {
-        let start = idx + 9;
-        if let Some(end) = rest[start..].find('"') {
-            return Some(rest[start..start+end].to_string());
-        }
-    }
-    None
-}
-
-/// Extrae las peticiones de búsqueda `dpx:search pattern=...`
-pub fn parse_searches(text: &str) -> Vec<String> {
-    let mut searches = Vec::new();
-    let mut lines = text.lines().peekable();
-    while let Some(line) = lines.next() {
-        let Some(info) = line.trim_start().strip_prefix("```") else { continue; };
-        let mut pat = parse_search_marker(info);
-        if pat.is_none()
-            && let Some(first) = lines.peek()
-                && let Some(p) = parse_search_marker(first) {
-                    pat = Some(p);
-                    lines.next();
-                }
-        if let Some(p) = pat {
-            searches.push(p);
-            for body in lines.by_ref() {
-                if body.trim_start().starts_with("```") { break; }
-            }
-        }
-    }
-    searches
-}
-
 /// Borra un archivo de forma segura.
 pub fn delete_file(project_root: &Path, rel: &str) -> Result<()> {
     let target = safe_target(project_root, rel)?;
@@ -563,40 +263,6 @@ pub fn delete_file(project_root: &Path, rel: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn marcador_en_el_fence() {
-        let text = "intro\n```dpx:write path=src/App.java\nclase\n```\nfin";
-        let w = parse_writes(text);
-        assert_eq!(w.len(), 1);
-        assert_eq!(w[0].path, "src/App.java");
-        assert_eq!(w[0].content, "clase\n");
-    }
-
-    #[test]
-    fn marcador_tras_lenguaje() {
-        // Caso real: el modelo pone ```xml y el marcador en la línea siguiente.
-        let text = "ejemplo\n```xml\ndpx:write path=pom.xml\n<project/>\n```";
-        let w = parse_writes(text);
-        assert_eq!(w.len(), 1);
-        assert_eq!(w[0].path, "pom.xml");
-        assert_eq!(w[0].content, "<project/>\n");
-    }
-
-    #[test]
-    fn bloque_normal_se_ignora() {
-        let text = "mira:\n```java\nint x = 1;\n```\nnada que escribir";
-        assert!(parse_writes(text).is_empty());
-    }
-
-    #[test]
-    fn varios_archivos() {
-        let text = "```dpx:write path=a.txt\nA\n```\ny\n```dpx:write path=b.txt\nB\n```";
-        let w = parse_writes(text);
-        assert_eq!(w.len(), 2);
-        assert_eq!(w[0].path, "a.txt");
-        assert_eq!(w[1].path, "b.txt");
-    }
 
     #[test]
     fn touches_build_detecta_fuente_y_manifiesto() {
@@ -668,36 +334,6 @@ mod tests {
         assert!(res.cancelled);
         assert!(res.output.contains("interrumpido"));
         assert!(t.elapsed().as_secs() < 8);
-    }
-
-    #[test]
-    fn malformado_marcador_fuera_de_bloque() {
-        let text = "voy a escribir:\ndpx:write path=a.txt\ncontenido suelto\n";
-        let w = detect_malformed_actions(text);
-        assert_eq!(w.len(), 1);
-        assert!(w[0].contains("FUERA"));
-    }
-
-    #[test]
-    fn malformado_edit_sin_replace() {
-        let text = "```dpx:edit path=a.txt\n<<<<<<< SEARCH\nfoo\n=======\nbar\n```";
-        let w = detect_malformed_actions(text);
-        assert_eq!(w.len(), 1);
-        assert!(w[0].contains("malformado"));
-    }
-
-    #[test]
-    fn bloques_correctos_no_generan_avisos() {
-        let text = "```dpx:write path=a.txt\nhola\n```\n\
-                    ```dpx:edit path=b.txt\n<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n```\n\
-                    prosa normal con `dpx:read` mencionado inline";
-        assert!(detect_malformed_actions(text).is_empty());
-    }
-
-    #[test]
-    fn ejemplo_dentro_de_bloque_normal_no_avisa() {
-        let text = "```text\ndpx:write path=ejemplo.txt\n```";
-        assert!(detect_malformed_actions(text).is_empty());
     }
 
     #[test]
