@@ -48,6 +48,46 @@ pub(crate) fn build_quiz_prompt(store: &ProjectStore, focus_id: Option<&str>, to
     }
 }
 
+/// Prompt para `/evaluar [tema]`: el tutor evalúa el nivel real del usuario
+/// con UNA pregunta abierta antes de empezar a enseñar, para no sobreexplicar
+/// lo que ya sabe ni asumir lo que no sabe.
+pub(crate) fn build_evaluar_prompt(store: &ProjectStore, focus_id: Option<&str>, topic: &str) -> String {
+    let topic = if topic.is_empty() {
+        let skills = store.read_skills();
+        crate::focus::curriculum::next_topic(focus_id, &skills)
+            .map(|t| t.name)
+            .unwrap_or("los fundamentos del stack")
+            .to_string()
+    } else {
+        topic.to_string()
+    };
+    format!(
+        "Antes de enseñarme sobre «{topic}», hazme UNA pregunta abierta para saber \
+         qué nivel tengo. No me preguntes una lista de cosas; pídeme que te cuente \
+         cómo entiendo el concepto con mis palabras, o que te diga en qué contexto \
+         lo he visto. Escucha mi respuesta y AJUSTA la profundidad de tu enseñanza \
+         a lo que oigas. Empieza con esa pregunta ahora."
+    )
+}
+
+/// Prompt para `/revisar [archivo]`: code review pedagógico.
+/// Si se aporta contenido del archivo, va incrustado. Si no, el tutor pide
+/// que el usuario comparta el código que quiere revisar.
+pub(crate) fn build_revisar_prompt(arg: &str, content: Option<&str>) -> String {
+    let intro = "Revísame este código como un senior que enseña: primero dime qué \
+                 está bien y por qué (nombra el principio o patrón), luego qué podría \
+                 mejorar con una propuesta concreta, y finalmente si hay algún concepto \
+                 clave que valga la pena aprender aquí. Señala líneas o bloques específicos. \
+                 Explica el PORQUÉ, no solo el qué.";
+    match content {
+        Some(code) if !code.trim().is_empty() => {
+            let label = if arg.is_empty() { "código compartido".to_string() } else { arg.to_string() };
+            format!("{intro}\n\nArchivo `{label}`:\n```\n{code}\n```")
+        }
+        _ => format!("{intro}\n\nComparte el código que quieres revisar (usa @archivo o pégalo)."),
+    }
+}
+
 /// Despacha un comando del REPL. Muta el estado de la sesión cuando aplica.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_command(
@@ -181,7 +221,8 @@ pub(crate) fn handle_command(
 
         "progreso" | "progress" => {
             let skills = store.read_skills();
-            ui::learn_panel(&skills, &crate::skill::today());
+            let streak = store.read_streak().map(|s| s.days);
+            ui::learn_panel(&skills, &crate::skill::today(), streak);
         }
 
         "temario" | "curriculum" => {
@@ -267,6 +308,25 @@ pub(crate) fn handle_command(
                         "  {}",
                         ui::dim("configura DEEPSEEK_API_KEY en tu .env o ~/.dpx/.env")
                     );
+                }
+            }
+        }
+
+        "undo" | "deshacer" => {
+            match store.restore_undo(cwd) {
+                Ok(restored) if restored.is_empty() => {
+                    println!("{}", ui::dim("nada que deshacer · /undo revierte solo el último turno"));
+                }
+                Ok(restored) => {
+                    println!("{} {} archivo(s) restaurado(s):", ui::accent("⏺ undo ·"), restored.len());
+                    for path in &restored {
+                        println!("  {} {}", ui::dim("·"), path);
+                    }
+                    println!("{}", ui::dim("  turno anterior revertido"));
+                    let _ = store.clear_undo();
+                }
+                Err(e) => {
+                    println!("{} {e}", ui::dim("no pude deshacer:"));
                 }
             }
         }

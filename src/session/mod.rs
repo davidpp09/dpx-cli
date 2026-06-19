@@ -117,6 +117,58 @@ impl ProjectStore {
         Ok(())
     }
 
+    /// Guarda el contenido ORIGINAL de un archivo antes de que el agente lo modifique,
+    /// para que `/undo` pueda revertir el último turno. Solo preserva la primera
+    /// versión del turno: si el mismo archivo se toca dos veces, la original se conserva.
+    pub fn save_undo_file(&self, rel_path: &str, content: &[u8]) -> Result<()> {
+        let dst = self.root.join("undo").join(rel_path.replace('\\', "/"));
+        if dst.exists() {
+            return Ok(()); // ya tenemos el original de este turno
+        }
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("No se pudo crear directorio undo para {rel_path}"))?;
+        }
+        fs::write(&dst, content)
+            .with_context(|| format!("No se pudo guardar snapshot de {rel_path}"))
+    }
+
+    /// Restaura todos los archivos del snapshot del último turno.
+    /// Devuelve la lista de paths restaurados.
+    pub fn restore_undo(&self, cwd: &Path) -> Result<Vec<String>> {
+        let undo_dir = self.root.join("undo");
+        if !undo_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut restored = Vec::new();
+        undo_restore_recursive(&undo_dir, &undo_dir, cwd, &mut restored)?;
+        Ok(restored)
+    }
+
+    /// Limpia el snapshot de undo. Llamar al inicio de cada turno nuevo.
+    pub fn clear_undo(&self) -> Result<()> {
+        let undo_dir = self.root.join("undo");
+        if undo_dir.exists() {
+            fs::remove_dir_all(&undo_dir)
+                .with_context(|| "No se pudo limpiar el directorio undo")?;
+        }
+        Ok(())
+    }
+
+    /// Lee la racha de aprendizaje del usuario, si existe.
+    pub fn read_streak(&self) -> Option<crate::streak::Streak> {
+        std::fs::read_to_string(self.root.join("streak.md"))
+            .ok()
+            .and_then(|md| crate::streak::from_markdown(&md))
+    }
+
+    /// Guarda la racha de aprendizaje.
+    pub fn write_streak(&self, streak: &crate::streak::Streak) -> Result<()> {
+        let path = self.root.join("streak.md");
+        fs::write(&path, crate::streak::to_markdown(streak))
+            .with_context(|| format!("No se pudo escribir {}", path.display()))
+    }
+
     /// Lee la síntesis del último comité de hack, si existe.
     pub fn read_committee(&self) -> Option<String> {
         fs::read_to_string(self.root.join("committee.md")).ok()
@@ -243,6 +295,33 @@ pub fn fallback_context(turns: &[Turn], prior: Option<&str>) -> String {
         md.push_str(&format!("- **{}:** {}\n", t.role, t.text));
     }
     md
+}
+
+/// Caminata recursiva sobre el directorio de undo: copia cada archivo de vuelta
+/// a su posición original relativa dentro de `cwd`.
+fn undo_restore_recursive(
+    base: &Path,
+    dir: &Path,
+    cwd: &Path,
+    restored: &mut Vec<String>,
+) -> Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("No se pudo leer {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            undo_restore_recursive(base, &path, cwd, restored)?;
+        } else {
+            let rel = path.strip_prefix(base).unwrap_or(&path);
+            let dst = cwd.join(rel);
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&path, &dst)
+                .with_context(|| format!("No se pudo restaurar {}", rel.display()))?;
+            restored.push(rel.display().to_string().replace('\\', "/"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

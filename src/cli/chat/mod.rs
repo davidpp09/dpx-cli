@@ -25,13 +25,13 @@ mod commands;
 mod recall;
 mod committee;
 pub(crate) use actions::*;
-pub(crate) use commands::{build_quiz_prompt, handle_command};
+pub(crate) use commands::{build_evaluar_prompt, build_quiz_prompt, build_revisar_prompt, handle_command};
 pub(crate) use recall::{maybe_auto_delegate, run_subagent};
 #[cfg(test)]
 pub(crate) use recall::{classify_delegation, subagent_preamble, subagent_tool};
 pub(crate) use committee::run_comite_command;
 pub(crate) use helpers::{
-    canonical_cmd, command_in_mode, mode_label, mode_label_compact, reject_command, short_path,
+    canonical_cmd, command_in_mode, mode_label, reject_command, short_path,
 };
 
 fn has_deepseek_key() -> bool {
@@ -118,10 +118,50 @@ pub async fn run(
             plan_data.as_deref(),
         );
     }
+
+    // Modo learn: racha + sugerencias de repaso + siguiente tema.
+    if mode == Mode::Learn {
+        let today = crate::skill::today();
+
+        // Racha: actualiza al arrancar la sesión.
+        let prior_streak = store.read_streak();
+        let streak = crate::streak::update(&today, prior_streak);
+        if let Some(msg) = crate::streak::message(streak.days) {
+            println!("  {} {}", ui::accent("⏺ racha:"), ui::dim(&msg));
+        }
+        let _ = store.write_streak(&streak);
+
+        // Repaso espaciado: conceptos que toca repasar hoy.
+        let skills_now = store.read_skills();
+        let to_review: Vec<_> = skills_now
+            .iter()
+            .filter(|s| crate::skill::needs_review(s, &today))
+            .collect();
+        if !to_review.is_empty() {
+            println!("\n  {} para repasar hoy:", ui::accent("↻"));
+            for s in to_review.iter().take(3) {
+                println!("    {} {}", ui::dim("·"), s.topic);
+            }
+            if to_review.len() > 3 {
+                println!("    {} ({} más)", ui::dim("·"), to_review.len() - 3);
+            }
+            println!("  {}", ui::dim("di «repasemos» para que el tutor te interrogue"));
+        }
+
+        // Siguiente tema del temario.
+        if let Some(next) = crate::focus::curriculum::next_topic(focus_id.as_deref(), &skills_now) {
+            println!("\n  {} {}", ui::accent("→ siguiente:"), next.name);
+            println!("  {}", ui::dim(&format!("di «enséñame {}» o usa /evaluar", next.name)));
+        }
+    }
+
     println!(
         "\n{}",
         ui::dim("@archivo para leer código · \\ al final para multilínea · /salir para terminar")
     );
+
+    // Snapshot de skills al arrancar: para el resumen de cierre en learn mode.
+    let initial_skills = store.read_skills();
 
     let mut history: Vec<Message> = Vec::new();
     let mut turns: Vec<Turn> = Vec::new();
@@ -153,13 +193,8 @@ pub async fn run(
 
     loop {
         ui::title_idle(&proj_label);
-        let tag = format!(
-            "{} {}",
-            ui::dim(&focus::display_name(focus_id.as_deref()).replace(' ', "-").to_lowercase()),
-            ui::dim(mode_label_compact(mode)),
-        );
 
-        match ed.read_input(&tag) {
+        match ed.read_input("dpx") {
             Ok(ReadResult::Line(line)) => {
                 let input = line.trim();
                 if input.is_empty() {
@@ -191,6 +226,81 @@ pub async fn run(
                         run_comite_command(&cwd, idea, &skin, &store, &mut turns).await;
                     } else {
                         reject_command("comite", mode);
+                    }
+                    continue;
+                }
+
+                // /revisar [archivo]: code review pedagógico. Si se da un path, se
+                // lee el archivo y se inyecta; sin arg, el tutor pide el código.
+                if single_line
+                    && let Some(rest) = input
+                        .strip_prefix("/revisar")
+                        .or_else(|| input.strip_prefix("/review"))
+                    && (rest.is_empty() || rest.starts_with(' '))
+                {
+                    if !command_in_mode("revisar", mode) {
+                        reject_command("revisar", mode);
+                        continue;
+                    }
+                    let arg = rest.trim();
+                    let content = if !arg.is_empty() {
+                        let p = std::path::Path::new(arg);
+                        let full = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+                        std::fs::read_to_string(&full).ok()
+                    } else {
+                        None
+                    };
+                    let prompt = build_revisar_prompt(arg, content.as_deref());
+                    store.checkpoint("user", input)?;
+                    turns.push(Turn { role: "user", text: input.to_string() });
+                    ui::clear_cancel();
+                    let outcome = run_turn(
+                        &mentor, &mut history, &cwd, &skin,
+                        &mut |p| ed.confirm_line(p), &store, &prompt, auto,
+                    ).await;
+                    match outcome {
+                        TurnOutcome::Reply(full) => {
+                            store.checkpoint("assistant", &full)?;
+                            turns.push(Turn { role: "assistant", text: full });
+                        }
+                        TurnOutcome::Empty => {}
+                        TurnOutcome::ModelFailed(err) => {
+                            ui::panel("⚠ error del modelo", &ui::friendly_error(&err));
+                        }
+                    }
+                    continue;
+                }
+
+                // /evaluar [tema]: el tutor evalúa el nivel real del usuario con una
+                // pregunta abierta antes de enseñar — evita sobreexplicar lo ya sabido.
+                if single_line
+                    && let Some(rest) = input
+                        .strip_prefix("/evaluar")
+                        .or_else(|| input.strip_prefix("/evaluate"))
+                    && (rest.is_empty() || rest.starts_with(' '))
+                {
+                    if !command_in_mode("evaluar", mode) {
+                        reject_command("evaluar", mode);
+                        continue;
+                    }
+                    let topic = rest.trim();
+                    let prompt = build_evaluar_prompt(&store, focus_id.as_deref(), topic);
+                    store.checkpoint("user", input)?;
+                    turns.push(Turn { role: "user", text: input.to_string() });
+                    ui::clear_cancel();
+                    let outcome = run_turn(
+                        &mentor, &mut history, &cwd, &skin,
+                        &mut |p| ed.confirm_line(p), &store, &prompt, auto,
+                    ).await;
+                    match outcome {
+                        TurnOutcome::Reply(full) => {
+                            store.checkpoint("assistant", &full)?;
+                            turns.push(Turn { role: "assistant", text: full });
+                        }
+                        TurnOutcome::Empty => {}
+                        TurnOutcome::ModelFailed(err) => {
+                            ui::panel("⚠ error del modelo", &ui::friendly_error(&err));
+                        }
                     }
                     continue;
                 }
@@ -252,6 +362,8 @@ pub async fn run(
 
                 store.checkpoint("user", input)?;
                 turns.push(Turn { role: "user", text: input.to_string() });
+                // Limpia el snapshot de undo: solo el ÚLTIMO turno se puede deshacer.
+                let _ = store.clear_undo();
 
                 let mut turn_input = input.to_string();
                 if mode != Mode::Learn
@@ -286,10 +398,9 @@ pub async fn run(
                     );
                     println!("  {}", ui::dim(&ui::friendly_error(&err)));
                 }
+                let had_reply = matches!(&outcome, TurnOutcome::Reply(_));
                 match outcome {
                     TurnOutcome::Reply(full) => {
-                        // (Los skills son curados en skills/*.md; ya no se
-                        // auto-aprende nada de la respuesta — eso daba genérico.)
                         store.checkpoint("assistant", &full)?;
                         turns.push(Turn { role: "assistant", text: full });
                     }
@@ -314,6 +425,11 @@ pub async fn run(
                     );
                 }
 
+                // Separador visual entre turnos: delimita dónde termina la respuesta.
+                if had_reply {
+                    println!("{}", ui::dim("  ─────────────────────────────────────────────────────────"));
+                }
+
                 // Compactación automática al acercarse al límite de contexto.
                 if estimate_tokens(&history) > compact_threshold() {
                     println!(
@@ -334,6 +450,13 @@ pub async fn run(
                 break;
             }
         }
+    }
+
+    // Resumen de sesión learn: qué aprendiste hoy, racha, siguiente tema.
+    if mode == Mode::Learn && !turns.is_empty() {
+        let final_skills = store.read_skills();
+        let streak = store.read_streak().map(|s| s.days);
+        ui::learn_session_summary(&initial_skills, &final_skills, focus_id.as_deref(), streak);
     }
 
     close_session(&router, &store, &turns, prior.as_deref()).await;
@@ -829,13 +952,16 @@ async fn run_turn(
                         auto_tested = true;
                     }
                 }
-                // Modos menos autónomos: basta el compile/lint-check, más rápido y
-                // sin los efectos secundarios de los tests.
-                if !auto_tested
-                    && !auto_built
+                // Modo no-auto: build + tests (van por confirm_run; el usuario puede omitirlos).
+                if !auto_built
                     && let Some(build_cmd) = crate::fs::detect_build(cwd) {
                         runs.push(build_cmd);
                         auto_built = true;
+                    }
+                if !auto_tested
+                    && let Some(test_cmd) = crate::fs::detect_test(cwd) {
+                        runs.push(test_cmd);
+                        auto_tested = true;
                     }
             }
         }
@@ -1161,18 +1287,36 @@ async fn run_tool_call(
             ToolOutcome::Done(run_subagent(cwd, &task).await)
         }
         Ok(DpxCall::Write { path, content }) => {
+            // Snapshot original antes de sobreescribir (para /undo).
+            let full = cwd.join(&path);
+            if full.exists()
+                && let Ok(orig) = std::fs::read(&full) {
+                    let _ = store.save_undo_file(&path, &orig);
+                }
             let w = crate::fs::FileWrite { path, content };
             let report = process_writes(cwd, std::slice::from_ref(&w), ask, auto);
             writes.push(w);
             ToolOutcome::Done(report.notes.join("\n"))
         }
         Ok(DpxCall::Edit { path, search, replace }) => {
+            // Snapshot original antes de editar (para /undo).
+            let full = cwd.join(&path);
+            if full.exists()
+                && let Ok(orig) = std::fs::read(&full) {
+                    let _ = store.save_undo_file(&path, &orig);
+                }
             let e = crate::fs::FileEdit { path, search, replace };
             let report = process_edits(cwd, std::slice::from_ref(&e), ask, auto);
             edits.push(e);
             ToolOutcome::Done(report.notes.join("\n"))
         }
         Ok(DpxCall::Delete { path }) => {
+            // Snapshot antes de borrar (para /undo pueda restaurar).
+            let full = cwd.join(&path);
+            if full.exists()
+                && let Ok(orig) = std::fs::read(&full) {
+                    let _ = store.save_undo_file(&path, &orig);
+                }
             let report = process_deletes(cwd, &[path], ask);
             ToolOutcome::Done(report.notes.join("\n"))
         }

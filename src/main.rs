@@ -13,6 +13,7 @@ mod focus;
 mod fs;
 mod session;
 mod skill;
+mod streak;
 mod token;
 mod ui;
 

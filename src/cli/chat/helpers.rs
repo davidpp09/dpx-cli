@@ -38,7 +38,7 @@ pub(crate) fn command_in_mode(name: &str, mode: Mode) -> bool {
     match name {
         "auto" => matches!(mode, Mode::Code | Mode::Hack),
         "comite" | "brainstorm" => mode == Mode::Hack,
-        "quiz" | "progreso" | "temario" => mode == Mode::Learn,
+        "quiz" | "progreso" | "temario" | "evaluar" | "revisar" => mode == Mode::Learn,
         _ => true,
     }
 }
@@ -48,7 +48,7 @@ pub(crate) fn reject_command(name: &str, mode: Mode) {
     let needed = match name {
         "auto" => "code o hack",
         "comite" | "brainstorm" => "hack",
-        "quiz" | "progreso" | "temario" => "learn",
+        "quiz" | "progreso" | "temario" | "evaluar" | "revisar" => "learn",
         _ => "otro",
     };
     println!(
@@ -66,15 +66,6 @@ pub(crate) fn mode_label(mode: Mode) -> &'static str {
         Mode::Code => "code (agente autónomo)",
         Mode::Hack => "hack (construir rápido con criterio)",
         Mode::Learn => "learn (tutor socrático)",
-    }
-}
-
-/// Versión compacta para la barra de estado (sin paréntesis largos).
-pub(crate) fn mode_label_compact(mode: Mode) -> &'static str {
-    match mode {
-        Mode::Code => "code",
-        Mode::Hack => "hack",
-        Mode::Learn => "learn",
     }
 }
 

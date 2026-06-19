@@ -96,6 +96,19 @@ const DPX: &[Topic] = &[
     topic!("El editor TUI con crossterm", "modo raw, eventos y render"),
 ];
 
+/// Primer tema no dominado: el que el tutor debería proponer a continuación.
+/// Cruza el temario del stack con las skills registradas del usuario.
+pub fn next_topic(focus_id: Option<&str>, skills: &[crate::skill::Skill]) -> Option<&'static Topic> {
+    use crate::skill::SkillLevel;
+    topics(focus_id).iter().find(|t| {
+        let best = skills.iter()
+            .filter(|s| matches(t.name, &s.topic))
+            .map(|s| s.level)
+            .max();
+        best != Some(SkillLevel::Dominado)
+    })
+}
+
 /// La sección de temario que se inyecta en el prompt del modo learn (para que el
 /// tutor sepa qué proponer y en qué orden). Vacía si el stack no tiene temario.
 pub fn prompt_section(focus_id: Option<&str>) -> String {

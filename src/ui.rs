@@ -307,26 +307,29 @@ fn draw_box(lines: &[String], color: fn(&str) -> String, max_width: Option<usize
 }
 
 /// Panel de aprendizaje (comando `/progreso`): cada concepto con dots de nivel,
-/// un badge de dominio en texto y mensaje motivador si aún no hay skills.
+/// un badge de dominio en texto, racha de sesiones y mensaje motivador si aún no hay skills.
 /// Reusa la caja redondeada con degradado del modo activo.
-pub fn learn_panel(skills: &[crate::skill::Skill], today: &str) {
+pub fn learn_panel(skills: &[crate::skill::Skill], today: &str, streak: Option<u32>) {
     use crate::skill::{SkillLevel, needs_review};
 
     // --- sin skills aún: mensaje motivador ---
     if skills.is_empty() {
-        draw_box(
-            &[
-                grad("tu aprendizaje"),
-                String::new(),
-                dim("aún no hay nada registrado."),
-                dim("entra en modo learn (/modo learn) y empieza a descubrir."),
-                String::new(),
-                dim("cada concepto que trabajemos irá apareciendo aquí"),
-                dim("con su nivel: ●●● dominado · ●●○ practicando · ●○○ visto"),
-            ],
-            grad,
-            None,
-        );
+        let mut empty_lines = vec![
+            grad("tu aprendizaje"),
+            String::new(),
+        ];
+        if let Some(s) = streak.and_then(crate::streak::message) {
+            empty_lines.push(format!("  {} {s}", accent("⏺ racha:")));
+            empty_lines.push(String::new());
+        }
+        empty_lines.extend([
+            dim("aún no hay nada registrado."),
+            dim("entra en modo learn (/modo learn) y empieza a descubrir."),
+            String::new(),
+            dim("cada concepto que trabajemos irá apareciendo aquí"),
+            dim("con su nivel: ●●● dominado · ●●○ practicando · ●○○ visto"),
+        ]);
+        draw_box(&empty_lines, grad, None);
         return;
     }
 
@@ -352,6 +355,9 @@ pub fn learn_panel(skills: &[crate::skill::Skill], today: &str) {
     // Título y resumen
     lines.push(grad("tu aprendizaje"));
     lines.push(String::new());
+    if let Some(s) = streak.and_then(crate::streak::message) {
+        lines.push(format!("  {} {s}", accent("⏺ racha:")));
+    }
     lines.push(format!(
         "{} {total} conceptos · {dominados} dominados · {badge}",
         dim("⏺"),
@@ -363,6 +369,14 @@ pub fn learn_panel(skills: &[crate::skill::Skill], today: &str) {
         ));
     }
     lines.push(String::new());
+
+    // Badges/logros desbloqueados
+    let badges = earned_badges(skills, streak);
+    if !badges.is_empty() {
+        let parts: Vec<String> = badges.iter().map(|(label, _)| accent(label)).collect();
+        lines.push(format!("  {}", parts.join(&dim(" · "))));
+        lines.push(String::new());
+    }
 
     // --- cada concepto con dots ---
     // Agrupados por stack (la lista ya viene ordenada por stack+tema desde merge).
@@ -395,6 +409,67 @@ pub fn learn_panel(skills: &[crate::skill::Skill], today: &str) {
     }
 
     // --- pintar la caja ---
+    draw_box(&lines, grad, None);
+}
+
+/// Logros desbloqueados: calculados on-the-fly desde skills + racha.
+/// Devuelve `(etiqueta, descripción)` para cada badge ganado.
+pub fn earned_badges(skills: &[crate::skill::Skill], streak: Option<u32>) -> Vec<(&'static str, &'static str)> {
+    use crate::skill::SkillLevel;
+    let mut badges: Vec<(&'static str, &'static str)> = Vec::new();
+    let total = skills.len();
+    let dominados = skills.iter().filter(|s| s.level == SkillLevel::Dominado).count();
+    let streak_n = streak.unwrap_or(0);
+
+    if total >= 1  { badges.push(("primera chispa", "primer concepto aprendido")); }
+    if total >= 5  { badges.push(("5 conceptos",    "cinco conceptos en tu haber")); }
+    if total >= 10 { badges.push(("10 conceptos",   "diez conceptos dominados o en curso")); }
+    if dominados >= 1  { badges.push(("primer dominio", "primer concepto dominado")); }
+    if dominados >= 5  { badges.push(("5 dominados",    "cinco conceptos dominados")); }
+    if dominados >= 10 { badges.push(("10 dominados",   "diez conceptos dominados")); }
+    if streak_n >= 3  { badges.push(("racha de 3",   "tres sesiones consecutivas")); }
+    if streak_n >= 7  { badges.push(("semana entera", "siete sesiones seguidas")); }
+    badges
+}
+
+/// Resumen al cierre de una sesión learn: nuevos conceptos, subidas de nivel,
+/// racha y siguiente tema sugerido. Se muestra entre el loop y `close_session`.
+pub fn learn_session_summary(
+    initial: &[crate::skill::Skill],
+    final_skills: &[crate::skill::Skill],
+    focus_id: Option<&str>,
+    streak: Option<u32>,
+) {
+    let mut changes: Vec<String> = Vec::new();
+    for s in final_skills {
+        let prior = initial.iter().find(|p| {
+            p.topic.trim().to_lowercase() == s.topic.trim().to_lowercase()
+        });
+        match prior {
+            None => changes.push(format!("  {} {} ({})", dim("·"), s.topic, dim(s.level.as_str()))),
+            Some(p) if p.level != s.level => changes.push(format!(
+                "  {} {} ({} → {})", dim("·"), s.topic, dim(p.level.as_str()), accent(s.level.as_str())
+            )),
+            _ => {}
+        }
+    }
+
+    if changes.is_empty() && streak.map(|s| s < 2).unwrap_or(true) {
+        return;
+    }
+
+    let mut lines = vec![grad("sesión de hoy"), String::new()];
+    if !changes.is_empty() {
+        lines.push(dim("aprendiste:"));
+        lines.extend(changes);
+        lines.push(String::new());
+    }
+    if let Some(s) = streak.and_then(crate::streak::message) {
+        lines.push(format!("  {} {s}", accent("⏺ racha:")));
+    }
+    if let Some(next) = crate::focus::curriculum::next_topic(focus_id, final_skills) {
+        lines.push(format!("  {} {}", dim("→ siguiente:"), next.name));
+    }
     draw_box(&lines, grad, None);
 }
 
@@ -1000,9 +1075,12 @@ pub fn print_help(mode: crate::focus::Mode) {
         ("/modo [code|hack|learn]", "cambia de modo (hace · rápido · enseña)", &[]),
         ("/progreso", "tu progreso de aprendizaje: nivel por tema y qué repasar", &[Mode::Learn]),
         ("/temario", "el temario del stack y cuánto llevas", &[Mode::Learn]),
+        ("/evaluar [tema]", "el tutor te pregunta qué sabes antes de enseñarte", &[Mode::Learn]),
+        ("/revisar [archivo]", "code review pedagógico: qué está bien, qué mejorar, por qué", &[Mode::Learn]),
         ("/examen [tema]", "el tutor te interroga para fijar lo aprendido", &[Mode::Learn]),
         ("/cerebro [modelo]", "cerebro (dpx usa solo deepseek)", &[]),
         ("/auto [off|all]", "modo autónomo: cambios sin preguntar", &[Mode::Code, Mode::Hack]),
+        ("/undo", "revierte los archivos del último turno a su estado anterior", &[]),
         ("/actualizar", "recompila e instala dpx desde este repo", &[]),
         ("/salir", "termina y guarda el contexto", &[]),
     ];
