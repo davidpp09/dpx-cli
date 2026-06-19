@@ -29,7 +29,7 @@ pub(crate) use actions::*;
 pub(crate) use commands::{build_evaluar_prompt, build_quiz_prompt, build_revisar_prompt, handle_command};
 pub(crate) use recall::{maybe_auto_delegate, run_subagent};
 #[cfg(test)]
-pub(crate) use recall::{classify_delegation, classify_delegation_fallback, subagent_preamble, subagent_tool};
+pub(crate) use recall::{classify_delegation_fallback, subagent_preamble, subagent_tool};
 pub(crate) use committee::run_comite_command;
 pub(crate) use helpers::{
     canonical_cmd, command_in_mode, mode_label, reject_command, short_path,
@@ -95,6 +95,7 @@ pub async fn run(
     if prior.is_some() {
         println!("  {}", ui::dim("memoria · retomando contexto de sesiones anteriores"));
     }
+
     // Cada modo arranca con su propio cartel: deja claro en cuál estás.
     ui::mode_banner(mode);
     // Modo hack: panel con el estado del proyecto, plan y progreso.
@@ -158,7 +159,7 @@ pub async fn run(
 
     println!(
         "\n{}",
-        ui::dim("@archivo para leer código · \\ al final para multilínea · /salir para terminar")
+        ui::dim("@archivo para leer código · Shift+Enter para nueva línea · /salir para terminar")
     );
 
     // Snapshot de skills al arrancar: para el resumen de cierre en learn mode.
@@ -176,6 +177,7 @@ pub async fn run(
 
     // Editor de entrada propio (crossterm): multilínea, Tab, pegados, historial.
     let mut ed = InputEditor::new(cwd.clone());
+    ed.set_context(focus::display_name(focus_id.as_deref()), mode.name());
 
     // Modo HACK en proyecto NUEVO: la primera idea que escribas pasa por el
     // comité (lluvia de ideas) antes de ponerse a construir. De ahí sale un
@@ -194,8 +196,10 @@ pub async fn run(
 
     loop {
         ui::title_idle(&proj_label);
+        // Medidor de contexto en vivo para la barra de atajos al pie.
+        ed.set_meter(&ui::context_meter(estimate_tokens(&history), crate::agent::CONTEXT_BUDGET));
 
-        match ed.read_input("dpx") {
+        match ed.read_input() {
             Ok(ReadResult::Line(line)) => {
                 let input = line.trim();
                 if input.is_empty() {
@@ -350,6 +354,7 @@ pub async fn run(
                         &mut mode, &mut auto, &mut history, &cwd,
                         turns.len(),
                     );
+                    ed.set_context(focus::display_name(focus_id.as_deref()), mode.name());
                     continue;
                 }
 
@@ -411,9 +416,10 @@ pub async fn run(
                     }
                 }
 
-                // Consumo real del turno (in/out + % de caché + costo aprox).
-                if let Some(line) = crate::token::turn_line(tok_before) {
-                    println!("{}", ui::dim(&format!("  {line}")));
+                // Separador de turno con consumo embebido: delimita la respuesta y muestra el delta.
+                if had_reply {
+                    let tok_info = crate::token::turn_line(tok_before);
+                    println!("{}", ui::turn_sep(tok_info.as_deref()));
                 }
                 // Aviso si se rebasó el presupuesto de la sesión (si hay uno).
                 if crate::token::over_budget() {
@@ -424,11 +430,6 @@ pub async fn run(
                             crate::token::budget_status().unwrap_or_default()
                         ))
                     );
-                }
-
-                // Separador visual entre turnos: delimita dónde termina la respuesta.
-                if had_reply {
-                    println!("{}", ui::dim("  ─────────────────────────────────────────────────────────"));
                 }
 
                 // Compactación automática al acercarse al límite de contexto.
@@ -1307,18 +1308,18 @@ async fn run_tool_call(
             })
         }
         Ok(DpxCall::Search { pattern }) => {
-            println!("{}", ui::accent(&format!("  ⎁ buscando: {pattern}")));
+            ui::tool_action("buscando", &pattern);
             ToolOutcome::Done(crate::fs::search_in_project(cwd, &pattern))
         }
         Ok(DpxCall::WebSearch { query }) => {
-            println!("{}", ui::accent(&format!("  ⌕ buscando en la web: {query}")));
+            ui::tool_action("buscando en la web", &query);
             ToolOutcome::Done(match crate::agent::search::web_search(&query).await {
                 Ok(results) => results,
                 Err(e) => format!("[web_search falló: {e}]"),
             })
         }
         Ok(DpxCall::WebFetch { url }) => {
-            println!("{}", ui::accent(&format!("  ⌕ leyendo: {url}")));
+            ui::tool_action("leyendo la web", &url);
             ToolOutcome::Done(match crate::agent::search::web_fetch(&url).await {
                 Ok(body) => body,
                 Err(e) => format!("[web_fetch falló: {e}]"),

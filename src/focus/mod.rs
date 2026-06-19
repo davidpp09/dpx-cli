@@ -278,8 +278,7 @@ practicando | concepto | stack
 ```
 Niveles: `visto` `practicando` `dominado`. Omite el bloque si no se trabajo ningun concepto.";
 
-/// Contrato de skills curados (code/hack): playbooks en `skills/*.md`.
-
+// Contrato de skills curados (code/hack): playbooks en `skills/*.md`.
 
 #[cfg(test)]
 mod tests {

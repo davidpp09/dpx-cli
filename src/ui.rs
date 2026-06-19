@@ -770,13 +770,34 @@ pub fn checklist(items: &[(bool, String)]) {
     }
 }
 
-/// Accion "leyendo archivo" con arbol.
+/// Línea de acción "reactiva": glifo con color de modo + verbo + objetivo.
+/// Es el feedback en vivo de qué está haciendo dpx (leer, buscar, escribir…),
+/// con identidad visual coherente (estilo Claude Code: ves la acción real).
+pub fn tool_action(verb: &str, target: &str) {
+    let (r, g, b) = accent_rgb();
+    // Glifo ◇ con el color del modo, verbo en gris, objetivo en acento.
+    println!(
+        "  \x1b[38;2;{r};{g};{b}m◇{RESET} {} {}",
+        dim(verb),
+        accent(target)
+    );
+}
+
+/// Accion "leyendo archivo".
 pub fn action_read(path: &str) {
-    println!("{}", dim(&format!("  │ leyendo {path}")));
+    tool_action("leyendo", path);
 }
 
 pub fn action_time(d: Duration) {
     println!("{}", dim(&format!("  │ {:.1}s", d.as_secs_f64())));
+}
+
+/// Flecha del prompt con el color del modo como FONDO (chip). Da identidad
+/// visual inmediata: azul=code, ámbar=hack, verde=learn. Ancho visible: 3.
+pub fn mode_arrow() -> String {
+    let (r, g, b) = accent_rgb();
+    // Fondo color de modo + texto casi negro para contraste, " ▸ " centrado.
+    format!("\x1b[48;2;{r};{g};{b}m\x1b[38;2;18;20;24m ▸ {RESET}")
 }
 
 /// Envuelve texto plano a un ancho dado (por palabras), para los paneles.
@@ -865,6 +886,20 @@ pub fn context_meter(used_tokens: usize, budget: usize) -> String {
         format!("~{used_tokens}")
     };
     format!("{bar} {pct}% · {used}/{}k tok", budget / 1000)
+}
+
+/// Separador de turno con info de consumo embebida al final.
+/// Produce: `  ────────────────────  500 in · 100 out · caché 0%`
+pub fn turn_sep(info: Option<&str>) -> String {
+    let w = term_width().min(80);
+    match info {
+        None => dim(&format!("  {}", "─".repeat(w.saturating_sub(2)))),
+        Some(s) => {
+            let right = format!("  {s}");
+            let dash_w = w.saturating_sub(right.chars().count() + 2);
+            dim(&format!("  {}{right}", "─".repeat(dash_w.max(4))))
+        }
+    }
 }
 
 /// Convierte un error de proveedor (a veces un JSON enorme) en un mensaje corto
@@ -1170,11 +1205,16 @@ impl Spinner {
                 let spark = ["◆◇◇", "◇◆◇", "◇◇◆", "◇◆◇"][(i / 3) % 4];
                 // `\x1b[2K` limpia la línea: los verbos varían de largo y si no,
                 // un verbo más corto dejaría residuos del anterior.
+                // Tras unos segundos aparece la pista de cancelación (como el
+                // "esc to interrupt" de otras CLIs): no satura al arrancar, pero
+                // recuerda que Ctrl-C corta si la espera se alarga.
+                let hint = if secs >= 3 { dim("· Ctrl-C corta") } else { String::new() };
                 print!(
-                    "\r\x1b[2K{glyph} {} {}  {}",
+                    "\r\x1b[2K{glyph} {} {}  {} {}",
                     grad(label),
                     grad(spark),
                     dim(&format!("{secs}s")),
+                    hint,
                 );
                 io::stdout().flush().ok();
                 i += 1;

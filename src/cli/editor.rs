@@ -1,10 +1,12 @@
-//! Editor de entrada: mini TUI con crossterm para multilinea real (Shift+Enter).
-//! rustyline se mantiene para confirm_line (single-line) e historial.
+//! Editor de entrada: mini TUI con crossterm. Da multilínea real (Shift+Enter),
+//! autocompletado inline en gris (ghost: `@archivo` y `/comando`), resaltado de
+//! comandos y referencias mientras escribes, y una barra de atajos al pie con
+//! el medidor de contexto. rustyline solo se mantiene para `confirm_line`.
 
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use crossterm::cursor::{MoveToColumn, RestorePosition, SavePosition};
+use crossterm::cursor::{MoveToColumn, MoveUp, RestorePosition, SavePosition};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::style::Print;
@@ -14,6 +16,15 @@ use rustyline::error::ReadlineError;
 use rustyline::{Config, Editor};
 
 use crate::ui;
+
+/// Comandos para el ghost autocompletado (orden alfabético → match estable).
+/// El resaltado, en cambio, tiñe CUALQUIER `/palabra` inicial, no solo estos.
+const COMMANDS: &[&str] = &[
+    "actualizar", "auto", "ayuda", "cambios", "cerebro", "comité", "compactar",
+    "contexto", "costo", "deshacer", "enfoque", "estado", "evaluar", "examen",
+    "habilidades", "limpiar", "modelos", "modo", "presupuesto", "progreso",
+    "revisar", "salir", "temario",
+];
 
 pub enum ReadResult {
     Line(String),
@@ -25,6 +36,8 @@ pub struct InputEditor {
     cwd: PathBuf,
     history: Vec<String>,
     confirmer: Editor<(), rustyline::history::DefaultHistory>,
+    context: String,
+    meter: String,
 }
 
 impl InputEditor {
@@ -34,16 +47,39 @@ impl InputEditor {
             .unwrap()
             .build();
         let confirmer = Editor::with_config(config).expect("no se pudo crear el editor rustyline");
-        Self { cwd, history: Vec::new(), confirmer }
+        Self {
+            cwd,
+            history: Vec::new(),
+            confirmer,
+            context: String::new(),
+            meter: String::new(),
+        }
     }
 
-    pub fn read_input(&mut self, tag: &str) -> io::Result<ReadResult> {
+    /// Contexto inline del prompt: `focus  ·  modo` (en gris, antes de la flecha).
+    pub fn set_context(&mut self, focus: &str, mode: &str) {
+        self.context = format!("{focus}  ·  {mode}");
+    }
+
+    /// Medidor de contexto (barra ▓░ %) que se pinta en la barra de atajos al pie.
+    pub fn set_meter(&mut self, meter: &str) {
+        self.meter = meter.to_string();
+    }
+
+    pub fn read_input(&mut self) -> io::Result<ReadResult> {
         if !io::stdin().is_terminal() {
             return fallback_read_line("> ");
         }
         println!();
-        let prompt = format!("  {} {}", ui::dim(tag), ui::accent("▸"));
-        let result = raw_multiline_input(&prompt, &self.cwd, &self.history);
+        let arrow = ui::mode_arrow();
+        let prompt = if self.context.is_empty() {
+            format!("  {arrow} ")
+        } else {
+            format!("  {}  {arrow} ", ui::dim(&self.context))
+        };
+        let prompt_width = ui::visible_width(&prompt);
+        let result =
+            raw_multiline_input(&prompt, prompt_width, &self.cwd, &self.history, &self.meter);
         if let Ok(ReadResult::Line(ref text)) = result {
             let trimmed = text.trim();
             if !trimmed.is_empty() {
@@ -90,23 +126,23 @@ fn fallback_read_line(prompt: &str) -> io::Result<ReadResult> {
 
 fn raw_multiline_input(
     prompt: &str,
+    prompt_width: usize,
     cwd: &Path,
     history: &[String],
+    meter: &str,
 ) -> io::Result<ReadResult> {
     let mut stdout = io::stdout();
     terminal::enable_raw_mode()?;
-    execute!(stdout, SavePosition, Clear(ClearType::CurrentLine), Print(prompt))?;
-    stdout.flush()?;
+    let cont_prefix = " ".repeat(prompt_width);
+    execute!(stdout, SavePosition)?;
 
     let mut text = String::new();
+    // Columna del cursor en CARACTERES. No hay movimiento lateral (←/→ libres),
+    // así que el cursor vive siempre al final del texto; `byte_pos` lo traduce.
     let mut cursor_col = 0usize;
     let mut history_idx: Option<usize> = None;
-    let mut pending_tab: Option<usize> = None;
-    let mut tab_matches: Vec<String> = Vec::new();
 
-    let prompt_width = visible_width(prompt);
-    let cont_prefix = " ".repeat(prompt_width);
-    let lines_before = text.lines().count().max(1);
+    render(&mut stdout, prompt, prompt_width, &cont_prefix, &text, cwd, meter)?;
 
     let result = loop {
         let ev = match event::read() {
@@ -117,20 +153,15 @@ fn raw_multiline_input(
         match ev {
             Event::Key(key) if key.kind == KeyEventKind::Release => continue,
             Event::Key(key) => match (key.code, key.modifiers) {
-                (KeyCode::Enter, KeyModifiers::SHIFT) => {
-                    text.insert(cursor_column(&text, cursor_col), '\n');
+                // Shift+Enter inserta salto de línea (en Windows puede llegar
+                // como Char('\r')+SHIFT).
+                (KeyCode::Enter, KeyModifiers::SHIFT)
+                | (KeyCode::Char('\r'), KeyModifiers::SHIFT) => {
+                    let pos = byte_pos(&text, cursor_col);
+                    text.insert(pos, '\n');
                     cursor_col += 1;
-                    pending_tab = None;
                 }
-                (KeyCode::Char('\r'), KeyModifiers::SHIFT) => {
-                    // Windows: Shift+Enter puede venir como Char('\r')+SHIFT
-                    text.insert(cursor_column(&text, cursor_col), '\n');
-                    cursor_col += 1;
-                    pending_tab = None;
-                }
-                (KeyCode::Enter, _) => {
-                    break Ok(ReadResult::Line(text));
-                }
+                (KeyCode::Enter, _) => break Ok(ReadResult::Line(text)),
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                     break Ok(ReadResult::Interrupted);
                 }
@@ -139,37 +170,23 @@ fn raw_multiline_input(
                         break Ok(ReadResult::Eof);
                     }
                 }
+                // Tab y → aceptan la sugerencia inline (ghost), si la hay.
+                (KeyCode::Tab, _) | (KeyCode::Right, _) => {
+                    if let Some(g) = ghost_suffix(&text, cwd) {
+                        text.push_str(&g);
+                        cursor_col = text.chars().count();
+                    }
+                }
                 (KeyCode::Char(c), _) => {
-                    let pos = cursor_column(&text, cursor_col);
+                    let pos = byte_pos(&text, cursor_col);
                     text.insert(pos, c);
                     cursor_col += 1;
-                    pending_tab = None;
                 }
                 (KeyCode::Backspace, _) => {
-                    if cursor_col == 0 {
-                        continue;
-                    }
-                    let pos = cursor_column(&text, cursor_col);
-                    if pos > 0 {
+                    if cursor_col > 0 {
+                        let pos = byte_pos(&text, cursor_col - 1);
+                        text.remove(pos);
                         cursor_col -= 1;
-                        text.remove(pos - 1);
-                    }
-                    pending_tab = None;
-                }
-                (KeyCode::Tab, _) => {
-                    pending_tab = try_tab_complete(
-                        &text,
-                        cursor_col,
-                        cwd,
-                        &mut tab_matches,
-                        pending_tab,
-                    );
-                    if let Some(idx) = pending_tab
-                        && let Some(replacement) = tab_matches.get(idx)
-                    {
-                        let replaced = replace_at_reference(&text, cursor_col, replacement);
-                        text = replaced;
-                        cursor_col = text.len();
                     }
                 }
                 (KeyCode::Up, _) => {
@@ -180,9 +197,8 @@ fn raw_multiline_input(
                             Some(i) => i - 1,
                         };
                         text = history[idx].clone();
-                        cursor_col = text.len();
+                        cursor_col = text.chars().count();
                         history_idx = Some(idx);
-                        pending_tab = None;
                     }
                 }
                 (KeyCode::Down, _) => {
@@ -194,144 +210,210 @@ fn raw_multiline_input(
                             text.clear();
                             history_idx = None;
                         }
-                        cursor_col = text.len();
-                        pending_tab = None;
+                        cursor_col = text.chars().count();
                     }
                 }
-                (KeyCode::Esc, _) => {
-                    break Ok(ReadResult::Interrupted);
-                }
+                (KeyCode::Esc, _) => break Ok(ReadResult::Interrupted),
                 _ => {}
             },
             _ => {}
         }
 
-        render_multiline(&mut stdout, prompt, &cont_prefix, &text, lines_before)?;
+        render(&mut stdout, prompt, prompt_width, &cont_prefix, &text, cwd, meter)?;
     };
 
+    // Limpieza: en Line dejamos el texto confirmado a la vista (sin ghost ni
+    // barra); en Interrupted/Eof borramos todo el área del editor.
+    match &result {
+        Ok(ReadResult::Line(t)) => finalize(&mut stdout, prompt, &cont_prefix, t)?,
+        _ => {
+            execute!(stdout, RestorePosition, Clear(ClearType::FromCursorDown))?;
+        }
+    }
     terminal::disable_raw_mode()?;
     println!();
     result
 }
 
-fn cursor_column(text: &str, col: usize) -> usize {
-    for (chars, (_, ch)) in text.char_indices().enumerate() {
-        if chars >= col {
-            return ch as usize;
-        }
-    }
-    text.len()
+/// Índice en BYTES del carácter en la columna `char_col` (o el final del texto).
+fn byte_pos(text: &str, char_col: usize) -> usize {
+    text.char_indices()
+        .nth(char_col)
+        .map(|(b, _)| b)
+        .unwrap_or(text.len())
 }
 
-fn visible_width(s: &str) -> usize {
-    s.chars().count()
-}
-
-fn render_multiline(
+/// Dibuja el prompt + texto resaltado + ghost, y debajo la barra de atajos.
+/// Deja el cursor justo al final del texto escrito (antes del ghost).
+fn render(
     stdout: &mut io::Stdout,
     prompt: &str,
+    prompt_width: usize,
     cont_prefix: &str,
     text: &str,
-    _prev_lines: usize,
+    cwd: &Path,
+    meter: &str,
 ) -> io::Result<()> {
-    execute!(
-        stdout,
-        RestorePosition,
-        Clear(ClearType::FromCursorDown),
-        Print(prompt),
-    )?;
+    execute!(stdout, RestorePosition, Clear(ClearType::FromCursorDown), Print(prompt))?;
 
-    let lines: Vec<&str> = if text.is_empty() {
-        vec![""]
-    } else {
-        text.lines().collect()
-    };
-
+    // `split('\n')` conserva la línea vacía final (si el texto acaba en salto),
+    // a diferencia de `lines()` — así el cursor cae en la línea nueva real.
+    let lines: Vec<&str> = text.split('\n').collect();
     for (i, line) in lines.iter().enumerate() {
         if i > 0 {
             execute!(stdout, Print("\r\n"), Print(cont_prefix))?;
         }
-        execute!(stdout, Print(line))?;
+        execute!(stdout, Print(highlight_line(line, i == 0)))?;
     }
 
-    let cursor_line_width = if let Some(last) = text.lines().last() {
-        visible_width(last)
-    } else {
-        0
-    };
-
-    if cursor_line_width == 0 {
-        execute!(stdout, MoveToColumn(prompt.len() as u16))?;
+    // Sugerencia inline en gris a la derecha del cursor.
+    if let Some(g) = ghost_suffix(text, cwd) {
+        execute!(stdout, Print(ui::dim(&g)))?;
     }
 
+    // Barra de atajos: una línea por debajo del input (no en posición absoluta,
+    // así el scroll de la respuesta no la empuja como a una barra fija).
+    let footer = footer_line(meter, lines.len());
+    execute!(stdout, Print("\r\n"), Print(&footer))?;
+
+    // Reposiciona el cursor: sube a la última línea del input y a su columna.
+    let last = lines.last().copied().unwrap_or("");
+    let typed_col = (prompt_width + ui::visible_width(last)) as u16;
+    execute!(stdout, MoveUp(1), MoveToColumn(typed_col))?;
     stdout.flush()
 }
 
-fn try_tab_complete(
+/// Redibujo final (al confirmar con Enter): texto resaltado, sin ghost ni barra.
+fn finalize(
+    stdout: &mut io::Stdout,
+    prompt: &str,
+    cont_prefix: &str,
     text: &str,
-    cursor_col: usize,
-    cwd: &Path,
-    matches: &mut Vec<String>,
-    pending: Option<usize>,
-) -> Option<usize> {
-    let pos = cursor_column(text, cursor_col);
-    let head = &text[..pos.min(text.len())];
-
-    if let Some(idx) = head.rfind(|c: char| c.is_whitespace()) {
-        let word = &head[idx + 1..];
-        if let Some(partial) = word.strip_prefix('@') {
-            if pending.is_none() {
-                *matches = find_path_matches(cwd, partial);
-            }
-            if matches.is_empty() {
-                return None;
-            }
-            let next = match pending {
-                None => 0,
-                Some(i) if i + 1 < matches.len() => i + 1,
-                Some(_) => 0,
-            };
-            return Some(next);
+) -> io::Result<()> {
+    execute!(stdout, RestorePosition, Clear(ClearType::FromCursorDown), Print(prompt))?;
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            execute!(stdout, Print("\r\n"), Print(cont_prefix))?;
         }
+        execute!(stdout, Print(highlight_line(line, i == 0)))?;
+    }
+    stdout.flush()
+}
+
+/// Sugerencia inline para el token al final del texto: `@archivo` o `/comando`.
+/// Devuelve solo el SUFIJO que falta por escribir (lo que se pinta en gris).
+fn ghost_suffix(text: &str, cwd: &Path) -> Option<String> {
+    let tail = text.rsplit(char::is_whitespace).next().unwrap_or("");
+    if let Some(partial) = tail.strip_prefix('@') {
+        let best = complete_path(cwd, partial).into_iter().next()?;
+        return best
+            .strip_prefix(partial)
+            .map(str::to_string)
+            .filter(|s| !s.is_empty());
+    }
+    // Comando: el `/token` debe ser lo ÚNICO escrito (primer token, sin espacios).
+    if let Some(partial) = text.strip_prefix('/')
+        && !partial.contains(char::is_whitespace)
+    {
+        let cmd = COMMANDS
+            .iter()
+            .find(|c| c.starts_with(partial) && **c != partial)?;
+        return Some(cmd[partial.len()..].to_string());
     }
     None
 }
 
-fn find_path_matches(cwd: &Path, partial: &str) -> Vec<String> {
-    let search_path = cwd.join(partial);
-    let dir = search_path.parent().unwrap_or(cwd);
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return vec![],
+/// Candidatos de ruta (rutas relativas completas) para un parcial tras `@`.
+/// Maneja subdirectorios: `src/ma` lista `src/` filtrando por `ma`.
+fn complete_path(cwd: &Path, partial: &str) -> Vec<String> {
+    let (dir_part, frag) = match partial.rfind('/') {
+        Some(i) => (&partial[..=i], &partial[i + 1..]),
+        None => ("", partial),
     };
-
-    let mut pairs: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || name == "target" {
-            continue;
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(cwd.join(dir_part)) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "target" {
+                continue;
+            }
+            if !frag.is_empty() && !name.starts_with(frag) {
+                continue;
+            }
+            let slash = if entry.path().is_dir() { "/" } else { "" };
+            out.push(format!("{dir_part}{name}{slash}"));
         }
-        if !name.starts_with(partial) && !partial.is_empty() {
-            continue;
-        }
-        let suffix = if entry.path().is_dir() { "/" } else { "" };
-        pairs.push(format!("{name}{suffix}"));
     }
-    pairs.sort();
-    pairs
+    out.sort();
+    out
 }
 
-fn replace_at_reference(text: &str, cursor_col: usize, replacement: &str) -> String {
-    let pos = cursor_column(text, cursor_col);
-    let head = &text[..pos.min(text.len())];
-    if let Some(idx) = head.rfind(|c: char| c.is_whitespace()) {
-        let word_start = idx + 1;
-        let mut result = text[..word_start].to_string();
-        result.push_str(replacement);
-        if pos < text.len() {
-            result.push_str(&text[pos..]);
-        }
-        return result;
+/// Resalta (en color de acento del modo) los `/comandos` iniciales y las
+/// `@referencias` de la línea, conservando el espaciado exacto.
+fn highlight_line(line: &str, is_first: bool) -> String {
+    if line.is_empty() {
+        return String::new();
     }
-    text.to_string()
+    let mut out = String::new();
+    let mut rest = line;
+    let mut word_idx = 0usize;
+    while !rest.is_empty() {
+        // Espacios iniciales: se preservan tal cual.
+        let ws = rest.find(|c: char| !c.is_whitespace()).unwrap_or(rest.len());
+        if ws > 0 {
+            out.push_str(&rest[..ws]);
+            rest = &rest[ws..];
+            if rest.is_empty() {
+                break;
+            }
+        }
+        let wlen = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..wlen];
+        let is_cmd = is_first && word_idx == 0 && word.starts_with('/') && word.len() > 1;
+        let is_ref = word.starts_with('@') && word.len() > 1;
+        if is_cmd || is_ref {
+            out.push_str(&ui::accent(word));
+        } else {
+            out.push_str(word);
+        }
+        rest = &rest[wlen..];
+        word_idx += 1;
+    }
+    out
+}
+
+/// Barra de atajos al pie: atajos a la izquierda, medidor + nº de líneas a la
+/// derecha. Garantiza UNA sola línea (si no cabe, recorta de derecha a izquierda)
+/// para no romper el cálculo del cursor con un salto de línea inesperado.
+fn footer_line(meter: &str, line_count: usize) -> String {
+    let w = ui::term_width().clamp(24, 120);
+
+    let mut right = meter.to_string();
+    if line_count > 1 {
+        if !right.is_empty() {
+            right.push_str(&ui::dim("  ·  "));
+        }
+        right.push_str(&ui::dim(&format!("{line_count} líneas")));
+    }
+
+    let left_full = "Shift+Enter nueva línea · Tab completa · /ayuda";
+    let left_min = "Tab completa · /ayuda";
+    let fits = |l: &str, r: &str| 2 + ui::visible_width(l) + 2 + ui::visible_width(r) <= w;
+
+    // Recorta de derecha a izquierda hasta que quepa en una línea.
+    if !fits(left_full, &right) {
+        right = if line_count > 1 {
+            ui::dim(&format!("{line_count} líneas"))
+        } else {
+            String::new()
+        };
+        if !fits(left_full, &right) {
+            right = String::new();
+        }
+    }
+    let left = if fits(left_full, &right) { left_full } else { left_min };
+
+    let used = 2 + ui::visible_width(left) + ui::visible_width(&right) + 2;
+    let gap = w.saturating_sub(used).max(2);
+    format!("  {}{}{}", ui::dim(left), " ".repeat(gap), right)
 }
