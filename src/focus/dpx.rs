@@ -84,7 +84,7 @@ crear render a mano en otro módulo duplica lógica y rompe el estilo. Helpers r
 - Color/estilo: `accent` / `dim` / `green` / `red` / `grad` (sobre texto), `rule()` (regla \
 separadora al ancho real), `term_width()` / `real_term_width()`.
 - Cajas y paneles: `panel(title, body)` (caja redondeada neutra), `danger_panel(title, body)` \
-(ROJO, para acciones peligrosas), `diagnostic_panel`. Diff: `preview_diff(old, new)`. \
+(ROJO, para acciones peligrosas). Diff: `preview_diff(old, new)`. \
 Checklist de plan: `checklist(&[(bool, String)])`. Medidor: `context_meter(used, budget)`.
 - Estado/encabezados: `Spinner` (`Spinner::thinking()` / `Spinner::working()` rotan verbos; \
 `Spinner::start(&str)` para label fijo), `reply_header`, `action_read`, `action_time`, \

@@ -8,6 +8,7 @@ use std::env;
 use std::path::Path;
 
 use anyhow::Result;
+use futures::future;
 use rig_core::completion::Message;
 use rig_core::completion::message::{ToolResultContent, UserContent};
 
@@ -28,7 +29,7 @@ pub(crate) use actions::*;
 pub(crate) use commands::{build_evaluar_prompt, build_quiz_prompt, build_revisar_prompt, handle_command};
 pub(crate) use recall::{maybe_auto_delegate, run_subagent};
 #[cfg(test)]
-pub(crate) use recall::{classify_delegation, subagent_preamble, subagent_tool};
+pub(crate) use recall::{classify_delegation, classify_delegation_fallback, subagent_preamble, subagent_tool};
 pub(crate) use committee::run_comite_command;
 pub(crate) use helpers::{
     canonical_cmd, command_in_mode, mode_label, reject_command, short_path,
@@ -873,29 +874,62 @@ async fn run_turn(
         let mut s_writes: Vec<crate::fs::FileWrite> = Vec::new();
         let mut s_edits: Vec<crate::fs::FileEdit> = Vec::new();
         let mut cancelled_at: Option<usize> = None;
-        for (i, call) in calls.iter().enumerate() {
-            let outcome =
-                run_tool_call(cwd, store, &mut *ask, call, &mut s_writes, &mut s_edits, auto)
-                    .await;
-            let (text, cancelled) = match outcome {
-                ToolOutcome::Done(t) => (t, false),
-                ToolOutcome::Cancelled(t) => (t, true),
-            };
-            // Caja negra: la tool call y su resultado quedan en la
-            // transcripción de la sesión (.dpx/sessions) para autopsias.
-            let _ = store.checkpoint(
-                "tool",
-                &format!(
-                    "{}({}) → {}",
-                    call.function.name,
-                    truncate_log(&call.function.arguments.to_string(), 160),
-                    truncate_log(&text, 300)
-                ),
-            );
-            history.push(Message::tool_result(call.id.clone(), text));
-            if cancelled {
-                cancelled_at = Some(i);
-                break;
+        let mut i = 0usize;
+        while i < calls.len() {
+            // Subagentes consecutivos: se ejecutan en paralelo (son read-only,
+            // aislados, sin dependencias entre si).
+            if calls[i].function.name == "spawn_agent" {
+                let batch_start = i;
+                while i < calls.len() && calls[i].function.name == "spawn_agent" {
+                    i += 1;
+                }
+                let spawn_calls = &calls[batch_start..i];
+                let mut tasks: Vec<String> = Vec::with_capacity(spawn_calls.len());
+                for call in spawn_calls {
+                    let task = match tools::parse_call(&call.function.name, &call.function.arguments) {
+                        Ok(DpxCall::Spawn { task, .. }) => task,
+                        _ => String::new(),
+                    };
+                    tasks.push(task);
+                }
+                let futures: Vec<_> = tasks.iter().map(|t| run_subagent(cwd, t)).collect();
+                let results: Vec<String> = future::join_all(futures).await;
+                for (call, result) in spawn_calls.iter().zip(results) {
+                    let _ = store.checkpoint(
+                        "tool",
+                        &format!(
+                            "{}({}) → {}",
+                            call.function.name,
+                            truncate_log(&call.function.arguments.to_string(), 160),
+                            truncate_log(&result, 300)
+                        ),
+                    );
+                    history.push(Message::tool_result(call.id.clone(), result));
+                }
+            } else {
+                let call = &calls[i];
+                let outcome =
+                    run_tool_call(cwd, store, &mut *ask, call, &mut s_writes, &mut s_edits, auto)
+                        .await;
+                let (text, cancelled) = match outcome {
+                    ToolOutcome::Done(t) => (t, false),
+                    ToolOutcome::Cancelled(t) => (t, true),
+                };
+                let _ = store.checkpoint(
+                    "tool",
+                    &format!(
+                        "{}({}) → {}",
+                        call.function.name,
+                        truncate_log(&call.function.arguments.to_string(), 160),
+                        truncate_log(&text, 300)
+                    ),
+                );
+                history.push(Message::tool_result(call.id.clone(), text));
+                if cancelled {
+                    cancelled_at = Some(i);
+                    break;
+                }
+                i += 1;
             }
         }
         if let Some(done) = cancelled_at {
@@ -1281,6 +1315,13 @@ async fn run_tool_call(
             ToolOutcome::Done(match crate::agent::search::web_search(&query).await {
                 Ok(results) => results,
                 Err(e) => format!("[web_search falló: {e}]"),
+            })
+        }
+        Ok(DpxCall::WebFetch { url }) => {
+            println!("{}", ui::accent(&format!("  ⌕ leyendo: {url}")));
+            ToolOutcome::Done(match crate::agent::search::web_fetch(&url).await {
+                Ok(body) => body,
+                Err(e) => format!("[web_fetch falló: {e}]"),
             })
         }
         Ok(DpxCall::Spawn { task, .. }) => {

@@ -232,6 +232,11 @@ impl ModelRouter {
         let mentor = build_deepseek(DEEPSEEK_FLASH, preamble, 0.2, deepseek_no_thinking())?;
         mentor.prompt(content).await
     }
+
+    pub async fn flash_prompt(&self, preamble: &str, user: &str) -> Result<String> {
+        let mentor = build_deepseek(DEEPSEEK_FLASH, preamble, 0.0, deepseek_no_thinking())?;
+        mentor.prompt(user).await
+    }
 }
 
 #[cfg(test)]

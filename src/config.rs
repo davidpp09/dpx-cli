@@ -111,17 +111,6 @@ impl ProjectConfig {
     }
 }
 
-/// Directorio home del usuario.
-pub fn home_dir() -> Result<PathBuf> {
-    dirs::home_dir().context("No se pudo determinar el directorio home del usuario")
-}
-
-/// Directorio global del CLI: `~/.dpx`.
-#[allow(dead_code)]
-pub fn global_dir() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".dpx"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

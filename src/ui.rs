@@ -850,19 +850,6 @@ pub fn danger_panel(title: &str, body: &str) {
     println!("{}", red(&format!("╰{}╯", "─".repeat(w + 2))));
 }
 
-#[allow(dead_code)]
-pub fn diagnostic_panel(hint: &str, suggestions: &[String]) {
-    let warning_color = "\x1b[38;2;245;184;66m"; // Naranja amarillento
-    println!("\n{} dpx diagnóstico automático {}", warning_color, RESET);
-    println!("  {}", dim(hint));
-    if !suggestions.is_empty() {
-        println!("  {}", dim("  Sugerencias a investigar:"));
-        for s in suggestions {
-            println!("   {}{} {}", warning_color, s, RESET);
-        }
-    }
-}
-
 /// Barra de uso del contexto de la sesión (estimación aproximada por
 /// caracteres), contra el presupuesto del cerebro ACTIVO.
 pub fn context_meter(used_tokens: usize, budget: usize) -> String {

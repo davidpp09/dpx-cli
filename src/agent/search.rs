@@ -13,6 +13,73 @@ use anyhow::{Result, anyhow};
 /// Máximo de resultados que devolvemos al modelo.
 const MAX_RESULTS: usize = 5;
 
+/// Máximo de caracteres que devuelve `web_fetch` (~2000 tokens).
+const FETCH_MAX_CHARS: usize = 8000;
+
+/// Descarga el contenido de una URL (HTTP/HTTPS), extrae el texto plano
+/// del HTML y devuelve hasta [`FETCH_MAX_CHARS`] caracteres.
+pub async fn web_fetch(url: &str) -> Result<String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err(anyhow!("Solo URLs HTTP/HTTPS: {url}"));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("dpx-cli/0.3.0")
+        .build()?;
+
+    let resp = client.get(url).send().await?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(anyhow!(
+            "[web_fetch: HTTP {} - {}]",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("desconocido")
+        ));
+    }
+
+    let body = resp.text().await?;
+    let text = html_to_text(&body);
+    let truncated = if text.chars().count() > FETCH_MAX_CHARS {
+        format!("{}[... truncado]", text.chars().take(FETCH_MAX_CHARS).collect::<String>())
+    } else {
+        text
+    };
+
+    Ok(truncated)
+}
+
+fn html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut in_tag = false;
+    let mut last_was_newline = false;
+
+    for ch in html.chars() {
+        if ch == '<' {
+            in_tag = true;
+            continue;
+        }
+        if ch == '>' {
+            in_tag = false;
+            continue;
+        }
+        if in_tag {
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !last_was_newline && !out.is_empty() && !out.ends_with(' ') {
+                out.push(' ');
+                last_was_newline = false;
+            }
+        } else {
+            out.push(ch);
+            last_was_newline = false;
+        }
+    }
+
+    out.trim().to_string()
+}
+
 /// Busca con la API "instant answer" de DuckDuckGo (JSON, sin API key):
 /// `https://api.duckduckgo.com/?q={query}&format=json&no_html=1&skip_disambig=1`
 ///

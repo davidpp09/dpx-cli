@@ -12,15 +12,15 @@
     #[test]
     fn auto_delegacion_solo_en_investigacion() {
         // Investigación → delega a researcher (ahorra: lo hace el flash barato).
-        assert_eq!(classify_delegation("¿dónde se valida el token de sesión?"), Some("researcher"));
-        assert_eq!(classify_delegation("explica cómo funciona el editor de entrada"), Some("researcher"));
-        assert_eq!(classify_delegation("busca todos los usos de run_turn en el proyecto"), Some("researcher"));
+        assert_eq!(classify_delegation_fallback("¿dónde se valida el token de sesión?"), Some("researcher"));
+        assert_eq!(classify_delegation_fallback("explica cómo funciona el editor de entrada"), Some("researcher"));
+        assert_eq!(classify_delegation_fallback("busca todos los usos de run_turn en el proyecto"), Some("researcher"));
         // Cambios → NO delega (lo hace el agente principal, que escribe).
-        assert_eq!(classify_delegation("crea un endpoint nuevo para usuarios"), None);
-        assert_eq!(classify_delegation("arregla el bug del muro de reglas"), None);
+        assert_eq!(classify_delegation_fallback("crea un endpoint nuevo para usuarios"), None);
+        assert_eq!(classify_delegation_fallback("arregla el bug del muro de reglas"), None);
         // Trivial/corto → no compensa el overhead.
-        assert_eq!(classify_delegation("hola"), None);
-        assert_eq!(classify_delegation("gracias crack"), None);
+        assert_eq!(classify_delegation_fallback("hola"), None);
+        assert_eq!(classify_delegation_fallback("gracias crack"), None);
     }
 
     #[test]

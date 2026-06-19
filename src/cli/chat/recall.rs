@@ -1,5 +1,6 @@
 //! Recuperacion de contexto, auto-delegacion y subagentes.
 
+use anyhow::Result;
 use std::path::Path;
 
 use rig_core::completion::Message;
@@ -10,7 +11,31 @@ use crate::agent::{ChatReply, ModelRouter};
 use crate::ui;
 
 /// Heuristica: determina si conviene delegar una peticion a un subagente.
-pub(crate) fn classify_delegation(input: &str) -> Option<&'static str> {
+/// Prueba primero el modelo flash; si falla, cae al keyword match.
+pub(crate) async fn classify_delegation(input: &str) -> Option<&'static str> {
+    match classify_delegation_flash(input).await {
+        Ok(Some(role)) => Some(role),
+        Ok(None) => None,
+        Err(_) => classify_delegation_fallback(input),
+    }
+}
+
+async fn classify_delegation_flash(input: &str) -> Result<Option<&'static str>> {
+    const SYSTEM: &str = "Eres un clasificador. Responde UNA sola palabra.";
+    let user = format!(
+        "Clasifica esta peticion como 'research' (si solo pide investigar/leer/buscar/explicar, \
+         sin modificar nada) o 'change' (si implica crear, modificar, borrar, ejecutar). \
+         Responde UNA sola palabra: research o change.\n\nPeticion: {input}"
+    );
+    let reply = ModelRouter::new().flash_prompt(SYSTEM, &user).await?;
+    match reply.trim().to_lowercase().as_str() {
+        "research" => Ok(Some("researcher")),
+        "change" => Ok(None),
+        _ => Ok(classify_delegation_fallback(input)),
+    }
+}
+
+pub(crate) fn classify_delegation_fallback(input: &str) -> Option<&'static str> {
     let t = input.trim().to_lowercase();
     if t.split_whitespace().count() < 4 {
         return None;
@@ -34,7 +59,7 @@ pub(crate) fn classify_delegation(input: &str) -> Option<&'static str> {
 }
 
 pub(crate) async fn maybe_auto_delegate(input: &str, cwd: &Path) -> Option<String> {
-    let role = classify_delegation(input)?;
+    let role = classify_delegation(input).await?;
     println!("{}", ui::dim(&format!("⎿ delegando en subagente flash ({role}) para ahorrar…")));
     let task = format!(
         "El usuario preguntó: \"{input}\". Investiga en el proyecto y devuelve una conclusión \

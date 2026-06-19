@@ -756,6 +756,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "crossterm",
  "dirs",
  "dotenvy",
  "futures",

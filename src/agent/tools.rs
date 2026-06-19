@@ -19,6 +19,7 @@ pub enum DpxCall {
     Delete { path: String },
     Run { command: String },
     WebSearch { query: String },
+    WebFetch { url: String },
     Spawn { task: String, role: Option<String> },
     GitStatus,
     GitDiff { path: Option<String> },
@@ -117,6 +118,15 @@ fn native_definitions() -> Vec<ToolDefinition> {
             &["query"],
         ),
         def(
+            "web_fetch",
+            "Lee el contenido de una URL (HTTP/HTTPS) y devuelve el texto plano \
+             (hasta 8000 caracteres). Úsala para leer documentación, artículos o \
+             cualquier página relevante. No uses para APIs que devuelvan JSON: \
+             para eso usa run_command con curl.",
+            json!({ "url": { "type": "string", "description": "URL completa, p.ej. https://docs.rs/tokio/latest/tokio/" } }),
+            &["url"],
+        ),
+        def(
             "spawn_agent",
             "Lanza un SUBAGENTE AISLADO para una tarea acotada de lectura/análisis. Corre en \
              el cerebro BARATO y en su PROPIO contexto: solo te devuelve su conclusión en \
@@ -185,6 +195,7 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
         "delete_file" => Ok(DpxCall::Delete { path: arg("path")? }),
         "run_command" => Ok(DpxCall::Run { command: arg("command")? }),
         "web_search" => Ok(DpxCall::WebSearch { query: arg("query")? }),
+        "web_fetch" => Ok(DpxCall::WebFetch { url: arg("url")? }),
         "spawn_agent" => Ok(DpxCall::Spawn {
             task: arg("task")?,
             role: args.get("role").and_then(Value::as_str).map(str::to_string),
@@ -201,7 +212,7 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DpxCall, String> {
         "git_commit" => Ok(DpxCall::GitCommit { message: arg("message")? }),
         other => Err(format!(
             "herramienta desconocida: `{other}`. Las disponibles son: read_file, search_project, \
-             write_file, edit_file, delete_file, run_command, web_search, spawn_agent, \
+             write_file, edit_file, delete_file, run_command, web_search, web_fetch, spawn_agent, \
              git_status, git_diff, git_log, git_commit."
         )),
     }
