@@ -1,0 +1,36 @@
+name: Release
+
+# Al empujar un tag `vX.Y.Z`: compila el binario de Windows en modo release y lo
+# sube como asset del GitHub Release. De ahí lo descarga el paquete npm
+# (@dpx-cli/dpx) en su postinstall. La versión del tag debe coincidir con la de
+# Cargo.toml y la de npm/package.json.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # para crear el Release y subir el binario
+
+jobs:
+  release-windows:
+    name: build + release (windows-x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar toolchain de Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache de cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compilar release
+        run: cargo build --release
+
+      - name: Publicar el binario en el Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/dpx.exe
+          fail_on_unmatched_files: true

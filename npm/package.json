@@ -1,0 +1,39 @@
+{
+  "name": "@dpx-cli/dpx",
+  "version": "0.4.0",
+  "description": "Tu mentor senior de desarrollo en la terminal, impulsado por DeepSeek. Tres modos: code, hack, learn.",
+  "bin": {
+    "dpx": "bin/dpx.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "bin/dpx.js",
+    "install.js",
+    "README.md"
+  ],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [
+    "cli",
+    "ai",
+    "mentor",
+    "deepseek",
+    "rust",
+    "terminal",
+    "agent"
+  ],
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TU_USUARIO/dpx-cli.git"
+  }
+}
