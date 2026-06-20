@@ -14,7 +14,7 @@ const pkg = require("./package.json");
 const VERSION = pkg.version;
 
 // 👇 CAMBIA esto por tu repo de GitHub (owner/nombre) antes de publicar.
-const REPO = "TU_USUARIO/dpx-cli";
+const REPO = "davidpp09/dpx-cli";
 
 const URL = `https://github.com/${REPO}/releases/download/v${VERSION}/dpx.exe`;
 

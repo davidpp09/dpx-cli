@@ -8,10 +8,9 @@ de GitHub (el binario) y el paquete npm (el envoltorio).
 
 1. **Sube el repo a GitHub** y hazlo **público** (el postinstall descarga el
    binario sin auth; si es privado, no funciona sin token).
-2. **Reemplaza `TU_USUARIO/dpx-cli`** por tu repo real en:
-   - `npm/package.json` → `repository.url`
-   - `npm/install.js` → la constante `REPO`
-   - `npm/README.md` → el enlace de GitHub
+2. Los archivos npm **ya apuntan a `davidpp09/dpx-cli`** (`repository.url`, la
+   constante `REPO` en `install.js`, el enlace del README). Si forkeas o cambias
+   de repo, actualiza esos tres.
 3. **Crea la organización `dpx-cli`** en npmjs.com (gratis) y haz `npm login`.
 
 ## Cada release

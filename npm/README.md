@@ -24,7 +24,7 @@ dpx hack           # construir rápido con criterio
 ## Más
 
 Documentación completa, modos, focus packs y comandos en el repositorio:
-<https://github.com/TU_USUARIO/dpx-cli>
+<https://github.com/davidpp09/dpx-cli>
 
 ---
 
