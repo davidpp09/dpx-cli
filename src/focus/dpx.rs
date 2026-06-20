@@ -81,8 +81,9 @@ reservadas — todo lo que mencione lo que cambiaste.
 ## UI: NO la reinventes — REUSA `src/ui.rs` (tu mayor punto débil)
 Cuando toques cómo se ve dpx, lo PRIMERO es leer `src/ui.rs` y reusar sus helpers; \
 crear render a mano en otro módulo duplica lógica y rompe el estilo. Helpers reales:
-- Color/estilo: `accent` / `dim` / `green` / `red` / `grad` (sobre texto), `rule()` (regla \
-separadora al ancho real), `term_width()` / `real_term_width()`.
+- Color/estilo: `accent` / `dim` / `green` / `red` / `grad` (degradado del modo sobre texto), \
+`gradient(s, from, to)` (degradado libre), `rule()` (regla separadora), `term_width()`, \
+`tool_action(verbo, objetivo)` (línea de acción reactiva), `turn_sep(info)` (separador de turno).
 - Cajas y paneles: `panel(title, body)` (caja redondeada neutra), `danger_panel(title, body)` \
 (ROJO, para acciones peligrosas). Diff: `preview_diff(old, new)`. \
 Checklist de plan: `checklist(&[(bool, String)])`. Medidor: `context_meter(used, budget)`.

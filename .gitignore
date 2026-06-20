@@ -1,4 +1,6 @@
 /target
+# Símbolos de debug de MSVC (artefacto de build, regenerable)
+*.pdb
 
 # Artefactos de otras herramientas (no son de dpx)
 .claude/

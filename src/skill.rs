@@ -213,6 +213,19 @@ pub fn needs_review(skill: &Skill, today: &str) -> bool {
         && days_between(&skill.last_seen, today).is_some_and(|d| d >= REVIEW_AFTER_DAYS)
 }
 
+/// Etiqueta de recencia legible para el tablero de progreso: "hoy", "ayer",
+/// "hace N días", "hace 1 semana", "hace N semanas". `None` si no parsea.
+pub fn recency_label(last_seen: &str, today: &str) -> Option<String> {
+    let d = days_between(last_seen, today)?;
+    Some(match d {
+        d if d <= 0 => "hoy".to_string(),
+        1 => "ayer".to_string(),
+        2..=6 => format!("hace {d} días"),
+        7..=13 => "hace 1 semana".to_string(),
+        d => format!("hace {} semanas", d / 7),
+    })
+}
+
 
 
 #[cfg(test)]
@@ -282,6 +295,16 @@ mod tests {
         let md = to_markdown(&skills);
         let back = from_markdown(&md);
         assert_eq!(back, skills);
+    }
+
+    #[test]
+    fn recency_label_legible() {
+        assert_eq!(recency_label("2026-06-14", "2026-06-14").as_deref(), Some("hoy"));
+        assert_eq!(recency_label("2026-06-13", "2026-06-14").as_deref(), Some("ayer"));
+        assert_eq!(recency_label("2026-06-11", "2026-06-14").as_deref(), Some("hace 3 días"));
+        assert_eq!(recency_label("2026-06-07", "2026-06-14").as_deref(), Some("hace 1 semana"));
+        assert_eq!(recency_label("2026-05-30", "2026-06-14").as_deref(), Some("hace 2 semanas"));
+        assert_eq!(recency_label("basura", "2026-06-14"), None);
     }
 
     #[test]

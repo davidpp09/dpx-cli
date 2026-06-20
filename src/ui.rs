@@ -58,13 +58,16 @@ fn grad_to() -> (u8, u8, u8) {
 /// tiene su propia identidad de color: code azul, hack ámbar, learn verde.
 pub fn set_mode_theme(mode: crate::focus::Mode) {
     use crate::focus::Mode;
+    // Paletas DEEP/jewel tone: ricas y oscuras, sin neón. Cada tupla es
+    // (acento de texto, claro del degradado, oscuro del degradado). El acento
+    // es legible como texto; el degradado da profundidad al logo/spinner/cajas.
     let (accent, hi, lo) = match mode {
-        // code — azul: agente que construye, sereno y preciso.
-        Mode::Code => ((74, 144, 226), (90, 160, 240), (28, 58, 130)),
-        // hack — ámbar: energía, velocidad con criterio.
-        Mode::Hack => ((224, 138, 38), (240, 165, 55), (130, 70, 10)),
-        // learn — verde: crecimiento, aprender.
-        Mode::Learn => ((76, 175, 110), (95, 200, 130), (24, 92, 58)),
+        // code — ROJO vino profundo: el agente que construye, fuerte y serio.
+        Mode::Code => ((172, 50, 52), (198, 74, 66), (60, 14, 20)),
+        // hack — MORADO profundo: energía con criterio, sin estridencia.
+        Mode::Hack => ((142, 80, 184), (170, 110, 206), (48, 20, 78)),
+        // learn — AZUL MARINO: calmado y profundo, para aprender.
+        Mode::Learn => ((66, 102, 172), (98, 136, 200), (14, 28, 82)),
     };
     ACCENT.store(pack_rgb(accent.0, accent.1, accent.2), Ordering::Relaxed);
     GRAD_HI.store(pack_rgb(hi.0, hi.1, hi.2), Ordering::Relaxed);
@@ -285,7 +288,8 @@ pub fn mode_banner(mode: crate::focus::Mode) {
         Mode::Hack => ("⚡", "hack · velocidad con criterio"),
         Mode::Learn => ("●", "learn · tu escribes, yo te guio"),
     };
-    println!("{} {}", accent(emoji), dim(desc));
+    // Degradado del modo en la descripción: el banner respira el color del modo.
+    println!("{} {}", accent(emoji), grad(desc));
 }
 
 /// Dibuja una caja redondeada con bordes ╭─╮ ╰─╯ usando el color indicado.
@@ -378,6 +382,12 @@ pub fn learn_panel(skills: &[crate::skill::Skill], today: &str, streak: Option<u
         lines.push(String::new());
     }
 
+    // Próximo logro: motiva mostrando cuánto falta para el siguiente badge.
+    if let Some(next) = next_milestone(skills, streak) {
+        lines.push(format!("  {} {}", accent("→"), dim(&next)));
+        lines.push(String::new());
+    }
+
     // --- cada concepto con dots ---
     // Agrupados por stack (la lista ya viene ordenada por stack+tema desde merge).
     let mut current_stack = String::new();
@@ -391,7 +401,11 @@ pub fn learn_panel(skills: &[crate::skill::Skill], today: &str, streak: Option<u
             SkillLevel::Practicando => dim("●●○").to_string(),
             SkillLevel::Visto => dim("●○○").to_string(),
         };
-        lines.push(format!("    {}  {}", dots, s.topic));
+        // Recencia: "hace 3 días", "ayer"… para que el progreso se sienta vivo.
+        let when = crate::skill::recency_label(&s.last_seen, today)
+            .map(|r| format!("  {}", dim(&r)))
+            .unwrap_or_default();
+        lines.push(format!("    {}  {}{}", dots, s.topic, when));
     }
 
     // --- repaso espaciado ---
@@ -430,6 +444,35 @@ pub fn earned_badges(skills: &[crate::skill::Skill], streak: Option<u32>) -> Vec
     if streak_n >= 3  { badges.push(("racha de 3",   "tres sesiones consecutivas")); }
     if streak_n >= 7  { badges.push(("semana entera", "siete sesiones seguidas")); }
     badges
+}
+
+/// El próximo logro por desbloquear y cuánto falta — empuja a seguir. Elige el
+/// hito MÁS CERCANO de los aún no alcanzados. `None` si ya están todos.
+pub fn next_milestone(skills: &[crate::skill::Skill], streak: Option<u32>) -> Option<String> {
+    use crate::skill::SkillLevel;
+    let total = skills.len();
+    let dominados = skills.iter().filter(|s| s.level == SkillLevel::Dominado).count();
+    let streak_n = streak.unwrap_or(0) as usize;
+
+    // (faltan, etiqueta del badge) por cada hito todavía no alcanzado.
+    let mut cands: Vec<(usize, &str)> = Vec::new();
+    for (have, goal, badge) in [
+        (total, 5, "5 conceptos"),
+        (total, 10, "10 conceptos"),
+        (dominados, 1, "primer dominio"),
+        (dominados, 5, "5 dominados"),
+        (dominados, 10, "10 dominados"),
+        (streak_n, 3, "racha de 3"),
+        (streak_n, 7, "semana entera"),
+    ] {
+        if have < goal {
+            cands.push((goal - have, badge));
+        }
+    }
+    cands.into_iter().min_by_key(|(n, _)| *n).map(|(n, badge)| {
+        let falta = if n == 1 { "te falta 1".to_string() } else { format!("te faltan {n}") };
+        format!("{falta} para «{badge}»")
+    })
 }
 
 /// Resumen al cierre de una sesión learn: nuevos conceptos, subidas de nivel,
@@ -790,14 +833,6 @@ pub fn action_read(path: &str) {
 
 pub fn action_time(d: Duration) {
     println!("{}", dim(&format!("  │ {:.1}s", d.as_secs_f64())));
-}
-
-/// Flecha del prompt con el color del modo como FONDO (chip). Da identidad
-/// visual inmediata: azul=code, ámbar=hack, verde=learn. Ancho visible: 3.
-pub fn mode_arrow() -> String {
-    let (r, g, b) = accent_rgb();
-    // Fondo color de modo + texto casi negro para contraste, " ▸ " centrado.
-    format!("\x1b[48;2;{r};{g};{b}m\x1b[38;2;18;20;24m ▸ {RESET}")
 }
 
 /// Envuelve texto plano a un ancho dado (por palabras), para los paneles.

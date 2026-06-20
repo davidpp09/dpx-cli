@@ -5,9 +5,12 @@
 
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crossterm::cursor::{MoveToColumn, MoveUp, RestorePosition, SavePosition};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::style::Print;
 use crossterm::terminal::{self, Clear, ClearType};
@@ -71,15 +74,18 @@ impl InputEditor {
             return fallback_read_line("> ");
         }
         println!();
-        let arrow = ui::mode_arrow();
-        let prompt = if self.context.is_empty() {
-            format!("  {arrow} ")
-        } else {
-            format!("  {}  {arrow} ", ui::dim(&self.context))
-        };
+        // Prompt minimalista: solo `>` con el color del modo. El contexto
+        // (focus · modo) se muestra ahora en la barra de atajos al pie.
+        let prompt = format!("  {} ", ui::accent(">"));
         let prompt_width = ui::visible_width(&prompt);
-        let result =
-            raw_multiline_input(&prompt, prompt_width, &self.cwd, &self.history, &self.meter);
+        let result = raw_multiline_input(
+            &prompt,
+            prompt_width,
+            &self.cwd,
+            &self.history,
+            &self.meter,
+            &self.context,
+        );
         if let Ok(ReadResult::Line(ref text)) = result {
             let trimmed = text.trim();
             if !trimmed.is_empty() {
@@ -130,9 +136,14 @@ fn raw_multiline_input(
     cwd: &Path,
     history: &[String],
     meter: &str,
+    context: &str,
 ) -> io::Result<ReadResult> {
     let mut stdout = io::stdout();
     terminal::enable_raw_mode()?;
+    // Bracketed paste: el terminal envía un pegado como UN evento `Event::Paste`
+    // en vez de teclas sueltas. Sin esto, los `\n` de un pegado multilínea
+    // llegan como Enter y ENVÍAN a media pega (el bug clásico del input).
+    execute!(stdout, EnableBracketedPaste)?;
     let cont_prefix = " ".repeat(prompt_width);
     execute!(stdout, SavePosition)?;
 
@@ -141,8 +152,12 @@ fn raw_multiline_input(
     // así que el cursor vive siempre al final del texto; `byte_pos` lo traduce.
     let mut cursor_col = 0usize;
     let mut history_idx: Option<usize> = None;
+    // Pegados GRANDES: en vez de volcar N líneas al input, se muestran como un
+    // placeholder `[⎘ pegado #k · …]` y aquí guardamos (placeholder, contenido
+    // real) para expandirlo al enviar. Pares; nunca se reordenan.
+    let mut pastes: Vec<(String, String)> = Vec::new();
 
-    render(&mut stdout, prompt, prompt_width, &cont_prefix, &text, cwd, meter)?;
+    render(&mut stdout, prompt, prompt_width, &cont_prefix, &text, cursor_col, context, cwd, meter)?;
 
     let result = loop {
         let ev = match event::read() {
@@ -150,13 +165,57 @@ fn raw_multiline_input(
             Err(_) => break Ok(ReadResult::Line(text)),
         };
 
+        // ── Pegado detectado por RÁFAGA (funciona sin bracketed paste; el caso
+        // de Windows). CLAVE: en Windows cada tecla emite Press Y Release, así que
+        // tras un Press SIEMPRE hay un evento en cola (su propio Release) — por
+        // eso NO basta con "hay algo en cola". Solo es pegado si recolectamos
+        // contenido EXTRA (otra tecla de carácter/Enter, no el Release). Una tecla
+        // suelta deja `extra = false` y cae al manejo normal (Enter envía, etc.).
+        if burst_char(&ev).is_some() && event::poll(Duration::from_millis(2)).unwrap_or(false) {
+            let mut blob = String::new();
+            if let Some(c) = burst_char(&ev) {
+                blob.push(c);
+            }
+            let mut extra = false;
+            while event::poll(Duration::from_millis(2)).unwrap_or(false) {
+                match event::read() {
+                    Ok(Event::Key(k)) if k.kind == KeyEventKind::Release => continue,
+                    Ok(Event::Paste(d)) => {
+                        blob.push_str(&d);
+                        extra = true;
+                    }
+                    Ok(e) => match burst_char(&e) {
+                        Some(c) => {
+                            blob.push(c);
+                            extra = true;
+                        }
+                        None => break, // tecla no-contenido: fin de la ráfaga
+                    },
+                    Err(_) => break,
+                }
+            }
+            if extra {
+                apply_blob(&mut text, &mut cursor_col, &mut pastes, &blob);
+                render(&mut stdout, prompt, prompt_width, &cont_prefix, &text, cursor_col, context, cwd, meter)?;
+                continue;
+            }
+            // Sin contenido extra: era una tecla suelta (solo su Release estaba en
+            // cola) → cae al manejo normal de abajo con el evento original.
+        }
+
         match ev {
             Event::Key(key) if key.kind == KeyEventKind::Release => continue,
             Event::Key(key) => match (key.code, key.modifiers) {
-                // Shift+Enter inserta salto de línea (en Windows puede llegar
-                // como Char('\r')+SHIFT).
-                (KeyCode::Enter, KeyModifiers::SHIFT)
-                | (KeyCode::Char('\r'), KeyModifiers::SHIFT) => {
+                // Enter con CUALQUIER modificador (Shift/Ctrl/Alt) = salto de
+                // línea; Enter solo = enviar. Cubre las convenciones de varias
+                // terminales (algunas no distinguen Shift+Enter, otras sí
+                // Ctrl/Alt+Enter). En Windows el salto puede llegar como CR/LF.
+                (KeyCode::Enter, m) if !m.is_empty() => {
+                    let pos = byte_pos(&text, cursor_col);
+                    text.insert(pos, '\n');
+                    cursor_col += 1;
+                }
+                (KeyCode::Char('\r' | '\n'), m) if !m.is_empty() => {
                     let pos = byte_pos(&text, cursor_col);
                     text.insert(pos, '\n');
                     cursor_col += 1;
@@ -170,20 +229,68 @@ fn raw_multiline_input(
                         break Ok(ReadResult::Eof);
                     }
                 }
-                // Tab y → aceptan la sugerencia inline (ghost), si la hay.
-                (KeyCode::Tab, _) | (KeyCode::Right, _) => {
-                    if let Some(g) = ghost_suffix(&text, cwd) {
+                // Tab acepta la sugerencia (ghost) si el cursor está al final.
+                (KeyCode::Tab, _) => {
+                    if cursor_col >= text.chars().count()
+                        && let Some(g) = ghost_suffix(&text, cwd)
+                    {
                         text.push_str(&g);
                         cursor_col = text.chars().count();
                     }
                 }
-                (KeyCode::Char(c), _) => {
+                // → al final acepta el ghost; si no, mueve el cursor a la derecha.
+                (KeyCode::Right, _) => {
+                    let end = text.chars().count();
+                    if cursor_col >= end {
+                        if let Some(g) = ghost_suffix(&text, cwd) {
+                            text.push_str(&g);
+                            cursor_col = text.chars().count();
+                        }
+                    } else {
+                        cursor_col += 1;
+                    }
+                }
+                (KeyCode::Left, _) => cursor_col = cursor_col.saturating_sub(1),
+                (KeyCode::Home, _) => {
+                    // Inicio de la línea actual (tras el último salto antes del cursor).
+                    let chars: Vec<char> = text.chars().collect();
+                    let mut i = cursor_col.min(chars.len());
+                    while i > 0 && chars[i - 1] != '\n' {
+                        i -= 1;
+                    }
+                    cursor_col = i;
+                }
+                (KeyCode::End, _) => {
+                    // Fin de la línea actual (hasta el próximo salto o el final).
+                    let chars: Vec<char> = text.chars().collect();
+                    let mut i = cursor_col.min(chars.len());
+                    while i < chars.len() && chars[i] != '\n' {
+                        i += 1;
+                    }
+                    cursor_col = i;
+                }
+                (KeyCode::Char(c), _) if !c.is_control() => {
                     let pos = byte_pos(&text, cursor_col);
                     text.insert(pos, c);
                     cursor_col += 1;
                 }
                 (KeyCode::Backspace, _) => {
-                    if cursor_col > 0 {
+                    // Con el cursor AL FINAL, si el buffer termina en un placeholder
+                    // de pegado se borra ENTERO (átomo). En medio del texto, normal.
+                    let at_end = cursor_col >= text.chars().count();
+                    let ph_len = at_end
+                        .then(|| {
+                            pastes
+                                .iter()
+                                .rev()
+                                .find(|(ph, _)| text.ends_with(ph.as_str()))
+                                .map(|(ph, _)| ph.len())
+                        })
+                        .flatten();
+                    if let Some(len) = ph_len {
+                        text.truncate(text.len() - len);
+                        cursor_col = text.chars().count();
+                    } else if cursor_col > 0 {
                         let pos = byte_pos(&text, cursor_col - 1);
                         text.remove(pos);
                         cursor_col -= 1;
@@ -216,14 +323,18 @@ fn raw_multiline_input(
                 (KeyCode::Esc, _) => break Ok(ReadResult::Interrupted),
                 _ => {}
             },
+            // Pegado por bracketed paste (terminales que lo soportan): un solo
+            // evento con TODO el texto. Mismo tratamiento que la ráfaga.
+            Event::Paste(data) => apply_blob(&mut text, &mut cursor_col, &mut pastes, &data),
             _ => {}
         }
 
-        render(&mut stdout, prompt, prompt_width, &cont_prefix, &text, cwd, meter)?;
+        render(&mut stdout, prompt, prompt_width, &cont_prefix, &text, cursor_col, context, cwd, meter)?;
     };
 
     // Limpieza: en Line dejamos el texto confirmado a la vista (sin ghost ni
     // barra); en Interrupted/Eof borramos todo el área del editor.
+    execute!(stdout, DisableBracketedPaste)?;
     match &result {
         Ok(ReadResult::Line(t)) => finalize(&mut stdout, prompt, &cont_prefix, t)?,
         _ => {
@@ -232,7 +343,76 @@ fn raw_multiline_input(
     }
     terminal::disable_raw_mode()?;
     println!();
-    result
+    // Lo que se ENVÍA expande los placeholders a su contenido real; en pantalla
+    // quedó el `[⎘ pegado …]` compacto, pero el modelo recibe el texto completo.
+    match result {
+        Ok(ReadResult::Line(t)) => Ok(ReadResult::Line(expand_pastes(&t, &pastes))),
+        other => other,
+    }
+}
+
+/// ¿Es una tecla de "contenido" (parte de un pegado o tecleo)? Devuelve el
+/// carácter: imprimible sin Ctrl/Alt, o `'\n'` para Enter/CR/LF SIN modificador.
+/// Las teclas de control (flechas, backspace, Ctrl+C…) devuelven `None`.
+fn burst_char(ev: &Event) -> Option<char> {
+    let Event::Key(k) = ev else { return None };
+    if k.kind == KeyEventKind::Release {
+        return None;
+    }
+    match k.code {
+        KeyCode::Char(c)
+            if !c.is_control()
+                && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            Some(c)
+        }
+        KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') if k.modifiers.is_empty() => {
+            Some('\n')
+        }
+        _ => None,
+    }
+}
+
+/// Inserta un blob (pegado o ráfaga). Grande (multilínea o >200 chars) → chip
+/// `[⎘ pegado #k · N líneas · M chars]` (el contenido real se guarda para
+/// expandirlo al enviar); chico → texto inline normal.
+fn apply_blob(
+    text: &mut String,
+    cursor_col: &mut usize,
+    pastes: &mut Vec<(String, String)>,
+    blob: &str,
+) {
+    if blob.is_empty() {
+        return;
+    }
+    let lines = blob.lines().count().max(1);
+    let chars = blob.chars().count();
+    // Chip solo si es de verdad GRANDE (varias líneas o muy largo). Un texto de
+    // una sola línea —aunque traiga un salto al final— va inline.
+    let insert = if lines > 1 || chars > 200 {
+        let k = pastes.len() + 1;
+        let placeholder = format!("[⎘ pegado #{k} · {lines} líneas · {chars} chars]");
+        pastes.push((placeholder.clone(), blob.to_string()));
+        placeholder
+    } else {
+        blob.to_string()
+    };
+    // Inserta en la posición del cursor (no siempre al final).
+    let pos = byte_pos(text, *cursor_col);
+    text.insert_str(pos, &insert);
+    *cursor_col += insert.chars().count();
+}
+
+/// Reemplaza cada placeholder `[⎘ pegado …]` por su contenido real al enviar.
+/// Los placeholders que el usuario borró (ya no están en el texto) se ignoran.
+fn expand_pastes(text: &str, pastes: &[(String, String)]) -> String {
+    let mut out = text.to_string();
+    for (placeholder, content) in pastes {
+        if out.contains(placeholder.as_str()) {
+            out = out.replace(placeholder.as_str(), content);
+        }
+    }
+    out
 }
 
 /// Índice en BYTES del carácter en la columna `char_col` (o el final del texto).
@@ -244,13 +424,16 @@ fn byte_pos(text: &str, char_col: usize) -> usize {
 }
 
 /// Dibuja el prompt + texto resaltado + ghost, y debajo la barra de atajos.
-/// Deja el cursor justo al final del texto escrito (antes del ghost).
+/// Posiciona el cursor en `cursor_col` (su línea y columna reales).
+#[allow(clippy::too_many_arguments)] // args cohesivos del render; agruparlos no aclara
 fn render(
     stdout: &mut io::Stdout,
     prompt: &str,
     prompt_width: usize,
     cont_prefix: &str,
     text: &str,
+    cursor_col: usize,
+    context: &str,
     cwd: &Path,
     meter: &str,
 ) -> io::Result<()> {
@@ -266,21 +449,42 @@ fn render(
         execute!(stdout, Print(highlight_line(line, i == 0)))?;
     }
 
-    // Sugerencia inline en gris a la derecha del cursor.
-    if let Some(g) = ghost_suffix(text, cwd) {
+    // Ghost SOLO con el cursor al final (completa el token que se está escribiendo;
+    // si el cursor está en medio del texto no tiene sentido sugerir).
+    if cursor_col >= text.chars().count()
+        && let Some(g) = ghost_suffix(text, cwd)
+    {
         execute!(stdout, Print(ui::dim(&g)))?;
     }
 
     // Barra de atajos: una línea por debajo del input (no en posición absoluta,
     // así el scroll de la respuesta no la empuja como a una barra fija).
-    let footer = footer_line(meter, lines.len());
+    let footer = footer_line(context, meter, lines.len());
     execute!(stdout, Print("\r\n"), Print(&footer))?;
 
-    // Reposiciona el cursor: sube a la última línea del input y a su columna.
-    let last = lines.last().copied().unwrap_or("");
-    let typed_col = (prompt_width + ui::visible_width(last)) as u16;
-    execute!(stdout, MoveUp(1), MoveToColumn(typed_col))?;
+    // Cursor a su (línea, columna) REAL dentro del texto. El footer quedó 1 fila
+    // por debajo de la última línea, así que subimos hasta la línea del cursor.
+    let (cur_line, cur_col) = cursor_line_col(text, cursor_col);
+    let rows_up = (lines.len() - cur_line) as u16;
+    execute!(stdout, MoveUp(rows_up), MoveToColumn((prompt_width + cur_col) as u16))?;
     stdout.flush()
+}
+
+/// (línea, columna) en CARACTERES donde cae `cursor_col` dentro de `text`.
+fn cursor_line_col(text: &str, cursor_col: usize) -> (usize, usize) {
+    let (mut line, mut col) = (0usize, 0usize);
+    for (i, ch) in text.chars().enumerate() {
+        if i >= cursor_col {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 /// Redibujo final (al confirmar con Enter): texto resaltado, sin ghost ni barra.
@@ -354,6 +558,19 @@ fn highlight_line(line: &str, is_first: bool) -> String {
     if line.is_empty() {
         return String::new();
     }
+    // Chip de pegado `[⎘ … ]`: se pinta como pastilla (acento del modo) y el
+    // resto de la línea se resalta normal alrededor (recursivo, soporta varios).
+    if let Some(start) = line.find("[⎘")
+        && let Some(rel) = line[start..].find(']')
+    {
+        let end = start + rel + 1;
+        return format!(
+            "{}{}{}",
+            highlight_line(&line[..start], is_first),
+            ui::accent(&line[start..end]),
+            highlight_line(&line[end..], false),
+        );
+    }
     let mut out = String::new();
     let mut rest = line;
     let mut word_idx = 0usize;
@@ -382,11 +599,14 @@ fn highlight_line(line: &str, is_first: bool) -> String {
     out
 }
 
-/// Barra de atajos al pie: atajos a la izquierda, medidor + nº de líneas a la
-/// derecha. Garantiza UNA sola línea (si no cabe, recorta de derecha a izquierda)
-/// para no romper el cálculo del cursor con un salto de línea inesperado.
-fn footer_line(meter: &str, line_count: usize) -> String {
+/// Barra al pie: `focus · modo` (color del modo) + atajos a la izquierda,
+/// medidor + nº de líneas a la derecha. Garantiza UNA sola línea: si no cabe,
+/// recorta primero los atajos, luego el medidor — el contexto SIEMPRE se ve
+/// (es lo que el usuario pidió mostrar ahí). Una sola línea evita que el cálculo
+/// del cursor se rompa con un salto inesperado.
+fn footer_line(context: &str, meter: &str, line_count: usize) -> String {
     let w = ui::term_width().clamp(24, 120);
+    let ctx = context.trim();
 
     let mut right = meter.to_string();
     if line_count > 1 {
@@ -396,24 +616,97 @@ fn footer_line(meter: &str, line_count: usize) -> String {
         right.push_str(&ui::dim(&format!("{line_count} líneas")));
     }
 
-    let left_full = "Shift+Enter nueva línea · Tab completa · /ayuda";
-    let left_min = "Tab completa · /ayuda";
-    let fits = |l: &str, r: &str| 2 + ui::visible_width(l) + 2 + ui::visible_width(r) <= w;
+    const HINTS_FULL: &str = "Shift+Enter nueva línea · Tab completa · /ayuda";
+    const HINTS_MIN: &str = "Tab · /ayuda";
 
-    // Recorta de derecha a izquierda hasta que quepa en una línea.
-    if !fits(left_full, &right) {
-        right = if line_count > 1 {
-            ui::dim(&format!("{line_count} líneas"))
-        } else {
-            String::new()
-        };
-        if !fits(left_full, &right) {
-            right = String::new();
-        }
-    }
-    let left = if fits(left_full, &right) { left_full } else { left_min };
+    // Ancho visible de "ctx   hints" (3 espacios de separación si ambos existen).
+    let left_w = |hints: &str| match (ctx.is_empty(), hints.is_empty()) {
+        (true, true) => 0,
+        (true, false) => ui::visible_width(hints),
+        (false, true) => ui::visible_width(ctx),
+        (false, false) => ui::visible_width(ctx) + 3 + ui::visible_width(hints),
+    };
+    let fits = |hints: &str, rw: usize| 2 + left_w(hints) + 2 + rw <= w;
 
-    let used = 2 + ui::visible_width(left) + ui::visible_width(&right) + 2;
+    // Recorta: atajos completos → mínimos → ninguno; y si aún no cabe, sin medidor.
+    let rw = ui::visible_width(&right);
+    let (hints, right) = if fits(HINTS_FULL, rw) {
+        (HINTS_FULL, right)
+    } else if fits(HINTS_MIN, rw) {
+        (HINTS_MIN, right)
+    } else if fits("", rw) {
+        ("", right)
+    } else {
+        ("", String::new())
+    };
+
+    // Contexto en el acento del modo; atajos en gris.
+    let left_display = match (ctx.is_empty(), hints.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => ui::dim(hints),
+        (false, true) => ui::accent(ctx),
+        (false, false) => format!("{}   {}", ui::accent(ctx), ui::dim(hints)),
+    };
+    let used = 2 + left_w(hints) + ui::visible_width(&right) + 2;
     let gap = w.saturating_sub(used).max(2);
-    format!("  {}{}{}", ui::dim(left), " ".repeat(gap), right)
+    format!("  {}{}{}", left_display, " ".repeat(gap), right)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_pastes_reemplaza_el_placeholder_por_el_contenido_real() {
+        let pastes = vec![(
+            "[⎘ pegado #1 · 3 líneas · 12 chars]".to_string(),
+            "uno\ndos\ntres".to_string(),
+        )];
+        let enviado = expand_pastes("revisa: [⎘ pegado #1 · 3 líneas · 12 chars]", &pastes);
+        assert_eq!(enviado, "revisa: uno\ndos\ntres");
+    }
+
+    #[test]
+    fn expand_pastes_ignora_un_chip_que_el_usuario_borro() {
+        // Si el placeholder ya no está en el texto (se borró con Backspace), no
+        // se inyecta nada: el envío queda tal cual.
+        let pastes = vec![("[⎘ pegado #1 · 2 líneas · 3 chars]".to_string(), "a\nb".to_string())];
+        assert_eq!(expand_pastes("solo texto", &pastes), "solo texto");
+    }
+
+    #[test]
+    fn highlight_line_conserva_el_contenido_del_chip() {
+        let out = highlight_line("[⎘ pegado #1 · 2 líneas · 5 chars]", false);
+        assert!(out.contains("pegado #1"), "el chip debe seguir legible, vi: {out}");
+    }
+
+    #[test]
+    fn cursor_line_col_ubica_dentro_de_texto_multilinea() {
+        // "ab\ncd": a0 b1 \n2 c3 d4.
+        assert_eq!(cursor_line_col("ab\ncd", 0), (0, 0));
+        assert_eq!(cursor_line_col("ab\ncd", 2), (0, 2)); // fin de la línea 0
+        assert_eq!(cursor_line_col("ab\ncd", 3), (1, 0)); // inicio de la línea 1
+        assert_eq!(cursor_line_col("ab\ncd", 5), (1, 2)); // fin del texto
+        assert_eq!(cursor_line_col("ab\ncd", 99), (1, 2)); // más allá → fin
+    }
+
+    #[test]
+    fn apply_blob_grande_hace_chip_y_chico_va_inline() {
+        // Multilínea → chip, y al expandir vuelve el contenido real.
+        let mut text = String::new();
+        let mut col = 0usize;
+        let mut pastes = Vec::new();
+        apply_blob(&mut text, &mut col, &mut pastes, "a\nb\nc");
+        assert!(text.starts_with("[⎘ pegado #1"), "esperaba un chip, vi: {text}");
+        assert_eq!(pastes.len(), 1);
+        assert_eq!(expand_pastes(&text, &pastes), "a\nb\nc");
+
+        // Texto chico de una línea → inline, sin chip.
+        let mut text2 = String::new();
+        let mut col2 = 0usize;
+        let mut p2 = Vec::new();
+        apply_blob(&mut text2, &mut col2, &mut p2, "hola");
+        assert_eq!(text2, "hola");
+        assert!(p2.is_empty());
+    }
 }

@@ -3,7 +3,7 @@
   <p><b>Tu mentor senior de desarrollo, directamente en tu terminal.</b></p>
 
   [![Rust](https://img.shields.io/badge/Rust-2024-orange.svg)](https://www.rust-lang.org)
-  [![v0.3.0](https://img.shields.io/badge/versión-0.3.0-blue.svg)](#)
+  [![v0.4.0](https://img.shields.io/badge/versión-0.4.0-blue.svg)](#)
   [![Privado](https://img.shields.io/badge/proyecto-privado-lightgrey.svg)](#licencia)
 </div>
 
@@ -334,7 +334,8 @@ src/
 ├── cli/
 │   ├── mod.rs            # AutoMode, subcomandos clap
 │   ├── init.rs           # Onboarding y dpx init
-│   ├── editor.rs         # InputEditor: rustyline con Tab para @archivos y /comandos
+│   ├── editor.rs         # InputEditor: TUI propio (crossterm) — multilínea Shift+Enter,
+│   │                     #   autocompletado ghost @archivos//comandos, cursor, pegado en chips
 │   └── chat/
 │       ├── mod.rs        # Loop principal del REPL, green-gate, undo snapshot
 │       ├── actions.rs    # Ejecución de tool calls: diff, confirmaciones, sandbox
@@ -342,7 +343,7 @@ src/
 │       ├── helpers.rs    # canonical_cmd(), command_in_mode(), mode_label()
 │       ├── committee.rs  # run_comite_command()
 │       ├── recall.rs     # classify_delegation(), maybe_auto_delegate(), run_subagent()
-│       └── tests.rs      # Tests de integración del REPL (30 tests)
+│       └── tests.rs      # Tests de integración del REPL (53 tests)
 ├── session/
 │   └── mod.rs            # ProjectStore (.dpx/): context, skills, streak, undo, plan, allowlist
 └── fs/
@@ -376,7 +377,7 @@ Los flags de CLI (`--focus`, `--auto`) pisan estos defaults; los comandos del RE
 
 ```bash
 cargo check                                    # compilación rápida
-cargo test                                     # 120 tests
+cargo test                                     # 148 tests
 cargo clippy --all-targets -- -D warnings      # linter estricto (cero warnings)
 ```
 

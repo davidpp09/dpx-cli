@@ -27,7 +27,7 @@ mod recall;
 mod committee;
 pub(crate) use actions::*;
 pub(crate) use commands::{build_evaluar_prompt, build_quiz_prompt, build_revisar_prompt, handle_command};
-pub(crate) use recall::{maybe_auto_delegate, run_subagent};
+pub(crate) use recall::{maybe_auto_delegate, run_subagent, run_subagent_quiet};
 #[cfg(test)]
 pub(crate) use recall::{classify_delegation_fallback, subagent_preamble, subagent_tool};
 pub(crate) use committee::run_comite_command;
@@ -593,6 +593,17 @@ fn compact_threshold() -> usize {
     crate::agent::CONTEXT_BUDGET * 3 / 4
 }
 
+/// Umbral para EMPEZAR a elidir tool outputs viejos. Por debajo de esto hay
+/// espacio de sobra: elidir solo rompería el caché de contexto (cada elisión
+/// cambia el historial y obliga a re-pagar el sufijo sin el descuento ~10x) a
+/// cambio de un ahorro que todavía no necesitamos. En sesiones cortas —el caso
+/// común de un mentor— nunca se cruza este umbral: el prefijo queda intacto y el
+/// caché pega al máximo. Solo al entrar en terreno pesado (>50% de la ventana)
+/// empezamos a recortar, antes de la compactación dura (75%).
+fn prune_threshold() -> usize {
+    crate::agent::CONTEXT_BUDGET / 2
+}
+
 /// Mensajes recientes que se conservan intactos al compactar (los últimos
 /// intercambios suelen ser a los que el usuario se refiere con "eso", "ahí").
 const KEEP_RECENT_MESSAGES: usize = 4;
@@ -771,9 +782,18 @@ async fn run_turn(
     // Compactación ligera al empezar el turno: elide el cuerpo de los tool
     // results viejos y voluminosos de turnos anteriores (su contenido ya cumplió
     // su función) para no arrastrar archivos enteros ronda tras ronda. Conserva
-    // ids/estructura → emparejamiento tool intacto. Una vez por turno: acota el
-    // trasiego del caché de contexto (cada elisión rompe el prefijo una sola vez).
-    let pruned = prune_tool_outputs(history);
+    // ids/estructura → emparejamiento tool intacto.
+    //
+    // CLAVE de costo: solo se elide cuando el contexto YA pesa (`prune_threshold`).
+    // Elidir cambia el historial y rompe el caché de contexto una vez; hacerlo en
+    // sesiones cortas (con 128k de sobra) sería pagar ese costo sin necesidad. Por
+    // debajo del umbral el historial NO se toca → el prefijo queda estable y el
+    // caché ~10x más barato pega al máximo.
+    let pruned = if estimate_tokens(history) > prune_threshold() {
+        prune_tool_outputs(history)
+    } else {
+        0
+    };
     if pruned > 0 {
         println!(
             "{}",

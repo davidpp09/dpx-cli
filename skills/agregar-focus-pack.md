@@ -15,7 +15,5 @@ el stack. Para añadir uno (p.ej. `go`):
 4. **Inyección**: añade el caso a `domain_skills()` (`"go" => Some(go::SKILLS)`).
 5. **Detección** (opcional): enséñale a `fs::detect_stack` a reconocer el stack por
    sus archivos raíz (p.ej. `go.mod`).
-6. **Built-in playbooks** (opcional pero recomendado): añade `pub const PLAYBOOKS`
-   al pack y su caso en `focus::builtin_playbooks` (ver skill "crear un skill").
-7. **Verifica** clippy estricto + tests; reinstala con `/actualizar` (el prompt se
+6. **Verifica** clippy estricto + tests; reinstala con `/actualizar` (el prompt se
    compila en el binario).

@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use super::run_subagent;
+use futures::future;
+
+use super::run_subagent_quiet;
 use crate::session::{ProjectStore, Turn};
 use crate::ui;
 
@@ -59,20 +61,31 @@ pub(crate) async fn run_comite_command(
     );
 }
 
-/// Lanza el COMITÉ DE HACK: 4 subagentes secuenciales — juez, product,
-/// tech lead, usuario escéptico — cada uno evalúa la idea desde su rol.
-/// Luego un subagente de síntesis produce un veredicto + plan dpx:plan.
-/// Devuelve el texto de la síntesis (que incluye el bloque dpx:plan).
+/// Lanza el COMITÉ DE HACK: 4 subagentes — juez, product, tech lead, usuario
+/// escéptico — cada uno evalúa la idea desde su rol. Luego un subagente de
+/// síntesis produce un veredicto + plan dpx:plan. Devuelve la síntesis.
+///
+/// Los 4 roles son INDEPENDIENTES (cada uno juzga la MISMA idea desde su ángulo,
+/// sin depender de los demás) → corren EN PARALELO en el cerebro barato: mismo
+/// costo en tokens, ~4x menos espera. Van en modo silencioso (sin spinner por
+/// ronda, que se pisaría con 4 a la vez); sus trazas de lectura salen en vivo.
 pub(crate) async fn run_committee(cwd: &Path, idea: &str) -> String {
     let roles = crate::focus::committee::roles();
-    let mut contributions: Vec<(String, String)> = Vec::new();
 
     for role in &roles {
         println!("{} · {}", ui::accent("  comité"), ui::dim(role.label));
-        let task = crate::focus::committee::role_task(role, idea);
-        let contrib = run_subagent(cwd, &task).await;
-        contributions.push((role.label.to_string(), contrib));
     }
+    let tasks: Vec<String> = roles
+        .iter()
+        .map(|role| crate::focus::committee::role_task(role, idea))
+        .collect();
+    let futures: Vec<_> = tasks.iter().map(|t| run_subagent_quiet(cwd, t)).collect();
+    let results: Vec<String> = future::join_all(futures).await;
+    let contributions: Vec<(String, String)> = roles
+        .iter()
+        .zip(results)
+        .map(|(role, contrib)| (role.label.to_string(), contrib))
+        .collect();
 
     println!(
         "{comite} · {synth}",
@@ -80,5 +93,5 @@ pub(crate) async fn run_committee(cwd: &Path, idea: &str) -> String {
         synth = ui::dim("sintetizando aportes…")
     );
     let synthesis_task = crate::focus::committee::synthesis_prompt(&contributions, idea);
-    run_subagent(cwd, &synthesis_task).await
+    run_subagent_quiet(cwd, &synthesis_task).await
 }

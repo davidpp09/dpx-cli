@@ -25,7 +25,7 @@ pub async fn web_fetch(url: &str) -> Result<String> {
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
-        .user_agent("dpx-cli/0.3.0")
+        .user_agent(concat!("dpx-cli/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
     let resp = client.get(url).send().await?;

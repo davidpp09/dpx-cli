@@ -79,6 +79,19 @@ pub(crate) async fn maybe_auto_delegate(input: &str, cwd: &Path) -> Option<Strin
 const SUBAGENT_MAX_ROUNDS: usize = 6;
 
 pub(crate) async fn run_subagent(cwd: &Path, task: &str) -> String {
+    run_subagent_inner(cwd, task, true).await
+}
+
+/// Igual que [`run_subagent`] pero SILENCIOSO: sin header, sin spinner por ronda
+/// ni línea de cierre. Para correr varios subagentes EN PARALELO (p. ej. el
+/// comité) sin que sus spinners se pisen en la misma línea — el llamador enseña
+/// su propio progreso. Las trazas de lectura (`↳ subagente lee…`) sí salen: son
+/// líneas sueltas (sin `\r`), así que conviven sin garabatear.
+pub(crate) async fn run_subagent_quiet(cwd: &Path, task: &str) -> String {
+    run_subagent_inner(cwd, task, false).await
+}
+
+async fn run_subagent_inner(cwd: &Path, task: &str, verbose: bool) -> String {
     if !has_deepseek_key() {
         return "[no pude lanzar el subagente: no hay DEEPSEEK_API_KEY]".to_string();
     };
@@ -88,22 +101,26 @@ pub(crate) async fn run_subagent(cwd: &Path, task: &str) -> String {
         Err(e) => return format!("[no pude lanzar el subagente: {e}]"),
     };
 
-    println!(
-        "\n{} {} {}",
-        ui::accent("⏺ subagente"),
-        ui::dim("investigando"),
-        ui::dim(&truncate_log(task, 80))
-    );
+    if verbose {
+        println!(
+            "\n{} {} {}",
+            ui::accent("⏺ subagente"),
+            ui::dim("investigando"),
+            ui::dim(&truncate_log(task, 80))
+        );
+    }
 
     let mut history: Vec<Message> = Vec::new();
     let mut to_send = task.to_string();
     let mut conclusion = String::new();
 
     for round in 1..=SUBAGENT_MAX_ROUNDS {
-        let spinner = ui::Spinner::start("subagente investigando…");
+        let spinner = verbose.then(|| ui::Spinner::start("subagente investigando…"));
         let mut sink = |_: &str| {};
         let reply = mentor.chat_stream(&to_send, &mut history, &mut sink).await;
-        spinner.stop();
+        if let Some(s) = spinner {
+            s.stop();
+        }
 
         let ChatReply { text, calls, usage } = match reply {
             Ok(r) => r,
@@ -137,7 +154,9 @@ pub(crate) async fn run_subagent(cwd: &Path, task: &str) -> String {
         };
     }
 
-    println!("{}", ui::dim("⎿ subagente terminó"));
+    if verbose {
+        println!("{}", ui::dim("⎿ subagente terminó"));
+    }
 
     if conclusion.trim().is_empty() {
         "[el subagente no produjo una conclusión]".to_string()
