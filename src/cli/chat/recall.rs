@@ -23,14 +23,17 @@ pub(crate) async fn classify_delegation(input: &str) -> Option<&'static str> {
 async fn classify_delegation_flash(input: &str) -> Result<Option<&'static str>> {
     const SYSTEM: &str = "Eres un clasificador. Responde UNA sola palabra.";
     let user = format!(
-        "Clasifica esta peticion como 'research' (si solo pide investigar/leer/buscar/explicar, \
-         sin modificar nada) o 'change' (si implica crear, modificar, borrar, ejecutar). \
-         Responde UNA sola palabra: research o change.\n\nPeticion: {input}"
+        "Clasifica esta petición en UNA palabra:\n\
+         - research = solo investigar/leer/buscar/explicar (no toca código);\n\
+         - modify = cambiar/arreglar/refactorizar/mover/borrar código que YA existe;\n\
+         - new = crear algo nuevo desde cero.\n\
+         Responde solo: research, modify o new.\n\nPetición: {input}"
     );
     let reply = ModelRouter::new().flash_prompt(SYSTEM, &user).await?;
     match reply.trim().to_lowercase().as_str() {
         "research" => Ok(Some("researcher")),
-        "change" => Ok(None),
+        "modify" => Ok(Some("mapper")),
+        "new" => Ok(None),
         _ => Ok(classify_delegation_fallback(input)),
     }
 }
@@ -40,12 +43,20 @@ pub(crate) fn classify_delegation_fallback(input: &str) -> Option<&'static str> 
     if t.split_whitespace().count() < 4 {
         return None;
     }
-    const CHANGE: [&str; 20] = [
-        "crea", "créa", "agrega", "añade", "anade", "cambia", "arregla", "implementa",
-        "escribe", "haz ", "borra", "elimina", "refactoriza", "renombra",
-        "mueve", "extrae", "genera", "construye", "compila", "deploy",
+    // Cambiar código que YA existe → mapear el terreno en flash antes de editar.
+    const MODIFY: &[&str] = &[
+        "cambia", "arregla", "corrige", "modifica", "refactoriza", "renombra",
+        "mueve", "extrae", "borra", "elimina", "ajusta", "reemplaza", "migra",
     ];
-    if CHANGE.iter().any(|w| t.contains(w)) {
+    if MODIFY.iter().any(|w| t.contains(w)) {
+        return Some("mapper");
+    }
+    // Crear algo NUEVO desde cero → no hay terreno que investigar (pro lo escribe).
+    const CREATE: &[&str] = &[
+        "crea", "créa", "agrega", "añade", "anade", "implementa", "escribe",
+        "genera", "construye", "compila", "deploy", "haz ",
+    ];
+    if CREATE.iter().any(|w| t.contains(w)) {
         return None;
     }
     const RESEARCH: [&str; 34] = [
@@ -60,20 +71,39 @@ pub(crate) fn classify_delegation_fallback(input: &str) -> Option<&'static str> 
 
 pub(crate) async fn maybe_auto_delegate(input: &str, cwd: &Path) -> Option<String> {
     let role = classify_delegation(input).await?;
-    println!("{}", ui::dim(&format!("⎿ delegando en subagente flash ({role}) para ahorrar…")));
-    let task = format!(
-        "El usuario preguntó: \"{input}\". Investiga en el proyecto y devuelve una conclusión \
-         CONCISA con los archivos/funciones y datos concretos que respondan o ubiquen lo pedido. \
-         No propongas cambios; solo informa lo que encuentres."
-    );
+    // `mapper` = tarea de CAMBIO sobre código existente → flash mapea el terreno
+    // antes de que pro edite (descarga la lectura del cerebro pro). `researcher`
+    // = pregunta → flash investiga y responde. Ambos van al cerebro BARATO.
+    let (announce, task, label): (&str, String, &str) = if role == "mapper" {
+        (
+            "mapeando el código del cambio en flash…",
+            format!(
+                "El usuario va a pedir este CAMBIO: \"{input}\". NO edites nada. Mapea el terreno \
+                 para que el agente principal arranque ENFOCADO: qué archivos y funciones están \
+                 implicados, su estructura actual, DÓNDE se haría el cambio y qué se vería afectado \
+                 (usos, llamadas, imports). Devuelve un mapa CONCISO con rutas y líneas."
+            ),
+            "[mapa del código relevante para el cambio (subagente flash); arranca desde aquí, \
+             pero verifica antes de editar lo que toques)",
+        )
+    } else {
+        (
+            "delegando investigación en flash…",
+            format!(
+                "El usuario preguntó: \"{input}\". Investiga en el proyecto y devuelve una \
+                 conclusión CONCISA con los archivos/funciones y datos concretos que respondan o \
+                 ubiquen lo pedido. No propongas cambios; solo informa lo que encuentres."
+            ),
+            "[investigación previa de un subagente flash sobre la petición (úsala como base y \
+             verifica lo que necesites; ahorra que releas todo tú)",
+        )
+    };
+    println!("{}", ui::dim(&format!("⎿ {announce}")));
     let conclusion = run_subagent(cwd, &task).await;
     if conclusion.trim().is_empty() || conclusion.contains("no pude lanzar el subagente") {
         return None;
     }
-    Some(format!(
-        "[investigación previa de un subagente flash sobre la petición (úsala como base y \
-         verifica lo que necesites; ahorra que releas todo tú):\n{conclusion}\n]"
-    ))
+    Some(format!("{label}:\n{conclusion}\n]"))
 }
 
 const SUBAGENT_MAX_ROUNDS: usize = 6;
@@ -92,6 +122,8 @@ pub(crate) async fn run_subagent_quiet(cwd: &Path, task: &str) -> String {
 }
 
 async fn run_subagent_inner(cwd: &Path, task: &str, verbose: bool) -> String {
+    // En modo silencioso (learn) NUNCA mostramos la actividad del subagente.
+    let verbose = verbose && !crate::ui::tools_quiet();
     if !has_deepseek_key() {
         return "[no pude lanzar el subagente: no hay DEEPSEEK_API_KEY]".to_string();
     };
@@ -192,18 +224,24 @@ pub(crate) fn subagent_preamble(cwd: &Path, task: &str) -> String {
 pub(crate) async fn subagent_tool(cwd: &Path, call: &rig_core::message::ToolCall) -> String {
     match tools::parse_call(&call.function.name, &call.function.arguments) {
         Ok(DpxCall::Read { path, offset, limit }) => {
-            println!("  {}", ui::dim(&format!("↳ subagente lee {path}")));
+            if !ui::tools_quiet() {
+                println!("  {}", ui::dim(&format!("↳ subagente lee {path}")));
+            }
             match crate::fs::read_file_range(cwd, &path, offset, limit) {
                 Ok(c) => c,
                 Err(e) => format!("[no pude leer `{path}`: {e}]"),
             }
         }
         Ok(DpxCall::Search { pattern }) => {
-            println!("  {}", ui::dim(&format!("↳ subagente busca {pattern}")));
+            if !ui::tools_quiet() {
+                println!("  {}", ui::dim(&format!("↳ subagente busca {pattern}")));
+            }
             crate::fs::search_in_project(cwd, &pattern)
         }
         Ok(DpxCall::WebSearch { query }) => {
-            println!("  {}", ui::dim(&format!("↳ subagente busca en la web: {query}")));
+            if !ui::tools_quiet() {
+                println!("  {}", ui::dim(&format!("↳ subagente busca en la web: {query}")));
+            }
             match crate::agent::search::web_search(&query).await {
                 Ok(r) => r,
                 Err(e) => format!("[web_search falló: {e}]"),

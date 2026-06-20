@@ -52,7 +52,9 @@ pub async fn run(
     // Tiñe TODA la UI con el color del modo activo antes de pintar nada (logo
     // incluido): cada modo tiene su propia identidad visual.
     ui::set_mode_theme(mode);
-    let skin = ui::skin();
+    // En learn el tutor lee/busca por debajo, sin mostrar la actividad de tools.
+    ui::set_tools_quiet(mode == Mode::Learn);
+    let mut skin = ui::skin();
 
     ui::install_ctrl_c_handler();
     ui::logo();
@@ -95,6 +97,9 @@ pub async fn run(
     if prior.is_some() {
         println!("  {}", ui::dim("memoria · retomando contexto de sesiones anteriores"));
     }
+    // Modelos reales que se envían a DeepSeek (verifica el flash vs tu dashboard).
+    let (pro_id, flash_id) = router.model_ids();
+    println!("  {}", ui::dim(&format!("modelos · pro {pro_id} · subagentes {flash_id}")));
 
     // Cada modo arranca con su propio cartel: deja claro en cuál estás.
     ui::mode_banner(mode);
@@ -354,6 +359,10 @@ pub async fn run(
                         &mut mode, &mut auto, &mut history, &cwd,
                         turns.len(),
                     );
+                    // Si un /modo cambió el tema, el `skin` (que hornea el color de
+                    // acento al construirse) debe reconstruirse — si no, el markdown
+                    // de las respuestas seguiría con el color del modo anterior.
+                    skin = ui::skin();
                     ed.set_context(focus::display_name(focus_id.as_deref()), mode.name());
                     continue;
                 }
@@ -460,6 +469,17 @@ pub async fn run(
         let streak = store.read_streak().map(|s| s.days);
         ui::learn_session_summary(&initial_skills, &final_skills, focus_id.as_deref(), streak);
     }
+
+    // Persiste el modo (y focus/auto) con el que TERMINASTE, para que el próximo
+    // `dpx` sin subcomando retome donde lo dejaste (acabaste en learn → arranca
+    // en learn). Un subcomando explícito (`dpx code`) sigue pisando esto.
+    let mut cfg = crate::config::ProjectConfig::load(&cwd).unwrap_or_default();
+    cfg.mode = mode.name().to_string();
+    if let Some(f) = focus_id.as_deref() {
+        cfg.focus = Some(f.to_string());
+    }
+    cfg.auto = auto.label().to_string();
+    let _ = cfg.save(&cwd);
 
     close_session(&router, &store, &turns, prior.as_deref()).await;
     // Devuelve el título de la pestaña a algo neutro al salir.
@@ -801,6 +821,10 @@ async fn run_turn(
         );
     }
 
+    // Comandos que YA fallaron este turno: el loop-guard los bloquea si el modelo
+    // intenta repetir uno idéntico (corta el bucle de reintentos que rompió en vivo).
+    let mut failed_runs: Vec<String> = Vec::new();
+
     loop {
         round += 1;
         // Verbos rotativos + título de pestaña según la fase del turno.
@@ -930,7 +954,7 @@ async fn run_turn(
             } else {
                 let call = &calls[i];
                 let outcome =
-                    run_tool_call(cwd, store, &mut *ask, call, &mut s_writes, &mut s_edits, auto)
+                    run_tool_call(cwd, store, &mut *ask, call, &mut s_writes, &mut s_edits, &mut failed_runs, auto)
                         .await;
                 let (text, cancelled) = match outcome {
                     ToolOutcome::Done(t) => (t, false),
@@ -1306,6 +1330,7 @@ enum ToolOutcome {
 /// que los bloques de texto) y comandos con el sandbox de `confirm_run`. Las
 /// escrituras y ediciones se acumulan en `writes`/`edits` para el auto-build.
 /// Async por `web_search` (HTTP).
+#[allow(clippy::too_many_arguments)] // args cohesivos del despacho de una tool call
 async fn run_tool_call(
     cwd: &Path,
     store: &ProjectStore,
@@ -1313,6 +1338,7 @@ async fn run_tool_call(
     call: &rig_core::message::ToolCall,
     writes: &mut Vec<crate::fs::FileWrite>,
     edits: &mut Vec<crate::fs::FileEdit>,
+    failed_runs: &mut Vec<String>,
     auto: crate::cli::AutoMode,
 ) -> ToolOutcome {
     match tools::parse_call(&call.function.name, &call.function.arguments) {
@@ -1409,20 +1435,36 @@ async fn run_tool_call(
                 ToolOutcome::Done(format!("git add -A:\n{add}\ngit commit:\n{commit}"))
             }
         }
-        Ok(DpxCall::Run { command }) => match confirm_run(ask, store, cwd, &command, auto) {
-            RunDecision::Blocked(reason) => ToolOutcome::Done(format!(
-                "[dpx BLOQUEÓ el comando `{command}`: {reason}. Está prohibido vía run_command; \
-                 NO lo vuelvas a proponer, busca otra forma o pídele al usuario que lo haga a mano.]"
-            )),
-            RunDecision::Refused => {
-                println!("{}", ui::dim("omitido."));
-                ToolOutcome::Done(format!("[el usuario rechazó ejecutar `{command}`]"))
+        Ok(DpxCall::Run { command }) => {
+            // Loop-guard: si este comando EXACTO ya falló este turno, NO lo
+            // ejecutes otra vez — corta el bucle de reintentos idénticos (el
+            // fallo nº1 en vivo: el agente repitiendo un `findstr` roto 10 veces).
+            if failed_runs.iter().any(|c| c == &command) {
+                return ToolOutcome::Done(format!(
+                    "[dpx BLOQUEÓ `{command}`: ya lo intentaste este turno y FALLÓ. NO repitas el \
+                     mismo comando. Prueba algo distinto (lee con read_file, busca con \
+                     search_project) o pídele al usuario que lo ejecute a mano.]"
+                ));
             }
-            RunDecision::Run => {
-                let (out, cancelled, _exit) = execute_run(cwd, &command);
-                if cancelled { ToolOutcome::Cancelled(out) } else { ToolOutcome::Done(out) }
+            match confirm_run(ask, store, cwd, &command, auto) {
+                RunDecision::Blocked(reason) => ToolOutcome::Done(format!(
+                    "[dpx BLOQUEÓ el comando `{command}`: {reason}. Está prohibido vía run_command; \
+                     NO lo vuelvas a proponer, busca otra forma o pídele al usuario que lo haga a mano.]"
+                )),
+                RunDecision::Refused => {
+                    println!("{}", ui::dim("omitido."));
+                    ToolOutcome::Done(format!("[el usuario rechazó ejecutar `{command}`]"))
+                }
+                RunDecision::Run => {
+                    let (out, cancelled, exit) = execute_run(cwd, &command);
+                    // Recuerda los fallos para que el loop-guard corte la repetición.
+                    if exit != Some(0) {
+                        failed_runs.push(command.clone());
+                    }
+                    if cancelled { ToolOutcome::Cancelled(out) } else { ToolOutcome::Done(out) }
+                }
             }
-        },
+        }
     }
 }
 

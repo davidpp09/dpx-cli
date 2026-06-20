@@ -73,9 +73,9 @@ Un solo eje: tres modos excluyentes. Lo que cambia es el **rol**, no la calidad.
 
 | Modo | Color | Qué hace | Cuándo |
 |:---|:---|:---|:---|
-| **code** | azul | Agente autónomo: implementa, ejecuta, verifica y corrige. | Features, bugs, refactors. |
-| **hack** | ámbar | Construye rápido pero **con criterio**: defaults sensatos, código que corre ya. | Prototipos, hackathones, demos. |
-| **learn** | verde | Tutor socrático: te hace pensar y te enseña el porqué. **Tú escribes el código**, él te guía. | Aprender, entender, fijar conocimiento. |
+| **code** | rojo | Agente autónomo: implementa, ejecuta, verifica y corrige. | Features, bugs, refactors. |
+| **hack** | morado | Construye rápido pero **con criterio**: lo justo que resuelve el pedido, corriendo ya — sin sobre-escopar. | Prototipos, hackathones, demos. |
+| **learn** | azul marino | Tutor socrático: te hace pensar y te enseña el porqué. **Tú escribes el código**, él te guía. | Aprender, entender, fijar conocimiento. |
 
 ```bash
 dpx code --focus spring-boot   # agente enfocado en Spring Boot
@@ -88,6 +88,42 @@ dpx learn                      # el tutor socrático
 
 Cada modo expone solo los comandos que le corresponden: `/comité` solo en hack, `/examen`/`/evaluar`/`/revisar` solo en learn, `/auto` solo en code/hack.
 
+> `dpx` (sin subcomando) retoma el **último modo y focus** que usaste — el estado se guarda al cerrar.
+
+---
+
+## Casos de uso
+
+**Aprender un stack desde cero** — `dpx learn --focus spring-boot`
+> `enséñame inyección de dependencias`
+
+El tutor explica el *porqué*, te deja escribir el código, te interroga (`/examen`) y trackea tu progreso (`/progreso`) con repaso espaciado y badges.
+
+**Arreglar un bug** — `dpx code`
+> `arregla el error de validación en UserService`
+
+Un subagente flash mapea el código relevante, luego el cerebro pro edita, compila y corrige hasta dejarlo en verde (green-gate).
+
+**Entender un codebase ajeno** — `dpx code`
+> `¿dónde se valida el token JWT y cómo fluye?`
+
+Delega la investigación al tier flash (barato) y te resume con archivos y líneas concretas.
+
+**Prototipo rápido** — `dpx hack --focus node`
+> `un endpoint que reciba un JSON y lo guarde en memoria`
+
+Construye lo justo que corre ya, sin montar infraestructura que no pediste.
+
+**Code review pedagógico** — en learn:
+> `/revisar src/api/users.py`
+
+Te dice qué está bien, qué mejorar y **por qué** — aprendes mientras revisas.
+
+**Brainstorm antes de construir** — `dpx hack` (proyecto nuevo)
+> `una CLI para gestionar tareas con prioridades`
+
+4 roles (juez · product · tech lead · escéptico) evalúan la idea **en paralelo** y devuelven un plan antes de escribir una línea.
+
 ---
 
 ## El cerebro (DeepSeek)
@@ -97,7 +133,9 @@ dpx usa **solo DeepSeek** con dos tiers, repartidos por el Model Router:
 | Tier | Modelo | Para qué |
 |:---|:---|:---|
 | **pro** | `deepseek-v4-pro` | Cerebro principal de cada turno. En learn usa `reasoning_effort: max`; en code/hack responde sin thinking (rápido). |
-| **flash** | `deepseek-v4-flash` | ~12× más barato. Para subagentes de investigación y resúmenes al cerrar la sesión. |
+| **flash** | `deepseek-v4-flash` | ~12× más barato. Subagentes (investigación + mapeo de cambios), clasificación de tareas, comité y resúmenes. |
+
+Los IDs de modelo se pueden sobreescribir con las variables `DEEPSEEK_MODEL_PRO` y `DEEPSEEK_MODEL_FLASH` (por si tu plan usa otros nombres). dpx muestra los IDs activos al arrancar.
 
 Ventana de contexto: 128k tokens. dpx **compacta automáticamente** el historial al acercarse al límite, aligerando resultados de herramienta antiguos.
 
@@ -127,7 +165,7 @@ dpx guarda todo el estado del proyecto en `.dpx/` (añádelo al `.gitignore`):
 
 | Archivo | Qué contiene |
 |:---|:---|
-| `config.toml` | Focus, modo y nivel de autonomía por defecto |
+| `config.toml` | Focus, modo y nivel de autonomía. Se **actualiza al cerrar** para que `dpx` (sin subcomando) retome el último que usaste. |
 | `context.md` | Memoria viva: estado del proyecto, aprendizaje y próximos pasos. Se regenera al cerrar con `/salir`. |
 | `sessions/*.jsonl` | Transcripción de cada sesión (un turn por línea JSON). Se escribe en caliente — un cierre brusco no pierde lo conversado. |
 | `skills.md` | Progreso de aprendizaje del usuario por tema (learn). |
@@ -199,18 +237,19 @@ Referencias de archivo con `@ruta/al/archivo` en cualquier mensaje (con autocomp
 
 ## Herramientas (function calling)
 
-dpx expone **12 herramientas nativas** al modelo. Los bloques de texto `dpx:*` se mantienen como fallback para modelos que no cooperen con function calling.
+dpx expone **13 herramientas nativas** al modelo. Los bloques de texto `dpx:*` se mantienen como fallback para modelos que no cooperen con function calling.
 
 | Herramienta | Función |
 |:---|:---|
 | `read_file` | Lee un archivo. Acepta `offset`/`limit` para leer rangos de archivos grandes. |
-| `search_project` | Busca texto (regex) en todos los archivos del proyecto. |
+| `search_project` | Busca texto en el proyecto. Implementación **nativa en Rust** (sin shell): soporta alternación con `\|` y es inmune a comillas/pipes en Windows. |
 | `write_file` | Crea o sobrescribe un archivo completo (con diff y confirmación). |
 | `edit_file` | Edita un fragmento literal sin reescribir el archivo entero. |
 | `delete_file` | Borra un archivo (con confirmación). |
 | `run_command` | Ejecuta un comando de shell (clasificación Safe/Dangerous/Forbidden + sandbox). |
 | `web_search` | Busca en DuckDuckGo (gratis, sin API key). |
-| `spawn_agent` | Lanza un subagente flash aislado (solo lectura) para investigar sin llenar el contexto principal. |
+| `web_fetch` | Lee el contenido de una URL (texto plano, hasta 8000 chars) — para leer documentación y artículos. |
+| `spawn_agent` | Lanza subagente(s) flash aislados (solo lectura) para investigar sin llenar el contexto principal. Varios consecutivos corren **en paralelo**. |
 | `git_status` | Estado del repo (solo lectura, sin confirmación). |
 | `git_diff` | Diff del working tree, opcionalmente de un archivo. |
 | `git_log` | Últimos N commits (default 10). |
@@ -224,7 +263,7 @@ dpx expone **12 herramientas nativas** al modelo. Los bloques de texto `dpx:*` s
 
 Cada mensaje dispara un **loop agéntico de hasta 4 rondas**:
 
-1. **(code/hack)** Si la petición es de investigación (palabras clave: "dónde", "busca", "explica", "cómo funciona"…), un **subagente flash** la resuelve antes y antepone su conclusión (`⎿ delegando en subagente flash…`).
+1. **(code/hack)** Antes del turno, dpx clasifica la petición (clasificador flash + fallback por keywords): si es de **investigación**, un subagente flash la resuelve; si es un **cambio sobre código existente**, un subagente flash **mapea el terreno** (archivos y funciones implicados) para que el cerebro pro arranque enfocado. Crear de cero no delega.
 2. El modelo responde con texto + tool calls.
 3. dpx clasifica cada tool call: aplica escrituras/ediciones (con diff), atiende lecturas/búsquedas, ejecuta comandos con clasificación de riesgo.
 4. Los resultados se realimentan; el modelo itera hasta cerrar el turno.
@@ -262,15 +301,16 @@ Tres niveles, clasificados antes de pedir confirmación:
 - **Typewriter**: la respuesta formateada se revela progresivamente en terminal.
 - **Syntax highlighting**: bloques de código con resaltado real vía `syntect`.
 - **Markdown renderizado**: `termimad` convierte la respuesta a terminal con formato.
-- **Gradientes por modo**: el banner y los bordes usan el color del modo activo (azul · ámbar · verde).
+- **Gradientes por modo**: el banner, el prompt y los bordes usan el color del modo activo (rojo · morado · azul marino), con degradados profundos.
+- **Editor de entrada propio** (crossterm): multilínea (Shift/Ctrl+Enter), autocompletado *ghost* en gris para `@archivos` y `/comandos`, resaltado de comandos/refs, cursor (←→ Home End) y **pegados grandes colapsados en un chip** `[⎘ pegado · N líneas · M chars]`. Barra al pie con focus·modo y medidor de contexto.
 - **Spinner animado**: mientras el modelo piensa.
 - **Modo headless**: si stdin no es TTY (pipe, CI), entra en modo texto plano sin prompts interactivos.
 
 ### Subagentes y auto-delegación
 
-`spawn_agent` lanza un subagente en el tier **flash** con contexto propio y aislado: solo lectura, sin historial del usuario. Devuelve solo su conclusión. Ideal para investigar código extenso sin llenar el contexto caro del modelo principal.
+`spawn_agent` lanza subagente(s) en el tier **flash** con contexto propio y aislado: solo lectura, sin historial del usuario. Devuelven solo su conclusión. Ideal para investigar código extenso sin llenar el contexto caro del modelo principal. Varios subagentes consecutivos corren **en paralelo** (igual que el comité de hack).
 
-La auto-delegación (`classify_delegation`) es una heurística por palabras clave: si la petición parece de investigación (no de cambio), lanza el subagente automáticamente antes del turno principal.
+La **auto-delegación** clasifica cada petición (clasificador flash con fallback por keywords) en `research` / `modify` / `new`: una pregunta se investiga en flash, un cambio sobre código existente se **mapea** en flash antes de que pro edite, y crear de cero no delega — así el tier barato descarga la lectura del cerebro caro.
 
 ---
 
@@ -351,7 +391,7 @@ src/
     ├── detect.rs         # detect_stack(), detect_build(), detect_test()
     ├── edit.rs           # Edición quirúrgica en 3 capas: exacta, CRLF, fuzzy-indent
     ├── exec.rs           # run_command_streaming(): sandbox, timeout, output en tiempo real
-    ├── grep.rs           # search_project(): ripgrep/regex sobre el árbol
+    ├── grep.rs           # search_project(): búsqueda nativa en Rust (sin shell) + orphan-sweep
     ├── safety.rs         # CommandRisk: Safe / Dangerous / Forbidden
     └── tree.rs           # repo-map: índice de símbolos por archivo (heurística por lenguaje)
 ```
@@ -377,7 +417,7 @@ Los flags de CLI (`--focus`, `--auto`) pisan estos defaults; los comandos del RE
 
 ```bash
 cargo check                                    # compilación rápida
-cargo test                                     # 148 tests
+cargo test                                     # 150 tests verdes
 cargo clippy --all-targets -- -D warnings      # linter estricto (cero warnings)
 ```
 

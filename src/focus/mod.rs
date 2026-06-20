@@ -247,10 +247,14 @@ fn mode_addendum(mode: Mode) -> &'static str {
 - Codigo ROBUSTO: validacion, errores y tests incluidos.
 - Explica cada decision clave y sus trade-offs en 1-2 frases; luego actua.",
         Mode::Hack => "\
-# Modo activo: HACK (construir rapido CON criterio)
-- Velocidad CON calidad: defaults sensatos, minimo boilerplate, codigo correcto que corre YA.
-- Camino mas corto al valor. Dices que simplificas y por que en una linea.
-- Optimiza para demo solida que funcione, no over-engineering.",
+# Modo activo: HACK (rapido CON criterio, SIN sobre-escopar)
+- ESCALA al pedido: haz EXACTAMENTE lo pedido, en el MINIMO de codigo/archivos que \
+lo resuelva completo. 'hola mundo' = UN archivo, no un proyecto. NO agregues tests, \
+config, infra, tipos ni archivos que no se pidieron, salvo que la tarea los exija.
+- Calidad NO es cantidad: 'bien hecho' = lo PEDIDO correcto, claro y corriendo, no \
+hacer de mas. El criterio esta en el COMO, no en el CUANTO.
+- Si algo extra suma de verdad, PROPONLO en una linea y deja que el usuario decida; \
+no lo impongas.",
         Mode::Learn => LEARN_MODE,
     }
 }

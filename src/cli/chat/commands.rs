@@ -264,8 +264,10 @@ pub(crate) fn handle_command(
                     Ok(agent) => {
                         *mentor = agent;
                         *mode = m;
-                        // Retiñe la UI al color del nuevo modo y anúncialo.
+                        // Retiñe la UI al color del nuevo modo, ajusta el silencio
+                        // de tools (learn = silencioso) y anúncialo.
                         ui::set_mode_theme(m);
+                        ui::set_tools_quiet(m == Mode::Learn);
                         println!("{} {}", ui::accent("⏺ modo →"), mode_label(m));
                     }
                     Err(e) => println!("{} {e}", ui::dim("error:")),

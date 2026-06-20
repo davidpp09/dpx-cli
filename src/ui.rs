@@ -62,12 +62,12 @@ pub fn set_mode_theme(mode: crate::focus::Mode) {
     // (acento de texto, claro del degradado, oscuro del degradado). El acento
     // es legible como texto; el degradado da profundidad al logo/spinner/cajas.
     let (accent, hi, lo) = match mode {
-        // code — ROJO vino profundo: el agente que construye, fuerte y serio.
-        Mode::Code => ((172, 50, 52), (198, 74, 66), (60, 14, 20)),
-        // hack — MORADO profundo: energía con criterio, sin estridencia.
-        Mode::Hack => ((142, 80, 184), (170, 110, 206), (48, 20, 78)),
-        // learn — AZUL MARINO: calmado y profundo, para aprender.
-        Mode::Learn => ((66, 102, 172), (98, 136, 200), (14, 28, 82)),
+        // code — ROJO (171,3,3): el agente que construye, fuerte y serio.
+        Mode::Code => ((171, 3, 3), (214, 42, 38), (74, 2, 2)),
+        // hack — MAGENTA/MORADO (184,0,170): energía con criterio.
+        Mode::Hack => ((184, 0, 170), (222, 56, 206), (78, 0, 72)),
+        // learn — AZUL MARINO (24,41,115): calmado y profundo, para aprender.
+        Mode::Learn => ((24, 41, 115), (66, 96, 190), (10, 18, 58)),
     };
     ACCENT.store(pack_rgb(accent.0, accent.1, accent.2), Ordering::Relaxed);
     GRAD_HI.store(pack_rgb(hi.0, hi.1, hi.2), Ordering::Relaxed);
@@ -139,6 +139,19 @@ pub fn cancel_requested() -> bool {
 /// Consume la marca de cancelación (al empezar un turno o tras atenderla).
 pub fn clear_cancel() {
     CANCEL.store(false, Ordering::SeqCst);
+}
+
+/// Modo silencioso de herramientas: en `learn` el tutor lee/busca POR DEBAJO sin
+/// llenar la pantalla con `◇ leyendo X` (el alumno quiere la lección, no el
+/// trasiego). Lo fija el REPL según el modo activo.
+static TOOLS_QUIET: AtomicBool = AtomicBool::new(false);
+
+pub fn set_tools_quiet(quiet: bool) {
+    TOOLS_QUIET.store(quiet, Ordering::SeqCst);
+}
+
+pub fn tools_quiet() -> bool {
+    TOOLS_QUIET.load(Ordering::SeqCst)
 }
 
 /// Color de acento para el render de Markdown (termimad).
@@ -817,6 +830,11 @@ pub fn checklist(items: &[(bool, String)]) {
 /// Es el feedback en vivo de qué está haciendo dpx (leer, buscar, escribir…),
 /// con identidad visual coherente (estilo Claude Code: ves la acción real).
 pub fn tool_action(verb: &str, target: &str) {
+    // En modo silencioso (learn) el tutor trabaja por debajo, sin mostrar la
+    // actividad de herramientas.
+    if tools_quiet() {
+        return;
+    }
     let (r, g, b) = accent_rgb();
     // Glifo ◇ con el color del modo, verbo en gris, objetivo en acento.
     println!(

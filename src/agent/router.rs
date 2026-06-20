@@ -28,8 +28,19 @@ pub fn has_key() -> bool {
     std::env::var(ENV_VAR).map(|v| !v.trim().is_empty()).unwrap_or(false)
 }
 
-const DEEPSEEK_PRO: &str = "deepseek-v4-pro";
-const DEEPSEEK_FLASH: &str = "deepseek-v4-flash";
+/// Modelo del cerebro PRO (principal). Override con `DEEPSEEK_MODEL_PRO` por si
+/// el nombre en tu plan de DeepSeek difiere del default.
+fn deepseek_pro() -> String {
+    std::env::var("DEEPSEEK_MODEL_PRO").unwrap_or_else(|_| "deepseek-v4-pro".to_string())
+}
+
+/// Modelo FLASH (barato) para subagentes, resúmenes y clasificación. Override con
+/// `DEEPSEEK_MODEL_FLASH`. CLAVE: si este nombre NO existe en tu plan, las
+/// llamadas flash fallan y TODO el trabajo cae al cerebro pro (más caro y lento)
+/// — por eso en el dashboard verías solo "pro".
+fn deepseek_flash() -> String {
+    std::env::var("DEEPSEEK_MODEL_FLASH").unwrap_or_else(|_| "deepseek-v4-flash".to_string())
+}
 
 fn deepseek_thinking(effort: &str) -> serde_json::Value {
     serde_json::json!({ "thinking": { "type": "enabled" }, "reasoning_effort": effort })
@@ -215,26 +226,33 @@ impl ModelRouter {
         BRAIN_LABEL
     }
 
+    /// IDs reales de modelo que se envían a DeepSeek: `(pro, flash)`. Útil para
+    /// verificar contra el dashboard que el flash es el correcto (si no, ajusta
+    /// `DEEPSEEK_MODEL_FLASH`).
+    pub fn model_ids(&self) -> (String, String) {
+        (deepseek_pro(), deepseek_flash())
+    }
+
     pub fn mentor(&self, preamble: &str, mode: Mode) -> Result<Mentor> {
         let (temperature, extra) = match mode {
             Mode::Code => (0.4, deepseek_no_thinking()),
             Mode::Hack => (0.55, deepseek_no_thinking()),
             Mode::Learn => (0.5, deepseek_thinking("max")),
         };
-        build_deepseek(DEEPSEEK_PRO, preamble, temperature, extra)
+        build_deepseek(&deepseek_pro(), preamble, temperature, extra)
     }
 
     pub fn subagent_mentor(&self, preamble: &str) -> Result<Mentor> {
-        build_deepseek(DEEPSEEK_FLASH, preamble, 0.2, deepseek_no_thinking())
+        build_deepseek(&deepseek_flash(), preamble, 0.2, deepseek_no_thinking())
     }
 
     pub async fn summarize(&self, preamble: &str, content: &str) -> Result<String> {
-        let mentor = build_deepseek(DEEPSEEK_FLASH, preamble, 0.2, deepseek_no_thinking())?;
+        let mentor = build_deepseek(&deepseek_flash(), preamble, 0.2, deepseek_no_thinking())?;
         mentor.prompt(content).await
     }
 
     pub async fn flash_prompt(&self, preamble: &str, user: &str) -> Result<String> {
-        let mentor = build_deepseek(DEEPSEEK_FLASH, preamble, 0.0, deepseek_no_thinking())?;
+        let mentor = build_deepseek(&deepseek_flash(), preamble, 0.0, deepseek_no_thinking())?;
         mentor.prompt(user).await
     }
 }
