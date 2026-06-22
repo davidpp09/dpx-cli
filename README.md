@@ -1,10 +1,12 @@
 <div align="center">
-  <h1>dpx</h1>
-  <p><b>Tu mentor senior de desarrollo, directamente en tu terminal.</b></p>
+  <img src="assets/banner.svg" alt="dpx — tu mentor senior de desarrollo en la terminal" width="100%">
 
-  [![Rust](https://img.shields.io/badge/Rust-2024-orange.svg)](https://www.rust-lang.org)
-  [![v0.4.0](https://img.shields.io/badge/versión-0.4.0-blue.svg)](#)
-  [![Privado](https://img.shields.io/badge/proyecto-privado-lightgrey.svg)](#licencia)
+  <br><br>
+
+  [![Rust](https://img.shields.io/badge/Rust-2024-orange.svg?logo=rust)](https://www.rust-lang.org)
+  [![Versión](https://img.shields.io/badge/versión-0.4.0-blue.svg)](#)
+  [![Licencia MIT](https://img.shields.io/badge/licencia-MIT-green.svg)](#licencia)
+  [![Tests](https://img.shields.io/badge/tests-150%20✓-brightgreen.svg)](#desarrollo)
 </div>
 
 ---
@@ -42,7 +44,7 @@ dpx          # abre el modo por defecto del proyecto
 ## Instalación
 
 ```bash
-git clone <repo-privado>/dpx-cli.git
+git clone https://github.com/davidpp09/dpx-cli.git
 cd dpx-cli
 cargo install --path .
 ```
@@ -430,6 +432,4 @@ Dentro del propio repo de dpx, **`/actualizar`** recompila e instala el binario 
 
 ## Licencia
 
-**Proyecto privado. Todos los derechos reservados.**
-
-Este software no se distribuye bajo ninguna licencia de código abierto: no hay permiso de uso, copia, modificación ni distribución salvo autorización explícita del autor.
+Distribuido bajo licencia **MIT**. Eres libre de usar, copiar, modificar y distribuir este software; solo conserva el aviso de copyright. Ver [`LICENSE`](LICENSE) para el texto completo.
