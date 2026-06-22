@@ -269,7 +269,35 @@ fn raw_multiline_input(
                     }
                     cursor_col = i;
                 }
-                (KeyCode::Char(c), _) if !c.is_control() => {
+                // Borrado por PALABRA hacia la izquierda: Ctrl+W (clásico de
+                // readline; muchas terminales mapean Ctrl+Backspace/Ctrl+Delete a
+                // esto) y Ctrl/Alt+Backspace. Sin estos handlers, Ctrl+W caía en el
+                // arm genérico de char e insertaba una 'w' literal (el bug de "wwww").
+                (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
+                    delete_word_back(&mut text, &mut cursor_col);
+                }
+                (KeyCode::Backspace, m) if m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                    delete_word_back(&mut text, &mut cursor_col);
+                }
+                // Borrado por PALABRA hacia la derecha: Ctrl/Alt+Delete.
+                (KeyCode::Delete, m) if m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                    delete_word_forward(&mut text, &mut cursor_col);
+                }
+                // Delete simple: borra el carácter a la derecha del cursor.
+                (KeyCode::Delete, _) => {
+                    if cursor_col < text.chars().count() {
+                        let pos = byte_pos(&text, cursor_col);
+                        text.remove(pos);
+                    }
+                }
+                // Carácter normal. El guard exige que NO haya exactamente un
+                // modificador Ctrl o Alt (eso son atajos: Ctrl+W, Alt+f…). Permite
+                // sin modificador, con Shift, y con AltGr (= Ctrl+Alt a la vez, que
+                // en teclados español/internacional produce `@ # ~ { } [ ]`).
+                (KeyCode::Char(c), m)
+                    if !c.is_control()
+                        && m.contains(KeyModifiers::CONTROL) == m.contains(KeyModifiers::ALT) =>
+                {
                     let pos = byte_pos(&text, cursor_col);
                     text.insert(pos, c);
                     cursor_col += 1;
@@ -413,6 +441,44 @@ fn expand_pastes(text: &str, pastes: &[(String, String)]) -> String {
         }
     }
     out
+}
+
+/// Borra la palabra a la IZQUIERDA del cursor: primero los espacios pegados al
+/// cursor, luego el bloque de no-espacios. Mueve `cursor_col` al inicio borrado.
+fn delete_word_back(text: &mut String, cursor_col: &mut usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = (*cursor_col).min(chars.len());
+    while i > 0 && chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    while i > 0 && !chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    if i < *cursor_col {
+        let start = byte_pos(text, i);
+        let end = byte_pos(text, *cursor_col);
+        text.replace_range(start..end, "");
+        *cursor_col = i;
+    }
+}
+
+/// Borra la palabra a la DERECHA del cursor: espacios pegados y luego el bloque
+/// de no-espacios. El cursor no se mueve (el texto de la derecha se corre).
+fn delete_word_forward(text: &mut String, cursor_col: &mut usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut i = (*cursor_col).min(n);
+    while i < n && chars[i].is_whitespace() {
+        i += 1;
+    }
+    while i < n && !chars[i].is_whitespace() {
+        i += 1;
+    }
+    if i > *cursor_col {
+        let start = byte_pos(text, *cursor_col);
+        let end = byte_pos(text, i);
+        text.replace_range(start..end, "");
+    }
 }
 
 /// Índice en BYTES del carácter en la columna `char_col` (o el final del texto).
@@ -688,6 +754,34 @@ mod tests {
         assert_eq!(cursor_line_col("ab\ncd", 3), (1, 0)); // inicio de la línea 1
         assert_eq!(cursor_line_col("ab\ncd", 5), (1, 2)); // fin del texto
         assert_eq!(cursor_line_col("ab\ncd", 99), (1, 2)); // más allá → fin
+    }
+
+    #[test]
+    fn delete_word_back_borra_palabra_y_espacios() {
+        // Cursor al final: borra "mundo".
+        let mut t = "hola mundo".to_string();
+        let mut c = t.chars().count();
+        delete_word_back(&mut t, &mut c);
+        assert_eq!(t, "hola ");
+        assert_eq!(c, 5);
+        // Otra vez: borra el espacio sobrante + "hola".
+        delete_word_back(&mut t, &mut c);
+        assert_eq!(t, "");
+        assert_eq!(c, 0);
+        // En buffer vacío no truena.
+        delete_word_back(&mut t, &mut c);
+        assert_eq!(t, "");
+    }
+
+    #[test]
+    fn delete_word_forward_borra_a_la_derecha_sin_mover_cursor() {
+        let mut t = "hola mundo".to_string();
+        let mut c = 0usize;
+        delete_word_forward(&mut t, &mut c);
+        assert_eq!(t, " mundo"); // borró "hola", el cursor sigue en 0
+        assert_eq!(c, 0);
+        delete_word_forward(&mut t, &mut c);
+        assert_eq!(t, ""); // borró " mundo"
     }
 
     #[test]

@@ -31,7 +31,7 @@
     "terminal",
     "agent"
   ],
-  "license": "UNLICENSED",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/davidpp09/dpx-cli.git"
