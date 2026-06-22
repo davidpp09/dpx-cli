@@ -43,6 +43,17 @@ dpx          # abre el modo por defecto del proyecto
 
 ## Instalación
 
+**Vía npm** (Windows x64 — la forma rápida):
+
+```bash
+npm install -g @dpx-cli/dpx
+dpx
+```
+
+> Descarga el binario nativo del último release; no necesitas tener Rust instalado.
+
+**Desde el código** (cualquier plataforma con Rust):
+
 ```bash
 git clone https://github.com/davidpp09/dpx-cli.git
 cd dpx-cli
