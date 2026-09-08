@@ -5,12 +5,13 @@ use futures::StreamExt;
 use rig_core::OneOrMany;
 use rig_core::agent::Agent;
 use rig_core::client::{CompletionClient, ProviderClient};
-use rig_core::completion::{AssistantContent, Message, Prompt};
+use rig_core::completion::{AssistantContent, Message, ToolDefinition};
 use rig_core::message::ToolCall;
 use rig_core::providers::deepseek;
 use rig_core::streaming::{StreamedAssistantContent, StreamingCompletion};
 
 use crate::focus::Mode;
+use crate::token::Tier;
 
 pub struct ChatReply {
     pub text: String,
@@ -21,7 +22,19 @@ pub struct ChatReply {
 // ── DeepSeek constants ──────────────────────────────────────────────
 pub const BRAIN_LABEL: &str = "DeepSeek Reasoner";
 pub const BRAIN_NAME: &str = "deepseek";
-pub const CONTEXT_BUDGET: usize = 128_000;
+
+/// Ventana de contexto REAL de los modelos v4 (pro y flash): 1M tokens, con
+/// 384K de salida máxima. No es el presupuesto que usa dpx (ver
+/// [`CONTEXT_BUDGET`]); está aquí como referencia de cuál es el techo duro.
+pub const CONTEXT_WINDOW: usize = 1_000_000;
+
+/// Presupuesto de contexto con el que opera dpx: el punto a partir del cual el
+/// historial se poda (50%) y se compacta (75%). Corre DEBAJO de
+/// [`CONTEXT_WINDOW`] a propósito: no por límite del modelo, sino porque el
+/// prefill de un turno de ~750k tokens se siente lento en una TUI. 400k deja
+/// sesiones largas sin amnesia (compacta a los 300k) y turnos que responden
+/// rápido. Súbelo si en tu uso real la compactación sigue llegando temprano.
+pub const CONTEXT_BUDGET: usize = 400_000;
 pub const ENV_VAR: &str = "DEEPSEEK_API_KEY";
 
 pub fn has_key() -> bool {
@@ -42,23 +55,109 @@ fn deepseek_flash() -> String {
     std::env::var("DEEPSEEK_MODEL_FLASH").unwrap_or_else(|_| "deepseek-v4-flash".to_string())
 }
 
-fn deepseek_thinking(effort: &str) -> serde_json::Value {
-    serde_json::json!({ "thinking": { "type": "enabled" }, "reasoning_effort": effort })
+/// ID real del modelo de cada tier.
+pub fn model_id(tier: Tier) -> String {
+    match tier {
+        Tier::Pro => deepseek_pro(),
+        Tier::Flash => deepseek_flash(),
+    }
 }
 
-fn deepseek_no_thinking() -> serde_json::Value {
-    serde_json::json!({ "thinking": { "type": "disabled" } })
+/// Nivel de razonamiento (`reasoning_effort`) que se le pide al modelo.
+///
+/// Los v4 exponen tres modos: sin thinking, `high` y `max`. Según los evals de
+/// DeepSeek, subir el esfuerzo mueve más la calidad que subir de tier — por eso
+/// es una palanca explícita y no un detalle escondido en un `json!` suelto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effort {
+    /// Sin thinking: respuesta inmediata.
+    Off,
+    High,
+    Max,
+}
+
+impl Effort {
+    /// El string que espera la API en `reasoning_effort` (y la etiqueta que
+    /// mostramos). `Off` no viaja como esfuerzo: apaga el thinking entero.
+    pub fn label(self) -> &'static str {
+        match self {
+            Effort::Off => "no-think",
+            Effort::High => "high",
+            Effort::Max => "max",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "off" | "none" | "no-think" | "nothink" | "disabled" => Some(Effort::Off),
+            "high" => Some(Effort::High),
+            "max" | "xhigh" => Some(Effort::Max),
+            _ => None,
+        }
+    }
+
+    fn params(self) -> serde_json::Value {
+        match self {
+            Effort::Off => serde_json::json!({ "thinking": { "type": "disabled" } }),
+            other => serde_json::json!({
+                "thinking": { "type": "enabled" },
+                "reasoning_effort": other.label(),
+            }),
+        }
+    }
+}
+
+/// Esfuerzo de razonamiento del modo `learn`. Override con `DPX_EFFORT_LEARN`
+/// (`off`, `high` o `max`): si tu plan no acepta `max`, el thinking se cae en
+/// silencio y learn deja de razonar sin avisar. `dpx bench --probe` te dice
+/// cuál acepta tu cuenta de verdad.
+fn learn_effort() -> Effort {
+    std::env::var("DPX_EFFORT_LEARN")
+        .ok()
+        .and_then(|v| Effort::parse(&v))
+        .unwrap_or(Effort::Max)
+}
+
+/// Tier del cerebro en `code`/`hack`. Override con `DPX_BRAIN_TIER`
+/// (`pro`|`flash`).
+///
+/// El default es `flash` desde el banco del 2026-08-04 (144 corridas, 12 casos,
+/// 3 repeticiones): contra `pro` sin thinking empató en aciertos (33/33 los
+/// dos), fue un 31% más rápido y costó 2.4x menos. El update V4-Flash-0731
+/// reorientó ese modelo a trabajo agéntico, que es exactamente lo que hace dpx.
+///
+/// Vuelve atrás con `DPX_BRAIN_TIER=pro` si en uso real notas degradación:
+/// el banco mide tareas de 3-5 rondas, y un turno autónomo largo es otra cosa.
+pub fn brain_tier() -> Tier {
+    std::env::var("DPX_BRAIN_TIER")
+        .ok()
+        .and_then(|v| Tier::parse(&v))
+        .unwrap_or(Tier::Flash)
+}
+
+/// Esfuerzo del cerebro en `code`/`hack`. Override con `DPX_BRAIN_EFFORT`
+/// (`off`|`high`|`max`). Por defecto sin thinking: son los modos de respuesta
+/// inmediata.
+fn brain_effort() -> Effort {
+    std::env::var("DPX_BRAIN_EFFORT")
+        .ok()
+        .and_then(|v| Effort::parse(&v))
+        .unwrap_or(Effort::Off)
 }
 
 fn build_deepseek(
     model_id: &str,
     preamble: &str,
     temperature: f64,
-    extra: serde_json::Value,
+    effort: Effort,
+    tools: Vec<ToolDefinition>,
 ) -> Result<Mentor> {
     let c = deepseek::Client::from_env()
         .map_err(|e| anyhow!("No pude iniciar DeepSeek (falta DEEPSEEK_API_KEY?): {e}"))?;
-    Ok(Mentor(agent(c.agent(model_id), preamble, temperature, Some(extra))))
+    Ok(Mentor {
+        agent: agent(c.agent(model_id), preamble, temperature, Some(effort.params())),
+        tools,
+    })
 }
 
 fn agent<M: rig_core::completion::CompletionModel>(
@@ -75,51 +174,16 @@ fn agent<M: rig_core::completion::CompletionModel>(
     builder.build()
 }
 
-pub struct Mentor(Agent<deepseek::CompletionModel>);
+/// Un agente ya configurado: modelo, preamble, temperatura, esfuerzo y —clave—
+/// el set de herramientas que se le ANUNCIA. Cada agente ve solo las suyas: al
+/// subagente de solo lectura no se le ofrecen `write_file` ni `run_command`, así
+/// no gasta rondas pidiendo cosas que el ejecutor le va a rechazar.
+pub struct Mentor {
+    agent: Agent<deepseek::CompletionModel>,
+    tools: Vec<ToolDefinition>,
+}
 
 const MAX_RETRIES: u32 = 4;
-
-macro_rules! stream_dispatch {
-    ($agent:expr, $input:expr, $history:expr, $on_delta:expr) => {{
-        let mut stream = $agent
-            .stream_completion($input, $history.clone())
-            .await
-            .map_err(|e| anyhow!("{e}"))?
-            .tools(crate::agent::tools::definitions())
-            .stream()
-            .await
-            .map_err(|e| anyhow!("{e}"))?;
-        let mut full = String::new();
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(StreamedAssistantContent::Text(t)) => {
-                    ($on_delta)(&t.text);
-                    full.push_str(&t.text);
-                }
-                Ok(_) => {}
-                Err(e) => return Err(anyhow!("{e}")),
-            }
-        }
-        let calls: Vec<ToolCall> = stream
-            .choice
-            .iter()
-            .filter_map(|c| match c {
-                AssistantContent::ToolCall(tc) => Some(tc.clone()),
-                _ => None,
-            })
-            .collect();
-        let usage = stream
-            .response
-            .as_ref()
-            .and_then(rig_core::completion::GetTokenUsage::token_usage);
-        $history.push(Message::user($input.to_string()));
-        $history.push(Message::Assistant {
-            id: None,
-            content: assistant_choice(&full, &calls),
-        });
-        Ok::<ChatReply, anyhow::Error>(ChatReply { text: full, calls, usage })
-    }};
-}
 
 fn assistant_choice(text: &str, calls: &[ToolCall]) -> OneOrMany<AssistantContent> {
     let mut items: Vec<AssistantContent> = Vec::new();
@@ -168,22 +232,68 @@ impl Mentor {
         history: &mut Vec<Message>,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<ChatReply> {
-        match self {
-            Mentor(a) => stream_dispatch!(a, input, history, on_delta),
+        let mut stream = self
+            .agent
+            .stream_completion(input, history.clone())
+            .await
+            .map_err(|e| anyhow!("{e}"))?
+            .tools(self.tools.clone())
+            .stream()
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+
+        let mut full = String::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(StreamedAssistantContent::Text(t)) => {
+                    on_delta(&t.text);
+                    full.push_str(&t.text);
+                }
+                Ok(_) => {}
+                Err(e) => return Err(anyhow!("{e}")),
+            }
         }
+
+        let calls: Vec<ToolCall> = stream
+            .choice
+            .iter()
+            .filter_map(|c| match c {
+                AssistantContent::ToolCall(tc) => Some(tc.clone()),
+                _ => None,
+            })
+            .collect();
+        let usage = stream
+            .response
+            .as_ref()
+            .and_then(rig_core::completion::GetTokenUsage::token_usage);
+
+        history.push(Message::user(input.to_string()));
+        history.push(Message::Assistant {
+            id: None,
+            content: assistant_choice(&full, &calls),
+        });
+        Ok(ChatReply { text: full, calls, usage })
     }
 
-    pub async fn prompt(&self, content: &str) -> Result<String> {
+    /// Un turno suelto sin historial, devolviendo TAMBIÉN lo que consumió.
+    ///
+    /// Va por el camino de streaming a propósito: `Agent::prompt` devuelve solo
+    /// el texto, así que todo lo que pasaba por ahí —compactaciones, `/recall`,
+    /// el clasificador de delegación— se gastaba sin aparecer en el ledger. Era
+    /// dinero invisible: poco (todo corre en flash), pero invisible.
+    pub async fn prompt_metered(
+        &self,
+        content: &str,
+    ) -> Result<(String, Option<rig_core::completion::Usage>)> {
         let mut attempt = 0;
         loop {
-            let r = match self {
-                Mentor(a) => a.prompt(content).await,
-            };
-            match r {
-                Ok(s) => return Ok(s),
+            // Historial local y descartable: este camino no conversa.
+            let mut history: Vec<Message> = Vec::new();
+            match self.stream_once(content, &mut history, &mut |_| {}).await {
+                Ok(reply) => return Ok((reply.text, reply.usage)),
                 Err(e) => match next_backoff(&e, &mut attempt) {
                     Some(delay) => tokio::time::sleep(delay).await,
-                    None => return Err(anyhow!("{e}")),
+                    None => return Err(e),
                 },
             }
         }
@@ -230,30 +340,72 @@ impl ModelRouter {
     /// verificar contra el dashboard que el flash es el correcto (si no, ajusta
     /// `DEEPSEEK_MODEL_FLASH`).
     pub fn model_ids(&self) -> (String, String) {
-        (deepseek_pro(), deepseek_flash())
+        (model_id(Tier::Pro), model_id(Tier::Flash))
     }
 
+    /// El cerebro de cada turno, con TODAS las herramientas. El tier sale de
+    /// [`brain_tier`]; quien contabilice su consumo debe usar ESE tier, no dar
+    /// `pro` por hecho (las tarifas se diferencian 3.1x).
     pub fn mentor(&self, preamble: &str, mode: Mode) -> Result<Mentor> {
-        let (temperature, extra) = match mode {
-            Mode::Code => (0.4, deepseek_no_thinking()),
-            Mode::Hack => (0.55, deepseek_no_thinking()),
-            Mode::Learn => (0.5, deepseek_thinking("max")),
+        let (temperature, effort) = match mode {
+            Mode::Code => (0.4, brain_effort()),
+            Mode::Hack => (0.55, brain_effort()),
+            Mode::Learn => (0.5, learn_effort()),
         };
-        build_deepseek(&deepseek_pro(), preamble, temperature, extra)
+        build_deepseek(
+            &model_id(brain_tier()),
+            preamble,
+            temperature,
+            effort,
+            crate::agent::tools::definitions(),
+        )
     }
 
+    /// Subagente de investigación: tier flash y SOLO las herramientas de lectura.
+    /// El preamble ya le dice que es de solo lectura; anunciarle además
+    /// `write_file`/`run_command`/`git_commit` solo lograba que las pidiera y
+    /// quemara rondas contra un ejecutor que las rechaza.
     pub fn subagent_mentor(&self, preamble: &str) -> Result<Mentor> {
-        build_deepseek(&deepseek_flash(), preamble, 0.2, deepseek_no_thinking())
+        build_deepseek(
+            &model_id(Tier::Flash),
+            preamble,
+            0.2,
+            Effort::Off,
+            crate::agent::tools::definitions_read_only(),
+        )
+    }
+
+    /// Agente a medida para el banco de pruebas (`dpx bench`): tier, esfuerzo y
+    /// herramientas explícitos, para comparar configuraciones manzana con manzana.
+    pub fn tuned_mentor(
+        &self,
+        tier: Tier,
+        effort: Effort,
+        preamble: &str,
+        temperature: f64,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<Mentor> {
+        build_deepseek(&model_id(tier), preamble, temperature, effort, tools)
     }
 
     pub async fn summarize(&self, preamble: &str, content: &str) -> Result<String> {
-        let mentor = build_deepseek(&deepseek_flash(), preamble, 0.2, deepseek_no_thinking())?;
-        mentor.prompt(content).await
+        // Resumir no usa herramientas: no se le anuncia ninguna.
+        let mentor = build_deepseek(&model_id(Tier::Flash), preamble, 0.2, Effort::Off, Vec::new())?;
+        Self::metered(&mentor, content).await
     }
 
     pub async fn flash_prompt(&self, preamble: &str, user: &str) -> Result<String> {
-        let mentor = build_deepseek(&deepseek_flash(), preamble, 0.0, deepseek_no_thinking())?;
-        mentor.prompt(user).await
+        let mentor = build_deepseek(&model_id(Tier::Flash), preamble, 0.0, Effort::Off, Vec::new())?;
+        Self::metered(&mentor, user).await
+    }
+
+    /// Lanza un turno de flash y lo APUNTA en el ledger antes de devolverlo.
+    /// Todo lo que consume dpx pasa por aquí o por el loop principal; si añades
+    /// un tercer camino, que también registre.
+    async fn metered(mentor: &Mentor, content: &str) -> Result<String> {
+        let (text, usage) = mentor.prompt_metered(content).await?;
+        crate::token::record(Tier::Flash, &usage);
+        Ok(text)
     }
 }
 

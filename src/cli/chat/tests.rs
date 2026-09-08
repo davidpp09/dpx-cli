@@ -9,6 +9,74 @@
         dir
     }
 
+    /// Un flag de autonomía escrito a mano no lo puede pisar nadie.
+    ///
+    /// Antes el onboarding sobrescribía el `--auto` de la CLI. En una dirección
+    /// eso rompía el trabajo desatendido (`--auto all` degradado a `off`, dpx
+    /// pidiendo permiso a nadie); en la otra es un problema de SEGURIDAD:
+    /// escribes `--auto off` y acabas con comandos ejecutándose sin preguntar.
+    #[test]
+    fn el_flag_explicito_de_auto_gana_al_wizard_y_al_config() {
+        // Lo explícito manda, diga lo que diga lo guardado.
+        assert_eq!(resolve_auto(Some(AutoMode::All), Some("off")), AutoMode::All);
+        assert_eq!(resolve_auto(Some(AutoMode::Off), Some("all")), AutoMode::Off);
+        assert_eq!(resolve_auto(Some(AutoMode::Reads), None), AutoMode::Reads);
+
+        // Sin flag, lo guardado rellena.
+        assert_eq!(resolve_auto(None, Some("writes")), AutoMode::Writes);
+        assert_eq!(resolve_auto(None, Some("all")), AutoMode::All);
+
+        // Sin nada —o con basura guardada— el default es el SEGURO.
+        assert_eq!(resolve_auto(None, None), AutoMode::Off);
+        assert_eq!(resolve_auto(None, Some("kaboom")), AutoMode::Off);
+    }
+
+    /// El predicado que decide qué corre en paralelo es crítico: meter aquí una
+    /// tool que muta o que pregunta rompería el turno de formas difíciles de
+    /// depurar (dos escrituras pisándose, dos confirmaciones en la misma línea).
+    #[test]
+    fn paralelo_solo_admite_lectura_sin_confirmacion() {
+        for t in [
+            "read_file",
+            "search_project",
+            "web_search",
+            "web_fetch",
+            "git_status",
+            "git_diff",
+            "git_log",
+        ] {
+            assert!(is_parallel_safe(t), "`{t}` debería poder ir en paralelo");
+        }
+        for t in [
+            "write_file",    // muta
+            "edit_file",     // muta
+            "delete_file",   // muta
+            "run_command",   // muta + confirma
+            "git_commit",    // muta + confirma
+            "spawn_agent",   // tiene su propio lote
+        ] {
+            assert!(!is_parallel_safe(t), "`{t}` NUNCA puede ir en paralelo");
+        }
+        // Un nombre inventado no se cuela por defecto.
+        assert!(!is_parallel_safe("rm_rf"));
+    }
+
+    /// Toda tool marcada como paralela tiene que existir de verdad: si se
+    /// renombra en `tools.rs` y aquí no, dejaría de paralelizarse en silencio.
+    #[test]
+    fn las_tools_paralelas_existen() {
+        let conocidas: Vec<String> = crate::agent::tools::definitions()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        for t in ["read_file", "search_project", "web_search", "web_fetch", "git_status"] {
+            assert!(
+                conocidas.iter().any(|n| n == t),
+                "`{t}` se marca como paralela pero ya no existe como tool"
+            );
+        }
+    }
+
     #[test]
     fn auto_delegacion_clasifica_research_modify_y_new() {
         // Investigación → delega a researcher (ahorra: lo hace el flash barato).
@@ -1044,9 +1112,9 @@
     #[test]
     fn subagent_consumo_se_suma_al_ledger() {
         crate::token::reset();
-        let before = crate::token::totals();
+        let before = crate::token::snapshot();
 
-        crate::token::record(&Some(rig_core::completion::Usage {
+        crate::token::record(crate::token::Tier::Flash, &Some(rig_core::completion::Usage {
             input_tokens: 500,
             output_tokens: 100,
             total_tokens: 600,

@@ -71,9 +71,11 @@ pub(crate) fn classify_delegation_fallback(input: &str) -> Option<&'static str> 
 
 pub(crate) async fn maybe_auto_delegate(input: &str, cwd: &Path) -> Option<String> {
     let role = classify_delegation(input).await?;
-    // `mapper` = tarea de CAMBIO sobre código existente → flash mapea el terreno
-    // antes de que pro edite (descarga la lectura del cerebro pro). `researcher`
-    // = pregunta → flash investiga y responde. Ambos van al cerebro BARATO.
+    // `mapper` = tarea de CAMBIO sobre código existente → un subagente mapea el
+    // terreno antes de editar. `researcher` = pregunta → investiga y responde.
+    // Los dos corren AISLADOS: lo que se ahorra es contexto del agente
+    // principal, no dinero (desde que el cerebro también es flash, el precio
+    // del subagente es el mismo).
     let (announce, task, label): (&str, String, &str) = if role == "mapper" {
         (
             "mapeando el código del cambio en flash…",
@@ -165,15 +167,23 @@ async fn run_subagent_inner(cwd: &Path, task: &str, verbose: bool) -> String {
                 break;
             }
         };
-        crate::token::record(&usage);
+        // El subagente corre en flash (`subagent_mentor`): tarifa flash, no pro.
+        crate::token::record(crate::token::Tier::Flash, &usage);
         if !text.trim().is_empty() {
             conclusion = text.clone();
         }
         if calls.is_empty() {
             break;
         }
-        for call in &calls {
-            let out = subagent_tool(cwd, call).await;
+        // Las herramientas del subagente son de SOLO LECTURA e independientes
+        // entre sí: no hay confirmaciones ni orden que respetar, así que se
+        // lanzan juntas. Quien de verdad se solapa es `web_search` (async);
+        // leer y buscar en disco son síncronas y no aceleran por esto. Los
+        // resultados se empujan en el orden de las llamadas: el protocolo exige
+        // un `tool_result` por cada `tool_call`, emparejado por id.
+        let results =
+            futures::future::join_all(calls.iter().map(|call| subagent_tool(cwd, call))).await;
+        for (call, out) in calls.iter().zip(results) {
             history.push(Message::tool_result(call.id.clone(), out));
         }
         to_send = if round + 1 >= SUBAGENT_MAX_ROUNDS {

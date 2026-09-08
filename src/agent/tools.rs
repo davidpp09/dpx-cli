@@ -27,9 +27,33 @@ pub enum DpxCall {
     GitCommit { message: String },
 }
 
-/// Las definiciones que se anuncian al modelo en cada petición.
+/// Las definiciones que se anuncian al agente principal en cada petición.
 pub fn definitions() -> Vec<ToolDefinition> {
     native_definitions()
+}
+
+/// Las herramientas que un agente de SOLO LECTURA puede ejecutar de verdad.
+///
+/// Debe coincidir con lo que el ejecutor del subagente sabe atender: cualquier
+/// otra se rechaza al ejecutarse, así que anunciarla solo invita al modelo a
+/// gastar una ronda pidiéndola. Si añades una tool de lectura al subagente,
+/// añádela también aquí (el test `read_only_es_subconjunto_ejecutable` vigila
+/// que la lista no se llene de nombres inventados).
+pub const READ_ONLY: [&str; 3] = ["read_file", "search_project", "web_search"];
+
+/// Solo las definiciones que puede usar un agente de lectura ([`READ_ONLY`]).
+pub fn definitions_read_only() -> Vec<ToolDefinition> {
+    definitions_named(&READ_ONLY)
+}
+
+/// Las definiciones con estos nombres, en el orden canónico. Un nombre que no
+/// exista se ignora en silencio: los tests son los que vigilan que las listas
+/// no se llenen de nombres inventados.
+pub fn definitions_named(names: &[&str]) -> Vec<ToolDefinition> {
+    native_definitions()
+        .into_iter()
+        .filter(|d| names.contains(&d.name.as_str()))
+        .collect()
 }
 
 /// Solo las definiciones nativas.
@@ -128,11 +152,12 @@ fn native_definitions() -> Vec<ToolDefinition> {
         ),
         def(
             "spawn_agent",
-            "Lanza un SUBAGENTE AISLADO para una tarea acotada de lectura/análisis. Corre en \
-             el cerebro BARATO y en su PROPIO contexto: solo te devuelve su conclusión en \
-             texto, sin llenar TU contexto con archivos largos (ahorra dinero y foco). \
-             DELEGA de forma agresiva. Es de SOLO LECTURA. Dale una tarea clara y autosuficiente \
-             (incluye las rutas que ya conozcas; no comparte tu conversación).",
+            "Lanza un SUBAGENTE AISLADO para una tarea acotada de lectura/análisis. Corre en su \
+             PROPIO contexto: solo te devuelve su conclusión en texto, sin llenar EL TUYO con \
+             archivos largos. Ese es su valor — te ahorra foco, no dinero. DELEGA de forma \
+             agresiva cuando haya que leer mucho para responder poco. Es de SOLO LECTURA. Dale \
+             una tarea clara y autosuficiente (incluye las rutas que ya conozcas; no comparte tu \
+             conversación).",
             json!({
                 "task": { "type": "string", "description": "La tarea, específica y autosuficiente, p.ej. 'Localiza dónde se valida el token JWT y resume el flujo'" },
             }),
@@ -231,6 +256,32 @@ mod tests {
             assert_eq!(d.parameters["type"], "object");
             assert!(d.parameters["required"].is_array());
         }
+    }
+
+    #[test]
+    fn read_only_es_subconjunto_ejecutable() {
+        let todas: Vec<String> = native_definitions().into_iter().map(|d| d.name).collect();
+        for name in READ_ONLY {
+            assert!(
+                todas.iter().any(|n| n == name),
+                "READ_ONLY nombra una tool inexistente: {name}"
+            );
+        }
+
+        let ro = definitions_read_only();
+        assert_eq!(ro.len(), READ_ONLY.len(), "el filtro no devolvió las esperadas");
+        // Lo importante: al agente de lectura NO se le anuncia nada que mute.
+        for d in &ro {
+            assert!(
+                !["write_file", "edit_file", "delete_file", "run_command", "git_commit"]
+                    .contains(&d.name.as_str()),
+                "una tool de escritura se coló en el set de solo lectura: {}",
+                d.name
+            );
+        }
+        // Y el set completo sí las trae (no rompimos al agente principal).
+        assert!(definitions().iter().any(|d| d.name == "write_file"));
+        assert!(definitions().len() > ro.len());
     }
 
     #[test]

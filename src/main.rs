@@ -7,6 +7,7 @@
 //! disponibles, con DeepSeek como cerebro.
 
 mod agent;
+mod bench;
 mod cli;
 mod config;
 mod focus;

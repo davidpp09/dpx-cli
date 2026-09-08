@@ -215,8 +215,27 @@ pub(crate) fn handle_command(
         },
 
         "context" => match store.prior_context() {
-            Some(c) => ui::print_markdown(skin, "⏺ memoria del proyecto", &c),
+            Some(c) => {
+                ui::print_markdown(skin, "⏺ memoria del proyecto", &c);
+                if store.history().is_some() {
+                    println!(
+                        "  {}",
+                        ui::dim("bitácora fechada de todas las sesiones en .dpx/history.md · /historial")
+                    );
+                }
+            }
             None => println!("{}", ui::dim("aún no hay memoria guardada para este proyecto")),
+        },
+
+        // La memoria viva se reescribe cada cierre y va perdiendo lo antiguo;
+        // el historial no se toca nunca. Cuando quieras saber qué pasó DE
+        // VERDAD hace diez sesiones, es aquí y no en /contexto.
+        "historial" | "history" => match store.history() {
+            Some(h) => ui::print_markdown(skin, "⏺ bitácora del proyecto", &h),
+            None => println!(
+                "{}",
+                ui::dim("aún no hay bitácora · se escribe una entrada al cerrar cada sesión")
+            ),
         },
 
         "progreso" | "progress" => {
@@ -316,13 +335,18 @@ pub(crate) fn handle_command(
 
         "undo" | "deshacer" => {
             match store.restore_undo(cwd) {
-                Ok(restored) if restored.is_empty() => {
+                Ok(undone) if undone.is_empty() => {
                     println!("{}", ui::dim("nada que deshacer · /undo revierte solo el último turno"));
                 }
-                Ok(restored) => {
-                    println!("{} {} archivo(s) restaurado(s):", ui::accent("⏺ undo ·"), restored.len());
-                    for path in &restored {
-                        println!("  {} {}", ui::dim("·"), path);
+                Ok(undone) => {
+                    println!("{} {} archivo(s):", ui::accent("⏺ undo ·"), undone.total());
+                    for path in &undone.restored {
+                        println!("  {} {path}", ui::dim("· restaurado"));
+                    }
+                    // Los creados se BORRAN: distinguirlo importa, porque es la
+                    // diferencia entre "volvió a como estaba" y "desapareció".
+                    for path in &undone.deleted {
+                        println!("  {} {path}", ui::dim("· borrado (lo había creado el turno)"));
                     }
                     println!("{}", ui::dim("  turno anterior revertido"));
                     let _ = store.clear_undo();

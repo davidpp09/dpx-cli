@@ -39,10 +39,23 @@ fn has_deepseek_key() -> bool {
     crate::agent::has_key()
 }
 
+/// Nivel de autonomía efectivo de la sesión.
+///
+/// El flag EXPLÍCITO de la CLI manda sobre todo lo demás. Si escribiste
+/// `--auto off`, dpx no puede acabar ejecutando comandos sin preguntarte
+/// porque el wizard o un `config.toml` viejo dijeran otra cosa — y si
+/// escribiste `--auto all`, no puede quedarse pidiendo permiso a nadie.
+/// `guardado` (config del proyecto o respuesta del onboarding) solo rellena
+/// cuando no dijiste nada.
+fn resolve_auto(cli: Option<AutoMode>, guardado: Option<&str>) -> AutoMode {
+    cli.or_else(|| guardado.and_then(AutoMode::parse))
+        .unwrap_or(AutoMode::Off)
+}
+
 pub async fn run(
     focus: Option<String>,
     mode: Mode,
-    auto: AutoMode,
+    cli_auto: Option<AutoMode>,
 ) -> Result<()> {
     let cwd = env::current_dir()?;
     // ¿Es la PRIMERA vez en este proyecto? (antes de crear `.dpx/`). De esto
@@ -59,13 +72,19 @@ pub async fn run(
     ui::install_ctrl_c_handler();
     ui::logo();
 
-    let mut auto = auto;
+    // Sin flag explícito, el nivel sale del config del proyecto.
+    let mut auto = resolve_auto(
+        cli_auto,
+        crate::config::ProjectConfig::load(&cwd).ok().map(|c| c.auto).as_deref(),
+    );
     // Primer arranque: pantalla de configuración (como `init`); el modo ya lo
     // fijó el subcomando. Adopta el focus/auto elegidos. Sin `.dpx` no hay
     // memoria previa, así que `prior = None` y no se corre `startup_flow`.
     let (focus_id, prior) = if fresh_project {
         let cfg = crate::cli::init::onboarding(&cwd, mode)?;
-        auto = AutoMode::parse(&cfg.auto).unwrap_or(auto);
+        // Igual que con `focus` en la línea de abajo: lo que pediste por CLI
+        // gana; el wizard solo rellena los huecos.
+        auto = resolve_auto(cli_auto, Some(&cfg.auto));
         (focus.or(cfg.focus), None)
     } else {
         // Con `--focus` explícito se respeta tal cual; sin él, el arranque
@@ -99,7 +118,25 @@ pub async fn run(
     }
     // Modelos reales que se envían a DeepSeek (verifica el flash vs tu dashboard).
     let (pro_id, flash_id) = router.model_ids();
-    println!("  {}", ui::dim(&format!("modelos · pro {pro_id} · subagentes {flash_id}")));
+    // Qué modelo lleva el turno se dice explícito: con `DPX_BRAIN_TIER=flash`
+    // el cerebro cambia y hay que poder verlo sin adivinar.
+    let cerebro = crate::agent::brain_tier();
+    let cerebro_id = if cerebro == crate::token::Tier::Pro { &pro_id } else { &flash_id };
+    println!(
+        "  {}",
+        ui::dim(&format!(
+            "modelos · cerebro {cerebro_id} ({}) · subagentes {flash_id}",
+            cerebro.label()
+        ))
+    );
+    println!(
+        "  {}",
+        ui::dim(&format!(
+            "contexto · {}k de {}k disponibles",
+            crate::agent::CONTEXT_BUDGET / 1000,
+            crate::agent::CONTEXT_WINDOW / 1000
+        ))
+    );
 
     // Cada modo arranca con su propio cartel: deja claro en cuál estás.
     ui::mode_banner(mode);
@@ -393,7 +430,7 @@ pub async fn run(
                 // se degrada al siguiente con API key y se reintenta UNA vez.
                 ui::clear_cancel();
                 // Snapshot del consumo ANTES del turno: el delta = lo que costó.
-                let tok_before = crate::token::totals();
+                let tok_before = crate::token::snapshot();
                 let outcome = run_turn(
                     &mentor,
                     &mut history,
@@ -879,8 +916,10 @@ async fn run_turn(
         full.push_str(&reply);
         full.push('\n');
 
-        // Consumo real de tokens de esta ronda (in/out/cached) al ledger de sesión.
-        crate::token::record(&usage);
+        // Consumo real de tokens de esta ronda (in/out/cached) al ledger de
+        // sesión, al tier del cerebro ACTIVO — no al que suponíamos: con
+        // `DPX_BRAIN_TIER=flash` dar `pro` por hecho inflaría la factura 3.1x.
+        crate::token::record(crate::agent::brain_tier(), &usage);
 
         // 1. Narración de esta ronda (sin bloques de acción) → Markdown progresivo.
         let body = crate::fs::strip_action_blocks(&reply);
@@ -951,11 +990,48 @@ async fn run_turn(
                     );
                     history.push(Message::tool_result(call.id.clone(), result));
                 }
+            } else if is_parallel_safe(&calls[i].function.name) {
+                // Lote de lecturas consecutivas: se anuncian todas y se lanzan
+                // a la vez. El solape REAL lo dan `web_search`/`web_fetch`, que
+                // son async de verdad: varias URLs en una ronda pasan de
+                // sumarse a costar lo que la más lenta. Las lecturas de disco y
+                // `search_project` son síncronas, así que ahí el lote no acelera
+                // (sí ordena la UI); hacerlas paralelas de verdad pediría
+                // `spawn_blocking`, y para leer archivos locales no compensa.
+                let batch_start = i;
+                while i < calls.len() && is_parallel_safe(&calls[i].function.name) {
+                    i += 1;
+                }
+                let batch = &calls[batch_start..i];
+                for call in batch {
+                    announce_read(call);
+                }
+                let results: Vec<Option<String>> =
+                    future::join_all(batch.iter().map(|c| exec_read(cwd, c))).await;
+                for (call, result) in batch.iter().zip(results) {
+                    let text = result.unwrap_or_else(|| {
+                        "[error interno: la tool de lectura no devolvió nada]".to_string()
+                    });
+                    let _ = store.checkpoint(
+                        "tool",
+                        &format!(
+                            "{}({}) → {}",
+                            call.function.name,
+                            truncate_log(&call.function.arguments.to_string(), 160),
+                            truncate_log(&text, 300)
+                        ),
+                    );
+                    history.push(Message::tool_result(call.id.clone(), text));
+                }
             } else {
                 let call = &calls[i];
+                let mut state = TurnState {
+                    writes: &mut s_writes,
+                    edits: &mut s_edits,
+                    failed_runs: &mut failed_runs,
+                };
                 let outcome =
-                    run_tool_call(cwd, store, &mut *ask, call, &mut s_writes, &mut s_edits, &mut failed_runs, auto)
-                        .await;
+                    run_tool_call(cwd, store, &mut *ask, call, &mut state, auto).await;
                 let (text, cancelled) = match outcome {
                     ToolOutcome::Done(t) => (t, false),
                     ToolOutcome::Cancelled(t) => (t, true),
@@ -1331,59 +1407,124 @@ enum ToolOutcome {
 /// escrituras y ediciones se acumulan en `writes`/`edits` para el auto-build.
 /// Async por `web_search` (HTTP).
 #[allow(clippy::too_many_arguments)] // args cohesivos del despacho de una tool call
+/// Herramientas de SOLO LECTURA y sin confirmación: no mutan nada, no dependen
+/// unas de otras y no le preguntan nada al usuario. Por eso un grupo de ellas
+/// puede correr EN PARALELO.
+///
+/// Todo lo demás va en serie, y no por pereza: dos escrituras al mismo archivo
+/// se pisarían, y dos confirmaciones compitiendo por la misma línea de terminal
+/// dejarían al usuario aprobando a ciegas. `spawn_agent` tiene su propio lote
+/// (más abajo) porque su salida es distinta.
+fn is_parallel_safe(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file"
+            | "search_project"
+            | "web_search"
+            | "web_fetch"
+            | "git_status"
+            | "git_diff"
+            | "git_log"
+    )
+}
+
+/// Anuncia en la UI lo que va a hacer una tool de lectura. Se llama para TODO
+/// el lote ANTES de lanzarlo, así el usuario ve la lista completa de una vez y
+/// las líneas no salen intercaladas al azar según quién termine antes.
+fn announce_read(call: &rig_core::message::ToolCall) {
+    match tools::parse_call(&call.function.name, &call.function.arguments) {
+        Ok(DpxCall::Read { path, .. }) => ui::action_read(&path),
+        Ok(DpxCall::Search { pattern }) => ui::tool_action("buscando", &pattern),
+        Ok(DpxCall::WebSearch { query }) => ui::tool_action("buscando en la web", &query),
+        Ok(DpxCall::WebFetch { url }) => ui::tool_action("leyendo la web", &url),
+        _ => {}
+    }
+}
+
+/// Ejecuta una tool de lectura, SIN anunciarla (de eso se encarga
+/// [`announce_read`]). `None` si la llamada no es de lectura.
+async fn exec_read(cwd: &Path, call: &rig_core::message::ToolCall) -> Option<String> {
+    let parsed = tools::parse_call(&call.function.name, &call.function.arguments).ok()?;
+    Some(match parsed {
+        DpxCall::Read { path, offset, limit } => {
+            match crate::fs::read_file_range(cwd, &path, offset, limit) {
+                Ok(c) => c,
+                Err(e) => format!("[no pude leer `{path}`: {e}]"),
+            }
+        }
+        DpxCall::Search { pattern } => crate::fs::search_in_project(cwd, &pattern),
+        DpxCall::WebSearch { query } => match crate::agent::search::web_search(&query).await {
+            Ok(results) => results,
+            Err(e) => format!("[web_search falló: {e}]"),
+        },
+        DpxCall::WebFetch { url } => match crate::agent::search::web_fetch(&url).await {
+            Ok(body) => body,
+            Err(e) => format!("[web_fetch falló: {e}]"),
+        },
+        DpxCall::GitStatus => run_git(cwd, &["status", "--short"]),
+        DpxCall::GitDiff { path } => {
+            let mut args = vec!["diff"];
+            if let Some(p) = &path {
+                args.push(p);
+            }
+            run_git(cwd, &args)
+        }
+        DpxCall::GitLog { n } => {
+            let count = format!("-{}", n.unwrap_or(10).min(50));
+            run_git(cwd, &["log", "--oneline", &count])
+        }
+        _ => return None,
+    })
+}
+
+/// Lo que las tools MUTANTES van acumulando a lo largo de un turno: los
+/// cambios aplicados (para disparar el auto-build) y los comandos que ya
+/// fallaron (para que el loop-guard corte la repetición).
+struct TurnState<'a> {
+    writes: &'a mut Vec<crate::fs::FileWrite>,
+    edits: &'a mut Vec<crate::fs::FileEdit>,
+    failed_runs: &'a mut Vec<String>,
+}
+
 async fn run_tool_call(
     cwd: &Path,
     store: &ProjectStore,
     ask: &mut dyn FnMut(&str) -> Option<String>,
     call: &rig_core::message::ToolCall,
-    writes: &mut Vec<crate::fs::FileWrite>,
-    edits: &mut Vec<crate::fs::FileEdit>,
-    failed_runs: &mut Vec<String>,
+    state: &mut TurnState<'_>,
     auto: crate::cli::AutoMode,
 ) -> ToolOutcome {
+    // Las de lectura comparten camino con el lote paralelo: una sola
+    // implementación, para que no se separen sin que nadie se dé cuenta.
+    if is_parallel_safe(&call.function.name) {
+        announce_read(call);
+        if let Some(out) = exec_read(cwd, call).await {
+            return ToolOutcome::Done(out);
+        }
+    }
     match tools::parse_call(&call.function.name, &call.function.arguments) {
         Err(e) => {
             println!("\n{}", ui::dim(&format!("⚠ tool call inválida: {e}")));
             ToolOutcome::Done(format!("[ERROR: {e}]"))
         }
-        Ok(DpxCall::Read { path, offset, limit }) => {
-            ui::action_read(&path);
-            ToolOutcome::Done(match crate::fs::read_file_range(cwd, &path, offset, limit) {
-                Ok(c) => c,
-                Err(e) => format!("[no pude leer `{path}`: {e}]"),
-            })
-        }
-        Ok(DpxCall::Search { pattern }) => {
-            ui::tool_action("buscando", &pattern);
-            ToolOutcome::Done(crate::fs::search_in_project(cwd, &pattern))
-        }
-        Ok(DpxCall::WebSearch { query }) => {
-            ui::tool_action("buscando en la web", &query);
-            ToolOutcome::Done(match crate::agent::search::web_search(&query).await {
-                Ok(results) => results,
-                Err(e) => format!("[web_search falló: {e}]"),
-            })
-        }
-        Ok(DpxCall::WebFetch { url }) => {
-            ui::tool_action("leyendo la web", &url);
-            ToolOutcome::Done(match crate::agent::search::web_fetch(&url).await {
-                Ok(body) => body,
-                Err(e) => format!("[web_fetch falló: {e}]"),
-            })
-        }
         Ok(DpxCall::Spawn { task, .. }) => {
             ToolOutcome::Done(run_subagent(cwd, &task).await)
         }
         Ok(DpxCall::Write { path, content }) => {
-            // Snapshot original antes de sobreescribir (para /undo).
+            // Snapshot original antes de sobreescribir (para /undo). Si el
+            // archivo NO existía, no hay original que guardar: se anota como
+            // creado para que /undo lo borre en vez de dejarlo ahí.
             let full = cwd.join(&path);
-            if full.exists()
-                && let Ok(orig) = std::fs::read(&full) {
+            if full.exists() {
+                if let Ok(orig) = std::fs::read(&full) {
                     let _ = store.save_undo_file(&path, &orig);
                 }
+            } else {
+                let _ = store.mark_created(&path);
+            }
             let w = crate::fs::FileWrite { path, content };
             let report = process_writes(cwd, std::slice::from_ref(&w), ask, auto);
-            writes.push(w);
+            state.writes.push(w);
             ToolOutcome::Done(report.notes.join("\n"))
         }
         Ok(DpxCall::Edit { path, search, replace }) => {
@@ -1395,7 +1536,7 @@ async fn run_tool_call(
                 }
             let e = crate::fs::FileEdit { path, search, replace };
             let report = process_edits(cwd, std::slice::from_ref(&e), ask, auto);
-            edits.push(e);
+            state.edits.push(e);
             ToolOutcome::Done(report.notes.join("\n"))
         }
         Ok(DpxCall::Delete { path }) => {
@@ -1408,17 +1549,16 @@ async fn run_tool_call(
             let report = process_deletes(cwd, &[path], ask);
             ToolOutcome::Done(report.notes.join("\n"))
         }
-        Ok(DpxCall::GitStatus) => ToolOutcome::Done(run_git(cwd, &["status", "--short"])),
-        Ok(DpxCall::GitDiff { path }) => {
-            let mut args = vec!["diff"];
-            if let Some(p) = &path {
-                args.push(p);
-            }
-            ToolOutcome::Done(run_git(cwd, &args))
-        }
-        Ok(DpxCall::GitLog { n }) => {
-            let count = format!("-{}", n.unwrap_or(10).min(50));
-            ToolOutcome::Done(run_git(cwd, &["log", "--oneline", &count]))
+        // Las de lectura (read/search/web/git de consulta) ya se atendieron
+        // arriba, en el camino compartido con el lote paralelo.
+        Ok(DpxCall::Read { .. })
+        | Ok(DpxCall::Search { .. })
+        | Ok(DpxCall::WebSearch { .. })
+        | Ok(DpxCall::WebFetch { .. })
+        | Ok(DpxCall::GitStatus)
+        | Ok(DpxCall::GitDiff { .. })
+        | Ok(DpxCall::GitLog { .. }) => {
+            ToolOutcome::Done("[error interno: tool de lectura sin atender]".to_string())
         }
         Ok(DpxCall::GitCommit { message }) => {
             // git_commit MUTA el repo: confirma (o auto). El mensaje se pasa
@@ -1439,7 +1579,7 @@ async fn run_tool_call(
             // Loop-guard: si este comando EXACTO ya falló este turno, NO lo
             // ejecutes otra vez — corta el bucle de reintentos idénticos (el
             // fallo nº1 en vivo: el agente repitiendo un `findstr` roto 10 veces).
-            if failed_runs.iter().any(|c| c == &command) {
+            if state.failed_runs.iter().any(|c| c == &command) {
                 return ToolOutcome::Done(format!(
                     "[dpx BLOQUEÓ `{command}`: ya lo intentaste este turno y FALLÓ. NO repitas el \
                      mismo comando. Prueba algo distinto (lee con read_file, busca con \
@@ -1459,7 +1599,7 @@ async fn run_tool_call(
                     let (out, cancelled, exit) = execute_run(cwd, &command);
                     // Recuerda los fallos para que el loop-guard corte la repetición.
                     if exit != Some(0) {
-                        failed_runs.push(command.clone());
+                        state.failed_runs.push(command.clone());
                     }
                     if cancelled { ToolOutcome::Cancelled(out) } else { ToolOutcome::Done(out) }
                 }
@@ -1617,6 +1757,10 @@ async fn close_session(
     match summary {
         Ok(md) => match store.write_context(&md) {
             Ok(()) => {
+                // La bitácora se escribe SOLO si el contexto se guardó bien: una
+                // entrada de una sesión cuya memoria se perdió confundiría más
+                // de lo que ayuda.
+                let _ = store.append_history(&session::extract_session_summary(&md));
                 println!(
                     "{} contexto guardado en .dpx/context.md · la próxima vez retomo desde aquí.",
                     ui::accent("⏺")

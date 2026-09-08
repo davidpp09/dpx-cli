@@ -25,7 +25,7 @@ use crate::ui;
 const COMMANDS: &[&str] = &[
     "actualizar", "auto", "ayuda", "cambios", "cerebro", "comité", "compactar",
     "contexto", "costo", "deshacer", "enfoque", "estado", "evaluar", "examen",
-    "habilidades", "limpiar", "modelos", "modo", "presupuesto", "progreso",
+    "habilidades", "historial", "limpiar", "modelos", "modo", "presupuesto", "progreso",
     "revisar", "salir", "temario",
 ];
 

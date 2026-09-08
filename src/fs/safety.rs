@@ -60,9 +60,98 @@ pub fn assess_command(cmd: &str) -> CommandRisk {
     worst
 }
 
+/// Comandos que solo ENVUELVEN a otro. Si no se saltan, tapan por completo lo
+/// que viene detrás: `xargs rm -rf` o `sudo rm -rf /` se clasificaban como
+/// seguros porque la primera palabra era inocente.
+const WRAPPERS: &[&str] = &[
+    "xargs", "sudo", "doas", "env", "nohup", "time", "timeout", "nice", "stdbuf",
+];
+
+/// Extensiones donde un `>` es casi seguro un accidente: redirigir sobre código
+/// fuente lo machaca entero, y por fuera de dpx (sin diff, sin snapshot de undo,
+/// sin green-gate). Redirigir a un `.log` o `.txt` es el uso normal y no alarma.
+const SOURCE_EXTS: &[&str] = &[
+    ".rs", ".java", ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".c", ".cpp", ".h", ".hpp",
+    ".rb", ".php", ".cs", ".kt", ".swift", ".toml", ".yaml", ".yml", ".sql", ".xml", ".gradle",
+];
+
+/// Quita los wrappers del principio para llegar al comando REAL.
+fn strip_wrappers<'a>(mut tokens: &'a [&'a str]) -> &'a [&'a str] {
+    // Acotado por la longitud: cada vuelta consume al menos un token.
+    while let Some(&first) = tokens.first() {
+        let bin = bin_name(first);
+        if !WRAPPERS.contains(&bin) {
+            break;
+        }
+        tokens = &tokens[1..];
+        // Y sus argumentos propios: flags (`-n1`), duraciones (`timeout 30`) y
+        // asignaciones (`env FOO=bar`).
+        while let Some(&t) = tokens.first() {
+            if t.starts_with('-') || t.chars().all(|c| c.is_ascii_digit()) || t.contains('=') {
+                tokens = &tokens[1..];
+            } else {
+                break;
+            }
+        }
+    }
+    tokens
+}
+
+/// El nombre del binario, sin ruta ni `.exe`.
+fn bin_name(token: &str) -> &str {
+    token.rsplit(['/', '\\']).next().unwrap_or(token).trim_end_matches(".exe")
+}
+
+/// ¿El token apunta a la RAÍZ del home del usuario? Borrar ahí no tiene ningún
+/// caso legítimo desde dpx. Un subdirectorio concreto sí lo tiene (limpiar una
+/// caché), así que solo cuenta la raíz.
+fn is_home_root(token: &str) -> bool {
+    let t = token.trim_matches('"').trim_matches('\'').trim_end_matches(['/', '\\']);
+    if matches!(t, "~" | "$home" | "%userprofile%" | "$env:userprofile") {
+        return true;
+    }
+    // `/home/omar` sí; `/home/omar/proyecto` no.
+    let unix: Vec<&str> = t.trim_start_matches('/').split('/').collect();
+    if (t.starts_with("/home/") || t.starts_with("/users/")) && unix.len() == 2 {
+        return true;
+    }
+    // `c:\users\omar` sí; más profundo no.
+    let win: Vec<&str> = t.split('\\').collect();
+    if win.len() == 3 && win[0].ends_with(':') && win[1] == "users" {
+        return true;
+    }
+    false
+}
+
+/// ¿El segmento redirige (`>`, no `>>`) sobre un archivo de código?
+fn truncates_source_file(tokens: &[&str]) -> bool {
+    let mut objetivo: Option<&str> = None;
+    for (i, t) in tokens.iter().enumerate() {
+        if *t == ">" {
+            objetivo = tokens.get(i + 1).copied();
+        } else if t.starts_with('>') && !t.starts_with(">>") {
+            objetivo = Some(&t[1..]);
+        }
+        if let Some(dest) = objetivo {
+            let dest = dest.trim_matches('"').trim_matches('\'');
+            if SOURCE_EXTS.iter().any(|e| dest.ends_with(e)) {
+                return true;
+            }
+            objetivo = None;
+        }
+    }
+    false
+}
+
 /// Riesgo de un segmento individual (un comando sin encadenar).
 fn assess_segment(segment: &str) -> CommandRisk {
-    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    let raw: Vec<&str> = segment.split_whitespace().collect();
+    if truncates_source_file(&raw) {
+        return CommandRisk::Dangerous {
+            reason: "sobrescribe un archivo de código por fuera de dpx (sin diff ni undo)",
+        };
+    }
+    let tokens = strip_wrappers(&raw).to_vec();
     let Some(&first) = tokens.first() else {
         return CommandRisk::Safe;
     };
@@ -103,6 +192,9 @@ fn assess_segment(segment: &str) -> CommandRisk {
             PROTECTED_ROOTS.iter().any(|root| t.starts_with(root))
         }) {
             return CommandRisk::Forbidden { reason: "borra archivos del sistema operativo" };
+        }
+        if tokens.iter().skip(1).any(|t| is_home_root(t)) {
+            return CommandRisk::Forbidden { reason: "borra el home entero del usuario" };
         }
         let recursive_or_forced = tokens
             .iter()
@@ -218,6 +310,16 @@ fn split_segments(cmd: &str) -> Vec<&str> {
                 start = i;
                 continue;
             }
+            // Pipe simple: cada etapa se evalúa por separado. Antes no partía, y
+            // eso dejaba invisible el destructivo del final (`… | xargs rm -rf`).
+            // El chequeo de pipe-a-intérprete sigue mirando la cadena COMPLETA,
+            // así que `curl x | sh` se sigue detectando igual.
+            '|' if !in_single && !in_double => {
+                segments.push(&cmd[start..i]);
+                i += 1;
+                start = i;
+                continue;
+            }
             ';' if !in_single && !in_double => {
                 segments.push(&cmd[start..i]);
                 i += 1;
@@ -318,6 +420,54 @@ mod tests {
         assert!(dangerous("npm publish"));
         assert!(dangerous("cargo publish"));
         assert!(safe("npm run build"));
+    }
+
+    /// Un destructivo escondido detrás de un wrapper seguía siendo "seguro":
+    /// `assess_segment` miraba solo la primera palabra, así que `xargs` o
+    /// `sudo` lo tapaban entero. Es un patrón que un modelo escribe sin malicia.
+    #[test]
+    fn los_wrappers_no_esconden_lo_destructivo() {
+        assert!(dangerous("find . -name '*.tmp' | xargs rm -f"));
+        assert!(dangerous("ls | xargs -n1 rm -rf"));
+        assert!(dangerous("sudo rm -rf build"));
+        assert!(forbidden("sudo rm -rf /usr/lib"));
+        assert!(dangerous("nohup git reset --hard HEAD~1"));
+        assert!(dangerous("time git push --force"));
+        assert!(forbidden("sudo shutdown -h now"));
+        // El wrapper por sí solo no alarma.
+        assert!(safe("xargs --help"));
+        assert!(safe("sudo -v"));
+        assert!(safe("find . -name '*.rs' | xargs wc -l"));
+    }
+
+    /// `> archivo.rs` machaca el archivo ENTERO por fuera de dpx: sin diff, sin
+    /// snapshot de undo, sin green-gate. Es una escritura que se salta todas las
+    /// puertas de dpx precisamente porque va por la shell.
+    #[test]
+    fn redirigir_sobre_codigo_fuente_es_peligroso() {
+        assert!(dangerous("echo '' > src/main.rs"));
+        assert!(dangerous("cat plantilla > Cargo.toml"));
+        assert!(dangerous("printf '' > app/models.py"));
+        // Append no destruye: no alarma.
+        assert!(safe("echo hola >> notas.log"));
+        // Redirigir salida a un log o a la nada es el uso normal.
+        assert!(safe("cargo build > build.log"));
+        assert!(safe("cargo test > /dev/null"));
+        assert!(safe("mvn -q compile > salida.txt"));
+    }
+
+    /// Borrar el home del usuario no es "peligroso": no hay ningún caso en que
+    /// dpx deba hacerlo.
+    #[test]
+    fn borrar_el_home_esta_prohibido() {
+        assert!(forbidden("rm -rf ~"));
+        assert!(forbidden("rm -rf ~/"));
+        assert!(forbidden("rm -rf $HOME"));
+        assert!(forbidden("rm -rf /home/omar"));
+        assert!(forbidden("rm -rf C:\\Users\\Omar"));
+        // Un subdirectorio concreto del home sigue siendo solo peligroso: hay
+        // casos legítimos (limpiar una caché) y bloquearlos sería pasarse.
+        assert!(dangerous("rm -rf ~/proyecto/target"));
     }
 
     #[test]

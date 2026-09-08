@@ -6,7 +6,7 @@
   [![Rust](https://img.shields.io/badge/Rust-2024-orange.svg?logo=rust)](https://www.rust-lang.org)
   [![Versión](https://img.shields.io/badge/versión-0.4.0-blue.svg)](#)
   [![Licencia MIT](https://img.shields.io/badge/licencia-MIT-green.svg)](#licencia)
-  [![Tests](https://img.shields.io/badge/tests-150%20✓-brightgreen.svg)](#desarrollo)
+  [![Tests](https://img.shields.io/badge/tests-187%20✓-brightgreen.svg)](#desarrollo)
 </div>
 
 ---
@@ -115,12 +115,12 @@ El tutor explica el *porqué*, te deja escribir el código, te interroga (`/exam
 **Arreglar un bug** — `dpx code`
 > `arregla el error de validación en UserService`
 
-Un subagente flash mapea el código relevante, luego el cerebro pro edita, compila y corrige hasta dejarlo en verde (green-gate).
+Un subagente mapea el código relevante en su propio contexto, luego el cerebro edita, compila y corrige hasta dejarlo en verde (green-gate).
 
 **Entender un codebase ajeno** — `dpx code`
 > `¿dónde se valida el token JWT y cómo fluye?`
 
-Delega la investigación al tier flash (barato) y te resume con archivos y líneas concretas.
+Delega la investigación a un subagente aislado —así los archivos largos no llenan tu conversación— y te resume con archivos y líneas concretas.
 
 **Prototipo rápido** — `dpx hack --focus node`
 > `un endpoint que reciba un JSON y lo guarde en memoria`
@@ -145,12 +145,17 @@ dpx usa **solo DeepSeek** con dos tiers, repartidos por el Model Router:
 
 | Tier | Modelo | Para qué |
 |:---|:---|:---|
-| **pro** | `deepseek-v4-pro` | Cerebro principal de cada turno. En learn usa `reasoning_effort: max`; en code/hack responde sin thinking (rápido). |
-| **flash** | `deepseek-v4-flash` | ~12× más barato. Subagentes (investigación + mapeo de cambios), clasificación de tareas, comité y resúmenes. |
+| **flash** | `deepseek-v4-flash` | **Cerebro por defecto** en code/hack (sin thinking, respuesta inmediata). También subagentes, clasificación, comité y resúmenes. |
+| **pro** | `deepseek-v4-pro` | Cerebro del modo learn, con `reasoning_effort: max`. Disponible en code/hack con `DPX_BRAIN_TIER=pro`. |
+
+> [!NOTE]
+> El cerebro de code/hack pasó de `pro` a `flash` el 2026-08-04, con datos de `dpx bench`: 144 corridas sobre 12 casos, 3 repeticiones. Ambos acertaron 33/33; flash fue **31% más rápido y 2.4× más barato**. El update V4-Flash-0731 reorientó ese modelo a trabajo agéntico, que es justo lo que hace dpx.
+>
+> El thinking quedó fuera del default porque **no compró nada**: con `reasoning_effort` alto los dos tiers fueron más lentos y más caros sin acertar más. Súbelo con `DPX_BRAIN_EFFORT=high` si tu trabajo es más de razonar que de navegar código.
 
 Los IDs de modelo se pueden sobreescribir con las variables `DEEPSEEK_MODEL_PRO` y `DEEPSEEK_MODEL_FLASH` (por si tu plan usa otros nombres). dpx muestra los IDs activos al arrancar.
 
-Ventana de contexto: 128k tokens. dpx **compacta automáticamente** el historial al acercarse al límite, aligerando resultados de herramienta antiguos.
+Ventana de contexto: los modelos v4 aceptan **1M tokens** (384k de salida máxima); dpx opera con un presupuesto de **400k** para que el prefill de cada turno siga siendo rápido en la terminal. dpx **compacta automáticamente** el historial al acercarse a ese presupuesto, aligerando resultados de herramienta antiguos.
 
 ---
 
@@ -180,13 +185,26 @@ dpx guarda todo el estado del proyecto en `.dpx/` (añádelo al `.gitignore`):
 |:---|:---|
 | `config.toml` | Focus, modo y nivel de autonomía. Se **actualiza al cerrar** para que `dpx` (sin subcomando) retome el último que usaste. |
 | `context.md` | Memoria viva: estado del proyecto, aprendizaje y próximos pasos. Se regenera al cerrar con `/salir`. |
+| `context.md.bak` | La versión anterior de la memoria. Red de seguridad, ver abajo. |
+| `history.md` | **Bitácora append-only**, una entrada fechada por sesión. Nunca se reescribe. |
 | `sessions/*.jsonl` | Transcripción de cada sesión (un turn por línea JSON). Se escribe en caliente — un cierre brusco no pierde lo conversado. |
 | `skills.md` | Progreso de aprendizaje del usuario por tema (learn). |
 | `streak.md` | Racha de sesiones consecutivas de aprendizaje (learn). |
 | `undo/` | Snapshot de archivos del último turno. `/undo` los restaura. Se limpia al empezar cada turno nuevo. |
+| `undo-created` | Archivos que el turno **creó**. `/undo` los borra en vez de restaurarlos. |
 | `plan.md` | Plan pendiente de la sesión anterior. Se muestra al arrancar y se inyecta en el contexto. |
 | `committee.md` | Síntesis del último comité de hack. |
 | `allowed_commands` | Comandos que el usuario marcó como "permitir siempre" en este proyecto (uno por línea). |
+
+### Por qué hay dos memorias
+
+`context.md` se **regenera** en cada cierre resumiendo el resumen anterior, así que se degrada como el teléfono descompuesto: lo de hace diez sesiones acaba comprimido hasta desaparecer, o distorsionado. Por eso existe `history.md`, que **no se reescribe nunca**: es la columna vertebral con fechas contra la que siempre puedes contrastar qué pasó y cuándo. Míralo con `/historial`.
+
+Escribir la memoria es la operación más delicada de dpx, porque es lo único que no se puede reconstruir leyendo el código. Tiene tres garantías:
+
+1. Un resumen **vacío se rechaza**: que el modelo devuelva basura no puede costarte meses de contexto.
+2. La versión anterior pasa a `context.md.bak` **antes** de tocar nada.
+3. La escritura es **atómica** (fichero temporal + rename): un corte a mitad deja el archivo viejo intacto, nunca uno truncado. Y si al arrancar el archivo vivo está vacío o ilegible, dpx tira del respaldo solo.
 
 ---
 
@@ -212,7 +230,7 @@ Las puertas de seguridad se mantienen **siempre**, incluso en `all`:
 | `delete_file`, `git_commit` | Sí |
 
 > [!TIP]
-> Con `/undo` reviertes todos los archivos del último turno a su estado original.
+> Con `/undo` reviertes el último turno completo: los archivos modificados vuelven a su estado original y los que el turno creó se borran.
 
 ---
 
@@ -225,15 +243,16 @@ Los nombres son en **español**; los ingleses funcionan como alias. `/ayuda` mue
 | `/ayuda` | todos | Lista los comandos del modo activo |
 | `/estado` | todos | Config, cerebro, tokens, turno |
 | `/modelos` | todos | Info del cerebro DeepSeek y su key |
-| `/costo` | todos | Tokens consumidos + % de caché + costo estimado |
+| `/costo` | todos | Tokens consumidos + % de caché + costo estimado, desglosado pro vs flash |
 | `/presupuesto [N]` | todos | Tope de tokens (ej. `/presupuesto 100k`; `/presupuesto off` lo quita) |
 | `/contexto` | todos | Memoria guardada del proyecto (`context.md`) |
+| `/historial` | todos | Bitácora fechada de todas las sesiones (`history.md`), sin reescribir |
 | `/enfoque [id]` | todos | Cambia de stack (sin id: lista el catálogo) |
 | `/modo [code\|hack\|learn]` | todos | Cambia de modo y de color de acento |
 | `/cerebro` | todos | Info del modelo activo y su consumo |
 | `/limpiar` | todos | Reinicia el historial de la conversación |
 | `/compactar` | todos | Resume el historial para liberar contexto |
-| `/undo` | todos | Restaura archivos del último turno desde `.dpx/undo/` |
+| `/undo` | todos | Revierte el último turno: restaura lo modificado y **borra lo que se creó** |
 | `/actualizar` | todos | Recompila e instala dpx desde el repo activo |
 | `/salir` | todos | Termina la sesión y guarda `context.md` |
 | `/auto [off\|reads\|writes\|all]` | code · hack | Nivel de autonomía |
@@ -424,15 +443,58 @@ auto  = "off"       # off | reads | writes | all
 
 Los flags de CLI (`--focus`, `--auto`) pisan estos defaults; los comandos del REPL los cambian en caliente.
 
+### Variables de entorno
+
+| Variable | Qué hace |
+|:---|:---|
+| `DEEPSEEK_API_KEY` | La key. Sin ella dpx arranca pero no responde. |
+| `DEEPSEEK_MODEL_PRO` / `DEEPSEEK_MODEL_FLASH` | IDs de modelo, por si tu plan usa otros nombres. |
+| `DPX_BRAIN_TIER` | `flash` (default) o `pro`: qué modelo lleva el turno en code/hack. |
+| `DPX_BRAIN_EFFORT` | `off` (default), `high` o `max`: cuánto razona el cerebro en code/hack. |
+| `DPX_EFFORT_LEARN` | Igual, para el modo learn (default `max`). |
+
+Las tres `DPX_*` existen para probar configuraciones **en uso real** sin recompilar, que es la única prueba que de verdad cuenta. El medidor de costo sigue al tier activo, así que `/costo` no miente aunque cambies el cerebro.
+
 ---
 
 ## Desarrollo
 
 ```bash
 cargo check                                    # compilación rápida
-cargo test                                     # 150 tests verdes
+cargo test                                     # 187 tests verdes
 cargo clippy --all-targets -- -D warnings      # linter estricto (cero warnings)
 ```
+
+### Banco de pruebas A/B (`dpx bench`)
+
+Para decidir con datos —no con intuición— qué configuración de modelo conviene, `dpx bench` corre los mismos casos con distintos arms y compara aciertos, latencia, rondas y **costo real**. Los transcripts quedan en `eval/` (ignorado por git).
+
+Hay dos familias de casos:
+
+- **Lectura** — corren sobre el propio repo de dpx y se puntúan por lo que el modelo *responde*. Solo lectura: no pueden escribir ni ejecutar comandos.
+- **Escritura** — cada corrida recibe su propio **sandbox desechable** sembrado con un proyecto mínimo, y se puntúa por lo que el modelo *deja en disco*, no por lo que dice haber hecho. Tu repo nunca se toca: la raíz del agente es el sandbox y `safe_target` impide salir de él. El sandbox se conserva junto al transcript para poder comparar el código que produjo cada arm.
+
+Los checks de escritura incluyen aserciones de *ausencia* (`Absent`), que es lo que caza el fallo caro de un agente que edita: el rename a medias y el archivo que quedó truncado al reescribirlo.
+
+Los casos de escritura duros existen para separar arms, no para que todos aprueben:
+
+| caso | la trampa |
+|:---|:---|
+| `edit-sin-ruta` | El prompt dice **qué**, no **dónde**; y hay un señuelo (otro timeout) que castiga al que cambia el primero que encuentra. |
+| `rename-con-trampa` | `calc_total` junto a `calc_total_neto`: un reemplazo literal convierte la segunda en `total_con_iva_neto` y rompe el proyecto. |
+| `archivo-grande` | 2800 líneas — más de lo que `read_file` devuelve de una vez. Quien reescriba el archivo entero desde memoria pierde el 90% del código. |
+
+```bash
+dpx bench                       # el default de hoy (pro sin thinking) vs flash con reasoning alto
+dpx bench --arms all            # el 2x2 completo: tier × esfuerzo
+dpx bench --case tools          # solo los casos cuyo nombre contenga "tools"
+dpx bench --repeat 3            # tres pasadas, para ver la varianza
+dpx bench --probe               # solo: ¿qué reasoning_effort acepta tu cuenta de verdad?
+```
+
+`--probe` existe porque un `reasoning_effort` inválido no siempre da error: la API puede aceptarlo e ignorarlo, y tu modo `learn` se quedaría sin pensar sin avisar. La sonda manda el mismo problema con y sin thinking y compara los tokens de salida, que es la señal que no depende de que el cliente mapee `reasoning_tokens`.
+
+Si tu plan no acepta `max`, `DPX_EFFORT_LEARN=high` cambia el esfuerzo del modo learn sin recompilar.
 
 Dentro del propio repo de dpx, **`/actualizar`** recompila e instala el binario sin cerrar la sesión. En Windows renombra el `.exe` en uso antes de instalar para evitar el `os error 5` (archivo bloqueado).
 

@@ -1146,6 +1146,7 @@ pub fn print_help(mode: crate::focus::Mode) {
         ("/compactar", "resume la conversación para liberar contexto", &[]),
         ("/comité <idea>", "convoca al comité (4 roles) a evaluar tu idea", &[Mode::Hack]),
         ("/contexto", "muestra la memoria guardada del proyecto", &[]),
+        ("/historial", "bitácora fechada de todas las sesiones (no se reescribe)", &[]),
         ("/enfoque [id]", "cambia de enfoque (sin id: lista los disponibles)", &[]),
         ("/modo [code|hack|learn]", "cambia de modo (hace · rápido · enseña)", &[]),
         ("/progreso", "tu progreso de aprendizaje: nivel por tema y qué repasar", &[Mode::Learn]),

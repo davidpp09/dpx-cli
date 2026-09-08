@@ -85,6 +85,28 @@ enum Commands {
     Focus,
     /// Asistente de inicializacion: crea .dpx/config.toml.
     Init,
+    /// Banco de pruebas A/B del harness: compara modelo y esfuerzo de
+    /// razonamiento sobre los mismos casos. Solo lectura; escribe en eval/.
+    Bench(BenchArgs),
+}
+
+#[derive(clap::Args)]
+struct BenchArgs {
+    /// Configuraciones a comparar, separadas por coma, o "all" para el 2x2.
+    #[arg(long, default_value = "pro-nothink,flash-high")]
+    arms: String,
+
+    /// Corre solo los casos cuyo nombre contenga este texto.
+    #[arg(long)]
+    case: Option<String>,
+
+    /// Repeticiones por caso: mas de una deja ver la varianza.
+    #[arg(long, default_value_t = 1)]
+    repeat: usize,
+
+    /// Solo sondea que valores de reasoning_effort acepta la API, sin correr la suite.
+    #[arg(long)]
+    probe: bool,
 }
 
 impl Cli {
@@ -94,19 +116,19 @@ impl Cli {
 
         let default_mode = Mode::parse(&proj_cfg.mode).unwrap_or(Mode::Code);
 
-        let resolve_auto = |cli: Option<String>| {
-            cli.and_then(|s| AutoMode::parse(&s))
-                .unwrap_or_else(|| AutoMode::parse(&proj_cfg.auto).unwrap_or(AutoMode::Off))
-        };
+        // Solo lo que el usuario escribió EXPLÍCITAMENTE. `None` significa "no
+        // dije nada": el fallback (config del proyecto u onboarding) lo resuelve
+        // la sesión, que es la única que sabe si hubo wizard de por medio.
+        let cli_auto = |cli: Option<String>| cli.and_then(|s| AutoMode::parse(&s));
         let resolve_focus = |cli: Option<String>| cli.or_else(|| proj_cfg.focus.clone());
 
         let launch = |mode: Mode, a: ModeArgs| {
-            chat::run(resolve_focus(a.focus), mode, resolve_auto(a.auto))
+            chat::run(resolve_focus(a.focus), mode, cli_auto(a.auto))
         };
 
         match self.command {
             None => {
-                chat::run(resolve_focus(None), default_mode, resolve_auto(None)).await
+                chat::run(resolve_focus(None), default_mode, None).await
             }
             Some(Commands::Code(a)) => launch(Mode::Code, a).await,
             Some(Commands::Hack(a)) => launch(Mode::Hack, a).await,
@@ -116,6 +138,9 @@ impl Cli {
                 Ok(())
             }
             Some(Commands::Init) => init::run(&cwd),
+            Some(Commands::Bench(a)) => {
+                crate::bench::run(&cwd, &a.arms, a.case.as_deref(), a.repeat, a.probe).await
+            }
         }
     }
 }
